@@ -9,6 +9,8 @@ public static class GameSlowMotionCommandBuilder
 {
     public const string EnableCheatsCommand = "sv_cheats 1";
 
+    public const string DisableCheatsCommand = "sv_cheats 0";
+
     public const string RestoreTimescaleCommand = "host_timescale 1";
 
     public const string RestoreFramerateCommand = "host_framerate 0";
@@ -48,6 +50,7 @@ public static class GameSlowMotionCommandBuilder
         {
             RestoreTimescaleCommand,
             RestoreFramerateCommand,
+            DisableCheatsCommand,
         };
 
         if (hideHud)
