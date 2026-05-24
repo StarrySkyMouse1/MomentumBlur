@@ -55,4 +55,4 @@ dotnet run --project MomentumBlur.csproj
 
 ## 说明
 
-这个文件放在源码目录内，方便只打开 `MomentumBlur/` 文件夹时仍能看到说明。GitHub 仓库首页使用根目录的 `README.md` 渲染项目介绍。
+公开仓库根目录保留这个 `README.md`，让 GitHub 仓库首页可以直接显示项目说明。源码主体仍然放在 `MomentumBlur/` 文件夹中；开发文档、私有工程历史和本地打包脚本不会发布到这里。
