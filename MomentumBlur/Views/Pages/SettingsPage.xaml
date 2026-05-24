@@ -1,0 +1,237 @@
+<Page x:Class="mmod_record.Views.Pages.SettingsPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+      xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      xmlns:controls="clr-namespace:mmod_record.Views.Controls"
+      Title="设置"
+      ui:Design.Background="{DynamicResource ApplicationBackgroundBrush}"
+      ui:Design.Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+      Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+      mc:Ignorable="d">
+    <StackPanel Margin="0,0,0,24">
+        <Border Margin="0,16,0,0"
+                Background="{ui:ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ui:ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8"
+                Padding="28">
+            <StackPanel>
+                <ui:TextBlock Text="设置"
+                              FontTypography="Title"
+                              Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                              Margin="0,0,0,8"/>
+                <controls:SettingsGroup Title="帧混合"
+                                        Description="源视频帧率用于计算超采样 N；须与素材实际帧率一致。">
+                    <StackPanel>
+                        <controls:SettingSection Title="源视频帧率"
+                                                 Description="须与 OBS 录制一致；可选 60 的倍数（60–480）。">
+                            <StackPanel Orientation="Horizontal">
+                                <ComboBox MinWidth="120"
+                                          ItemsSource="{Binding ObsCaptureFramerateOptions}"
+                                          SelectedItem="{Binding ObsCaptureFramerate}"/>
+                                <ui:TextBlock Margin="16,0,0,0"
+                                              VerticalAlignment="Center"
+                                              FontTypography="BodyStrong"
+                                              Text="{Binding ObsCaptureFramerate, StringFormat=当前：{0} fps}"/>
+                            </StackPanel>
+                        </controls:SettingSection>
+                        <controls:SettingSection Title="超采样倍数 N">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="120"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <ui:TextBox Grid.Column="0"
+                                            Text="{Binding SupersamplingMultiplier, UpdateSourceTrigger=PropertyChanged}"/>
+                                <StackPanel Grid.Column="1" Margin="12,0,0,0">
+                                    <ui:TextBlock Text="{Binding SupersamplingHint}"
+                                                   FontTypography="Caption"
+                                                   TextWrapping="Wrap"
+                                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                                </StackPanel>
+                            </Grid>
+                        </controls:SettingSection>
+                        <controls:SettingSection Title="游戏慢放指令">
+                            <StackPanel>
+                                <CheckBox Content="隐藏 UI"
+                                          IsChecked="{Binding HideHudInGameCommands}"
+                                          ToolTip="勾选后慢放/恢复指令包含 cl_drawhud 0 与 cl_drawhud 1；默认不勾选。"
+                                          Margin="0,0,0,12"/>
+                                <ui:TextBlock Text="录制前执行指令"
+                                               FontTypography="Caption"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                               Margin="0,0,0,4"/>
+                                <Grid Margin="0,0,0,10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ui:TextBox Grid.Column="0" Margin="0,0,8,0"
+                                                IsReadOnly="True"
+                                                AcceptsReturn="True"
+                                                TextWrapping="Wrap"
+                                                MinHeight="72"
+                                                VerticalScrollBarVisibility="Auto"
+                                                FontFamily="Consolas, Cascadia Mono, Microsoft YaHei UI"
+                                                Text="{Binding GameCommandEnableSlowMotionBlockText, Mode=OneWay}"/>
+                                    <ui:Button Grid.Column="1" Content="复制"
+                                               VerticalAlignment="Top"
+                                               Command="{Binding CopyGameCommandCommand}"
+                                               CommandParameter="{Binding GameCommandEnableSlowMotionBlockText}"/>
+                                </Grid>
+                                <ui:TextBlock Text="录制结束后恢复"
+                                               FontTypography="Caption"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                               Margin="0,0,0,4"/>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ui:TextBox Grid.Column="0" Margin="0,0,8,0"
+                                                IsReadOnly="True"
+                                                AcceptsReturn="True"
+                                                TextWrapping="Wrap"
+                                                MinHeight="48"
+                                                FontFamily="Consolas, Cascadia Mono, Microsoft YaHei UI"
+                                                Text="{Binding GameCommandRestoreBlockText, Mode=OneWay}"/>
+                                    <ui:Button Grid.Column="1" Content="复制"
+                                               VerticalAlignment="Top"
+                                               Command="{Binding CopyGameCommandCommand}"
+                                               CommandParameter="{Binding GameCommandRestoreBlockText}"/>
+                                </Grid>
+                            </StackPanel>
+                        </controls:SettingSection>
+                        <controls:SettingSection Title="批量并行路数"
+                                                 Description="同时处理的视频数量；GPU 后端受显存与显卡调度限制。">
+                            <ComboBox Width="120"
+                                      HorizontalAlignment="Left"
+                                      ItemsSource="{Binding MaxParallelGpuJobsOptions}"
+                                      SelectedItem="{Binding MaxParallelGpuJobs, Mode=TwoWay}"/>
+                        </controls:SettingSection>
+                    </StackPanel>
+                </controls:SettingsGroup>
+
+                <controls:SettingsGroup Title="输出配置">
+                    <StackPanel>
+                        <controls:SettingSection Title="成片输出目录">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <ui:TextBox Grid.Column="0" Margin="0,0,8,0"
+                                            Text="{Binding VideoOutputDirectory, UpdateSourceTrigger=PropertyChanged}"
+                                            PlaceholderText="选择文件夹"/>
+                                <ui:Button Grid.Column="1" Content="浏览…"
+                                           Command="{Binding BrowseVideoOutputCommand}"/>
+                            </Grid>
+                        </controls:SettingSection>
+                    </StackPanel>
+                </controls:SettingsGroup>
+
+                <controls:SettingsGroup Title="FFmpeg 编码"
+                                        Description="离线合成与 60fps 成片编码。">
+                    <StackPanel>
+                        <controls:SettingSection Title="FFmpeg">
+                            <StackPanel>
+                                <Grid Margin="0,0,0,10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ui:TextBox Grid.Column="0" Margin="0,0,8,0"
+                                                Text="{Binding FfmpegPath, UpdateSourceTrigger=PropertyChanged}"
+                                                PlaceholderText="ffmpeg.exe"/>
+                                    <ui:Button Grid.Column="1" Content="浏览…"
+                                               Command="{Binding BrowseFfmpegCommand}"/>
+                                </Grid>
+                                <ui:TextBlock Text="{Binding FfmpegPathStatusText}"
+                                               TextWrapping="Wrap"
+                                               FontTypography="Caption"
+                                               Foreground="{Binding FfmpegPathStatusBrush}"/>
+                                <ui:TextBlock Text="编码参数"
+                                               Margin="0,16,0,0"
+                                               FontTypography="Caption"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                                <Grid Margin="0,10,0,10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="80"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                                        <ui:TextBlock Text="帧混合后端"
+                                                       FontTypography="Caption"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                       Margin="0,0,0,6"/>
+                                        <ComboBox ItemsSource="{Binding CompositionBackendOptions}"
+                                                  DisplayMemberPath="DisplayName"
+                                                  SelectedValuePath="Id"
+                                                  SelectedValue="{Binding CompositionBackend, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                                        <ui:TextBlock Text="{Binding CompositionBackendHint}"
+                                                       TextWrapping="Wrap"
+                                                       FontTypography="Caption"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                       Margin="0,6,0,0"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1">
+                                        <ui:TextBlock Text="曝光"
+                                                       FontTypography="Caption"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                       Margin="0,0,0,6"/>
+                                        <ui:TextBox Text="{Binding ExposureText, UpdateSourceTrigger=PropertyChanged}"/>
+                                    </StackPanel>
+                                </Grid>
+                                <Grid Margin="0,0,0,10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="80"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                                        <ui:TextBlock Text="成片视频编码器"
+                                                       FontTypography="Caption"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                       Margin="0,0,0,6"/>
+                                        <ComboBox ItemsSource="{Binding VideoEncoderOptions}"
+                                                  DisplayMemberPath="DisplayName"
+                                                  SelectedValuePath="Id"
+                                                  SelectedValue="{Binding VideoEncoder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                                        <ui:TextBlock Text="{Binding VideoEncoderHint}"
+                                                       TextWrapping="Wrap"
+                                                       FontTypography="Caption"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                       Margin="0,6,0,0"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1">
+                                        <ui:TextBlock Text="CRF"
+                                                       FontTypography="Caption"
+                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                       Margin="0,0,0,6"/>
+                                        <ui:TextBox Text="{Binding CrfText, UpdateSourceTrigger=PropertyChanged}"/>
+                                    </StackPanel>
+                                </Grid>
+                                <ui:TextBlock Text="合成预览（只读）"
+                                               FontTypography="Caption"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                               Margin="0,0,0,6"/>
+                                <ui:TextBlock Text="{Binding FfmpegEncodingPreview}"
+                                               TextWrapping="Wrap"
+                                               FontTypography="Body"
+                                               FontFamily="Consolas"
+                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                            </StackPanel>
+                        </controls:SettingSection>
+                    </StackPanel>
+                </controls:SettingsGroup>
+
+                <ui:TextBlock FontTypography="Caption"
+                              Margin="0,4,0,0"
+                              Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                              TextWrapping="Wrap"
+                              Text="{Binding SettingsPathHint}"/>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</Page>
