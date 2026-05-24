@@ -1,4 +1,0 @@
-<Solution>
-  <Project Path="MomentumBlur\MomentumBlur.csproj" />
-  <Project Path="MomentumBlur.Tests\MomentumBlur.Tests.csproj" />
-</Solution>
