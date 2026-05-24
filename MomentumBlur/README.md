@@ -52,7 +52,3 @@ MomentumBlur/Resources/ffmpeg/ffmpeg-8.1.1-full_build/bin/ffprobe.exe
 dotnet build MomentumBlur.csproj
 dotnet run --project MomentumBlur.csproj
 ```
-
-## 说明
-
-这个文件放在源码目录内，方便只打开 `MomentumBlur/` 文件夹时仍能看到说明。GitHub 仓库首页使用根目录的 `README.md` 渲染项目介绍。
