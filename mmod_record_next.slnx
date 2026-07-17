@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Mmod.App/Mmod.App.csproj" />
+    <Project Path="src/Mmod.Core/Mmod.Core.csproj" />
+    <Project Path="src/Mmod.SmokeTest/Mmod.SmokeTest.csproj" />
+  </Folder>
+</Solution>

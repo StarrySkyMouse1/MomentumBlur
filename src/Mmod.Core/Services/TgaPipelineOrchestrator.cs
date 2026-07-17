@@ -1,0 +1,200 @@
+using System.IO;
+using Mmod.Core.Models;
+using Mmod.Core.Native;
+
+namespace Mmod.Core.Services;
+
+public sealed class TgaPipelineOrchestrator : IAsyncDisposable
+{
+    private CancellationTokenSource? _cts;
+    private Task? _loop;
+    private TgaDirectoryWatcher? _watcher;
+    private NativeBlendSession? _session;
+    private int _nextFrame = 0;
+    private int _fed;
+
+    public bool IsRunning => _loop is { IsCompleted: false };
+
+    public int PendingCount => _watcher?.PendingCount ?? 0;
+    public int FedCount => _fed;
+    public string? OutputPath { get; private set; }
+    public string Status { get; private set; } = "空闲";
+
+    public event Action? Changed;
+
+    public async Task StartAsync(UserSettings settings)
+    {
+        if (IsRunning)
+            throw new InvalidOperationException("管线已在运行");
+
+        if (string.IsNullOrWhiteSpace(settings.RamDiskWatchDirectory) ||
+            !Directory.Exists(settings.RamDiskWatchDirectory))
+            throw new InvalidOperationException("请先设置有效的 TGA 监视目录");
+
+        var outputDir = string.IsNullOrWhiteSpace(settings.VideoOutputDirectory)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "mmod_record_next")
+            : settings.VideoOutputDirectory;
+        Directory.CreateDirectory(outputDir);
+
+        OutputPath = Path.Combine(outputDir, $"tga_{DateTime.Now:yyyyMMdd_HHmmss}.mp4");
+        _fed = 0;
+        _nextFrame = 0;
+        _cts = new CancellationTokenSource();
+        _watcher = new TgaDirectoryWatcher(settings.RamDiskWatchDirectory);
+        _watcher.PendingChanged += () => Changed?.Invoke();
+        _watcher.Start();
+
+        Status = "监视中，等待 TGA…";
+        Changed?.Invoke();
+
+        var blend = Math.Max(1, settings.SupersamplingMultiplier);
+        var token = _cts.Token;
+        _loop = Task.Run(() => RunLoop(settings, blend, token), token);
+        await Task.CompletedTask;
+    }
+
+    public async Task StopAsync()
+    {
+        if (_cts is null)
+            return;
+
+        Status = "停止中，排空并收尾…";
+        Changed?.Invoke();
+        _cts.Cancel();
+        try
+        {
+            if (_loop is not null)
+                await _loop.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // expected
+        }
+
+        _watcher?.Stop();
+        _watcher?.Dispose();
+        _watcher = null;
+
+        try
+        {
+            _session?.Finish();
+            Status = File.Exists(OutputPath) ? $"完成：{OutputPath}" : "已停止（无输出帧）";
+        }
+        catch (Exception ex)
+        {
+            Status = $"收尾失败：{ex.Message}";
+        }
+        finally
+        {
+            _session?.Dispose();
+            _session = null;
+            _cts.Dispose();
+            _cts = null;
+            _loop = null;
+            Changed?.Invoke();
+        }
+    }
+
+    private void RunLoop(UserSettings settings, int blend, CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            if (_watcher is null)
+                break;
+
+            if (!_watcher.TryGetMinPendingFrameIndex(out var min))
+            {
+                Thread.Sleep(30);
+                continue;
+            }
+
+            if (_nextFrame == 0)
+                _nextFrame = min;
+
+            if (min > _nextFrame)
+            {
+                // skip gap
+                _nextFrame = min;
+            }
+
+            if (!_watcher.TryTake(_nextFrame, out var path))
+            {
+                Thread.Sleep(20);
+                continue;
+            }
+
+            if (!TgaFrameReader.TryReadBgra(path, out var width, out var height, out var bgra))
+            {
+                try { File.Delete(path); } catch { /* ignore */ }
+                _nextFrame++;
+                continue;
+            }
+
+            try
+            {
+                _session ??= NativeBlendSession.Create(
+                    width,
+                    height,
+                    blend,
+                    (float)settings.Exposure,
+                    ProjectConstants.FinalOutputFramerate,
+                    settings.Encoder,
+                    OutputPath!);
+
+                _session.SubmitBgra(bgra, width * 4);
+                _fed++;
+                Status = $"合成中：已喂入 {_fed} 帧，待处理 {_watcher.PendingCount}";
+                Changed?.Invoke();
+
+                try { File.Delete(path); } catch { /* ignore */ }
+                _nextFrame++;
+            }
+            catch (Exception ex)
+            {
+                Status = $"错误：{ex.Message}";
+                Changed?.Invoke();
+                break;
+            }
+        }
+
+        // drain briefly after cancel
+        var drainDeadline = DateTime.UtcNow.AddSeconds(15);
+        while (_watcher is not null && DateTime.UtcNow < drainDeadline)
+        {
+            if (!_watcher.TryGetMinPendingFrameIndex(out var min))
+                break;
+            if (!_watcher.TryTake(min, out var path))
+                break;
+            if (!TgaFrameReader.TryReadBgra(path, out var width, out var height, out var bgra))
+            {
+                try { File.Delete(path); } catch { }
+                continue;
+            }
+
+            try
+            {
+                _session ??= NativeBlendSession.Create(
+                    width,
+                    height,
+                    blend,
+                    (float)settings.Exposure,
+                    ProjectConstants.FinalOutputFramerate,
+                    settings.Encoder,
+                    OutputPath!);
+                _session.SubmitBgra(bgra, width * 4);
+                _fed++;
+                try { File.Delete(path); } catch { }
+            }
+            catch
+            {
+                break;
+            }
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (IsRunning)
+            await StopAsync().ConfigureAwait(false);
+    }
+}

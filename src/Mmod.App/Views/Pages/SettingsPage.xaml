@@ -1,0 +1,193 @@
+<Page x:Class="Mmod.App.Views.Pages.SettingsPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      Title="设置"
+      VerticalAlignment="Stretch">
+    <Page.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis" />
+    </Page.Resources>
+
+    <Grid Margin="0,0,0,8">
+        <ScrollViewer x:Name="RootScroll"
+                      Background="Transparent"
+                      Focusable="True"
+                      VerticalScrollBarVisibility="Visible"
+                      HorizontalScrollBarVisibility="Disabled"
+                      CanContentScroll="False"
+                      PanningMode="VerticalOnly"
+                      Padding="8,16,16,32">
+            <StackPanel MaxWidth="720">
+                <TextBlock FontSize="22" FontWeight="SemiBold" Text="设置" />
+
+                <Grid Margin="0,20,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="16" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Grid.Column="0">
+                        <TextBlock Margin="0,0,0,6" Text="捕获模式" />
+                        <ComboBox ItemsSource="{Binding CaptureModeOptions}"
+                                  SelectedItem="{Binding CaptureMode, Mode=TwoWay}" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Row="0" Grid.Column="2">
+                        <TextBlock Margin="0,0,0,6" Text="超采样 N" />
+                        <ui:NumberBox Value="{Binding SupersamplingMultiplier, Mode=TwoWay}"
+                                      Minimum="1"
+                                      Maximum="64"
+                                      SpinButtonPlacementMode="Inline" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,16,0,0">
+                        <TextBlock Margin="0,0,0,6" Text="Exposure" />
+                        <ui:NumberBox Value="{Binding Exposure, Mode=TwoWay}"
+                                      Minimum="0.05"
+                                      Maximum="1"
+                                      SmallChange="0.05"
+                                      SpinButtonPlacementMode="Inline" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Row="1" Grid.Column="2" Margin="0,16,0,0">
+                        <TextBlock Margin="0,0,0,6" Text="编码器偏好" />
+                        <ComboBox ItemsSource="{Binding EncoderOptions}"
+                                  SelectedItem="{Binding Encoder, Mode=TwoWay}" />
+                    </StackPanel>
+                </Grid>
+
+                <TextBlock Margin="0,16,0,6" Text="成片输出目录" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox Grid.Column="0"
+                             Margin="0,0,8,0"
+                             IsReadOnly="True"
+                             Text="{Binding VideoOutputDirectory, Mode=TwoWay}" />
+                    <ui:Button Grid.Column="1"
+                               Content="浏览…"
+                               Command="{Binding BrowseVideoOutputCommand}" />
+                </Grid>
+
+                <StackPanel Visibility="{Binding IsObsMode, Converter={StaticResource BoolToVis}}">
+                    <TextBlock Margin="0,24,0,6" FontWeight="SemiBold" Text="OBS 模式" />
+
+                    <TextBlock Margin="0,8,0,6" Text="OBS 源帧率" />
+                    <ComboBox ItemsSource="{Binding ObsCaptureFramerateOptions}"
+                              SelectedItem="{Binding ObsCaptureFramerate, Mode=TwoWay}" />
+
+                    <TextBlock Margin="0,16,0,6" Text="OBS 并行路数" />
+                    <ui:NumberBox Value="{Binding MaxParallelJobs, Mode=TwoWay}"
+                                  Minimum="1"
+                                  SpinButtonPlacementMode="Inline" />
+
+                    <TextBlock Margin="0,16,0,6" FontWeight="SemiBold" Text="游戏慢放指令" />
+                    <CheckBox Margin="0,0,0,8"
+                              Content="隐藏 HUD（cl_drawhud）"
+                              IsChecked="{Binding HideHudInCfg, Mode=TwoWay}" />
+                    <TextBox IsReadOnly="True"
+                             Text="{Binding SlowMotionBlock}"
+                             TextWrapping="Wrap"
+                             AcceptsReturn="True"
+                             MinHeight="90" />
+                    <TextBox Margin="0,8,0,0"
+                             IsReadOnly="True"
+                             Text="{Binding RestoreBlock}"
+                             TextWrapping="Wrap"
+                             AcceptsReturn="True"
+                             MinHeight="70" />
+
+                    <WrapPanel Margin="0,16,0,0">
+                        <ui:Button Content="复制慢放指令"
+                                   Command="{Binding CopySlowMotionCommand}"
+                                   Margin="0,0,8,8" />
+                        <ui:Button Content="复制恢复指令"
+                                   Command="{Binding CopyRestoreCommand}"
+                                   Margin="0,0,8,8" />
+                    </WrapPanel>
+                </StackPanel>
+
+                <StackPanel Visibility="{Binding IsTgaMode, Converter={StaticResource BoolToVis}}">
+                    <TextBlock Margin="0,24,0,6" FontWeight="SemiBold" Text="游戏 TGA 模式" />
+
+                    <TextBlock Margin="0,8,0,6" Text="TGA 监视目录" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox Grid.Column="0"
+                                 Margin="0,0,8,0"
+                                 IsReadOnly="True"
+                                 Text="{Binding RamDiskWatchDirectory, Mode=TwoWay}" />
+                        <ui:Button Grid.Column="1"
+                                   Content="浏览…"
+                                   Command="{Binding BrowseWatchDirectoryCommand}" />
+                    </Grid>
+
+                    <TextBlock Margin="0,16,0,6" Text="游戏根目录" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox Grid.Column="0"
+                                 Margin="0,0,8,0"
+                                 IsReadOnly="True"
+                                 Text="{Binding GameRootPath, Mode=TwoWay}" />
+                        <ui:Button Grid.Column="1"
+                                   Content="浏览…"
+                                   Command="{Binding BrowseGameRootCommand}" />
+                    </Grid>
+
+                    <TextBlock Margin="0,16,0,6" Text="startmovie 序列名" />
+                    <TextBox Text="{Binding MovieSequenceName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                    <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                        <StackPanel Margin="0,0,16,0">
+                            <TextBlock Text="开始快捷键" />
+                            <TextBox Width="80"
+                                     Text="{Binding StartMovieHotkey, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel>
+                            <TextBlock Text="结束快捷键" />
+                            <TextBox Width="80"
+                                     Text="{Binding EndMovieHotkey, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <CheckBox Margin="0,12,0,0"
+                              Content="CFG 中隐藏 HUD（cl_drawhud 0）"
+                              IsChecked="{Binding HideHudInCfg, Mode=TwoWay}" />
+
+                    <TextBlock Margin="0,16,0,6"
+                               Text="{Binding JunctionState}"
+                               TextWrapping="Wrap" />
+
+                    <WrapPanel Margin="0,16,0,0">
+                        <ui:Button Content="生成 CFG"
+                                   Command="{Binding GenerateCfgCommand}"
+                                   Margin="0,0,8,8" />
+                        <ui:Button Content="创建 Junction"
+                                   Command="{Binding CreateJunctionCommand}"
+                                   Margin="0,0,8,8" />
+                        <ui:Button Content="取消 Junction"
+                                   Command="{Binding RemoveJunctionCommand}"
+                                   Margin="0,0,8,8" />
+                    </WrapPanel>
+                </StackPanel>
+
+                <TextBlock Margin="0,16,0,24"
+                           Text="{Binding StatusText}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Page>
