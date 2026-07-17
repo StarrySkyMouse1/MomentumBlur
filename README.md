@@ -1,11 +1,13 @@
-# mmod_record_next
+# MomentumBlur
 
 统一版 Momentum 运动模糊合成（OBS + TGA）。只处理画面，不做音轨。
+
+本仓库仅含工具工程。设计文档与参考源码在上级工作区：`../docs`、`../reference/SourceDemoRender`。
 
 ## 运行
 
 ```bat
-cd C:\Projects\else\.net\WPF\mmod_record\mmod_record_next
+cd C:\Projects\else\.net\WPF\mmod_record\MomentumBlur
 cmake -S src\Mmod.Native -B src\Mmod.Native\build -G "Visual Studio 18 2026" -A x64
 cmake --build src\Mmod.Native\build --config Release
 dotnet run --project src\Mmod.App\Mmod.App.csproj -c Release
@@ -20,7 +22,5 @@ dotnet run --project src\Mmod.App\Mmod.App.csproj -c Release
 | CFG | 设置页生成 `mmod_record.cfg` |
 | Junction | momentum ↔ RAM 盘 |
 | 编码 | D3D11 mosample + MF H.264（硬件 MFT 优先） |
-
-参考树：`../reference/SourceDemoRender`
 
 冒烟：`dotnet run --project src\Mmod.SmokeTest\Mmod.SmokeTest.csproj -c Release`
