@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Mmod.Core\Mmod.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="WPF-UI" Version="4.3.0" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>mmod_record_next</AssemblyName>
+    <Product>Momentum 运动模糊合成</Product>
+    <RootNamespace>Mmod.App</RootNamespace>
+  </PropertyGroup>
+
+  <Target Name="CopyNativeDll" AfterTargets="Build">
+    <PropertyGroup>
+      <NativeDll>$(MSBuildThisFileDirectory)..\Mmod.Native\build\bin\$(Configuration)\mmod_native.dll</NativeDll>
+    </PropertyGroup>
+    <Copy SourceFiles="$(NativeDll)"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(NativeDll)')" />
+  </Target>
+
+</Project>
