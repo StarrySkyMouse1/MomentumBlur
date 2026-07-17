@@ -2,7 +2,7 @@
 
 统一版 Momentum 运动模糊合成（OBS + TGA）。只处理画面，不做音轨。
 
-本仓库仅含工具工程。设计文档与参考源码在上级工作区：`../docs`、`../reference/SourceDemoRender`。
+本仓库是唯一工具工程（旧 mmod_record / mmod_record_next 已退役）。设计文档与参考源码在上级工作区：`../docs`、`../reference/SourceDemoRender`。
 
 ## 运行
 
@@ -12,6 +12,8 @@ cmake -S src\Mmod.Native -B src\Mmod.Native\build -G "Visual Studio 18 2026" -A 
 cmake --build src\Mmod.Native\build --config Release
 dotnet run --project src\Mmod.App\Mmod.App.csproj -c Release
 ```
+
+解决方案：`MomentumBlur.slnx`
 
 ## 功能清单（交测）
 
