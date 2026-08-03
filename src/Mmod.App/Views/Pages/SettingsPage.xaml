@@ -171,7 +171,7 @@
                                Text="{Binding JunctionState}"
                                TextWrapping="Wrap" />
 
-                    <TextBlock Margin="0,16,0,6" Text="CFG 指令（进图后控制台执行）" />
+                    <TextBlock Margin="0,16,0,6" Text="实际写入的 CFG 指令（结束快捷键会关闭作弊并还原设置）" />
                     <TextBox IsReadOnly="True"
                              Text="{Binding CfgCommandBlock}"
                              TextWrapping="Wrap"

@@ -225,15 +225,7 @@ public partial class SettingsViewModel : ObservableObject
 
     private static string BuildCfgCommandBlock(UserSettings s)
     {
-        var multiplier = Math.Clamp(s.SupersamplingMultiplier, 1, 120);
-        var hostFr = multiplier * ProjectConstants.FinalOutputFramerate;
-        var startMovieCmd = WatchDirectoryHelper.BuildGameStartmovieCommand(s.MovieSequenceName);
-        return
-            $"{CfgGeneratorService.GameExecCommand}\n" +
-            $"\n" +
-            $"超采样 {multiplier}x（host_framerate {hostFr} → 成片 60fps）\n" +
-            $"游戏内：{startMovieCmd}\n" +
-            $"快捷键：{s.StartMovieHotkey.Trim()} = startmovie，{s.EndMovieHotkey.Trim()} = endmovie";
+        return CfgGeneratorService.BuildCfgContent(s);
     }
 
     [RelayCommand]

@@ -79,7 +79,7 @@ public static class CfgGeneratorService
             $"超采样 {multiplier}x（host_framerate {hostFr} → 成片 60fps）\n" +
             $"游戏内：{startMovieCmd}\n" +
             $"进图后控制台执行一次：{GameExecCommand}\n" +
-            $"快捷键：{settings.StartMovieHotkey.Trim()} = startmovie，{settings.EndMovieHotkey.Trim()} = endmovie";
+            $"快捷键：{settings.StartMovieHotkey.Trim()} = startmovie，{settings.EndMovieHotkey.Trim()} = 停止录制并还原设置";
 
         return new CfgGeneratorResult
         {
@@ -90,7 +90,7 @@ public static class CfgGeneratorService
         };
     }
 
-    private static string BuildCfgContent(UserSettings settings)
+    public static string BuildCfgContent(UserSettings settings)
     {
         var multiplier = Math.Clamp(settings.SupersamplingMultiplier, 1, 120);
         var hostFr = multiplier * ProjectConstants.FinalOutputFramerate;
@@ -109,7 +109,16 @@ public static class CfgGeneratorService
             sb.AppendLine("cl_drawhud 0");
         sb.AppendLine($"host_framerate {hostFr}");
         sb.AppendLine($"bind {startKey} \"{startMovieCmd}\"");
-        sb.AppendLine($"bind {endKey} endmovie");
+        var restoreCommands = new List<string>
+        {
+            "endmovie",
+            "host_timescale 1",
+            "host_framerate 0",
+        };
+        if (settings.HideHudInCfg)
+            restoreCommands.Add("cl_drawhud 1");
+        restoreCommands.Add("sv_cheats 0");
+        sb.AppendLine($"bind {endKey} \"{string.Join("; ", restoreCommands)}\"");
         return sb.ToString().TrimEnd() + Environment.NewLine;
     }
 }
