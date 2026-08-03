@@ -4,6 +4,9 @@ public static class ProjectConstants
 {
     public const string ApplicationDisplayName = "Momentum 运动模糊合成";
     public const string SettingsFileName = "settings.json";
+    public const string TaskDatabaseFileName = "render-tasks.db";
+    public const string TaskLogsFolderName = "task-logs";
+    public const string TaskWorkFolderName = "task-work";
     public const string AppDataFolderName = "mmod_record_next";
 
     public const int FinalOutputFramerate = 60;
