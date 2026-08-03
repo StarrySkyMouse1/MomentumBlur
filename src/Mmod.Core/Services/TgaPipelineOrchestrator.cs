@@ -23,7 +23,9 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
 
     public event Action? Changed;
 
-    public async Task StartAsync(UserSettings settings)
+    public Task StartAsync(UserSettings settings) => StartAsync(settings, null, true);
+
+    public async Task StartAsync(UserSettings settings, string? outputPath, bool acceptPreSessionFiles = false)
     {
         if (IsRunning)
             throw new InvalidOperationException("管线已在运行");
@@ -42,7 +44,8 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
             : settings.VideoOutputDirectory;
         Directory.CreateDirectory(outputDir);
 
-        OutputPath = Path.Combine(outputDir, $"tga_{DateTime.Now:yyyyMMdd_HHmmss}.mp4");
+        OutputPath = string.IsNullOrWhiteSpace(outputPath) ? Path.Combine(outputDir, $"tga_{DateTime.Now:yyyyMMdd_HHmmss}.mp4") : Path.GetFullPath(outputPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(OutputPath)!);
         WatchDirectory = watchDir;
         _fed = 0;
         _nextFrame = 0;
@@ -50,7 +53,7 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
         _watcher = new TgaDirectoryWatcher(watchDir);
         _watcher.PendingChanged += () => Changed?.Invoke();
         // 接受目录中已有 TGA：允许「先录制再开监视」；新写入的帧仍照常接入
-        _watcher.Start(acceptPreSessionFiles: true);
+        _watcher.Start(acceptPreSessionFiles: acceptPreSessionFiles);
 
         Status = $"监视中：{watchDir}（含已有 TGA）";
         Changed?.Invoke();

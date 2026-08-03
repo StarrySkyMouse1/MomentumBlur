@@ -37,7 +37,8 @@ public sealed record NewRenderNode(
     string ReplayPath,
     int StageNumber,
     int Sequence,
-    double ExpectedDurationSeconds);
+    double ExpectedDurationSeconds,
+    int ExpectedTickCount);
 
 public sealed record NewRenderTask(
     string MapName,
@@ -75,7 +76,8 @@ public sealed record RenderNodeRecord(
     DateTimeOffset? StartedAt,
     DateTimeOffset? FinishedAt,
     double ElapsedSeconds,
-    string? LastError);
+    string? LastError,
+    int ExpectedTickCount);
 
 public sealed record TaskLogRecord(
     long Id,

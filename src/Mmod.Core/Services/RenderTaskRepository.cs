@@ -57,8 +57,8 @@ public sealed class RenderTaskRepository
             command.CommandText = """
                 INSERT INTO render_nodes
                     (id, task_id, replay_path, stage_number, sequence, status, retry_count,
-                     expected_duration_seconds, elapsed_seconds)
-                VALUES ($id, $task, $replay, $stage, $sequence, $status, 0, $duration, 0);
+                     expected_duration_seconds, expected_tick_count, elapsed_seconds)
+                VALUES ($id, $task, $replay, $stage, $sequence, $status, 0, $duration, $ticks, 0);
                 """;
             command.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("N"));
             command.Parameters.AddWithValue("$task", taskId);
@@ -67,6 +67,7 @@ public sealed class RenderTaskRepository
             command.Parameters.AddWithValue("$sequence", node.Sequence);
             command.Parameters.AddWithValue("$status", (int)RenderNodeStatus.Pending);
             command.Parameters.AddWithValue("$duration", node.ExpectedDurationSeconds);
+            command.Parameters.AddWithValue("$ticks", node.ExpectedTickCount);
             command.ExecuteNonQuery();
         }
 
@@ -171,6 +172,16 @@ public sealed class RenderTaskRepository
         command.ExecuteNonQuery();
     }
 
+    public void UpdateTaskElapsed(string taskId, double elapsedSeconds)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE render_tasks SET elapsed_seconds=$elapsed WHERE id=$id;";
+        command.Parameters.AddWithValue("$elapsed", elapsedSeconds);
+        command.Parameters.AddWithValue("$id", taskId);
+        command.ExecuteNonQuery();
+    }
+
     public void AddLog(string taskId, string? nodeId, string level, string message)
     {
         using var connection = Open();
@@ -229,7 +240,7 @@ public sealed class RenderTaskRepository
                 id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES render_tasks(id) ON DELETE CASCADE,
                 replay_path TEXT NOT NULL, stage_number INTEGER NOT NULL, sequence INTEGER NOT NULL,
                 status INTEGER NOT NULL, retry_count INTEGER NOT NULL DEFAULT 0, clip_path TEXT NULL,
-                expected_duration_seconds REAL NOT NULL, started_at TEXT NULL, finished_at TEXT NULL,
+                expected_duration_seconds REAL NOT NULL, expected_tick_count INTEGER NOT NULL DEFAULT 0, started_at TEXT NULL, finished_at TEXT NULL,
                 elapsed_seconds REAL NOT NULL DEFAULT 0, last_error TEXT NULL
             );
             CREATE UNIQUE INDEX IF NOT EXISTS ix_render_nodes_task_sequence ON render_nodes(task_id, sequence);
@@ -244,6 +255,7 @@ public sealed class RenderTaskRepository
             );
             """;
         command.ExecuteNonQuery();
+        EnsureColumn(connection, "render_nodes", "expected_tick_count", "INTEGER NOT NULL DEFAULT 0");
         NormalizeInterruptedWork(connection);
     }
 
@@ -276,6 +288,18 @@ public sealed class RenderTaskRepository
         command.CommandText = "PRAGMA foreign_keys=ON;";
         command.ExecuteNonQuery();
         return connection;
+    }
+
+    private static void EnsureColumn(SqliteConnection connection, string table, string column, string definition)
+    {
+        using var check = connection.CreateCommand();
+        check.CommandText = $"PRAGMA table_info({table});";
+        using var reader = check.ExecuteReader();
+        while (reader.Read()) if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return;
+        reader.Close();
+        using var alter = connection.CreateCommand();
+        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition};";
+        alter.ExecuteNonQuery();
     }
 
     private static int ScalarInt(SqliteConnection connection, SqliteTransaction transaction, string sql)
@@ -331,7 +355,7 @@ public sealed class RenderTaskRepository
         reader.GetInt32(reader.GetOrdinal("retry_count")), GetNullableString(reader, "clip_path"),
         reader.GetDouble(reader.GetOrdinal("expected_duration_seconds")), GetNullableDate(reader, "started_at"),
         GetNullableDate(reader, "finished_at"), reader.GetDouble(reader.GetOrdinal("elapsed_seconds")),
-        GetNullableString(reader, "last_error"));
+        GetNullableString(reader, "last_error"), reader.GetInt32(reader.GetOrdinal("expected_tick_count")));
 
     private static DateTimeOffset? GetNullableDate(SqliteDataReader reader, string name)
     {

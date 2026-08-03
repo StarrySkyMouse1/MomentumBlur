@@ -20,6 +20,9 @@
                 <Button Content="刷新回放" Command="{Binding RefreshCatalogCommand}" Margin="0,0,8,0"/>
                 <Button Content="创建任务" Command="{Binding CreateTasksCommand}" Margin="0,0,8,0"/>
                 <Button Content="刷新状态" Command="{Binding ReloadTasksCommand}"/>
+                <Button Content="开始/继续" Command="{Binding StartQueueCommand}" Margin="16,0,8,0"/>
+                <Button Content="当前节点后暂停" Command="{Binding PauseAfterNodeCommand}" Margin="0,0,8,0"/>
+                <Button Content="立即停止" Command="{Binding StopNowCommand}"/>
             </StackPanel>
         </StackPanel>
         <Grid Grid.Row="1" Margin="0,16,0,12">
