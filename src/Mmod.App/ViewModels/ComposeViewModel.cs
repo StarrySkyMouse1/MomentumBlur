@@ -49,7 +49,7 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
             });
         };
         RefreshModeSummary();
-        RefreshOutputDiskSpace();
+        RefreshDiskSpace();
     }
 
     public ObservableCollection<BatchVideoItem> BatchItems { get; } = [];
@@ -67,7 +67,7 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
     private string batchSummary = "队列：0";
 
     [ObservableProperty]
-    private string outputDiskSpaceText = "输出盘剩余空间：正在读取…";
+    private string diskSpaceText = "磁盘空间：正在读取…";
 
     [ObservableProperty]
     private bool isObsBusy;
@@ -91,40 +91,62 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
         UpdateBatchSummary();
         if (!_tga.IsRunning)
             TgaMetricsText = BuildIdleTgaMetrics(s);
-        RefreshOutputDiskSpace();
+        RefreshDiskSpace();
     }
 
     private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(SettingsViewModel.VideoOutputDirectory))
-            RefreshOutputDiskSpace();
+        if (e.PropertyName is nameof(SettingsViewModel.CaptureMode)
+            or nameof(SettingsViewModel.VideoOutputDirectory)
+            or nameof(SettingsViewModel.RamDiskWatchDirectory)
+            or nameof(SettingsViewModel.GameRootPath))
+        {
+            RefreshDiskSpace();
+        }
     }
 
-    private void RefreshOutputDiskSpace()
+    private void RefreshDiskSpace()
     {
         try
         {
-            var outputDirectory = string.IsNullOrWhiteSpace(_settings.VideoOutputDirectory)
-                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "mmod_record_next")
-                : _settings.VideoOutputDirectory;
-            var driveRoot = Path.GetPathRoot(Path.GetFullPath(outputDirectory));
+            var directory = ResolveDisplayedDiskDirectory();
+            var driveRoot = Path.GetPathRoot(Path.GetFullPath(directory));
             if (string.IsNullOrWhiteSpace(driveRoot))
-                throw new IOException("无法确定输出盘符。");
+                throw new IOException("无法确定盘符。");
 
             var drive = new DriveInfo(driveRoot);
-            OutputDiskSpaceText = $"输出盘剩余空间：{drive.AvailableFreeSpace / 1024d / 1024d / 1024d:N1} GB（{drive.Name.TrimEnd(Path.DirectorySeparatorChar)}）";
+            var label = IsTgaMode ? "监视盘空间" : "输出盘空间";
+            DiskSpaceText = $"{label}：可用 {FormatGiB(drive.AvailableFreeSpace)} / 共 {FormatGiB(drive.TotalSize)}（{drive.Name.TrimEnd(Path.DirectorySeparatorChar)}）";
         }
         catch
         {
-            OutputDiskSpaceText = "输出盘剩余空间：无法读取";
+            DiskSpaceText = IsTgaMode ? "监视盘空间：无法读取" : "输出盘空间：无法读取";
         }
     }
+
+    private string ResolveDisplayedDiskDirectory()
+    {
+        if (IsTgaMode)
+        {
+            if (_tga.IsRunning && !string.IsNullOrWhiteSpace(_tga.WatchDirectory))
+                return _tga.WatchDirectory;
+
+            var settings = _settings.Snapshot();
+            return WatchDirectoryHelper.ResolveEffectiveWatchDirectory(settings, settings.GameRootPath);
+        }
+
+        return string.IsNullOrWhiteSpace(_settings.VideoOutputDirectory)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "mmod_record_next")
+            : _settings.VideoOutputDirectory;
+    }
+
+    private static string FormatGiB(long bytes) => $"{bytes / 1024d / 1024d / 1024d:N1} GB";
 
     private void RefreshTgaUi()
     {
         StatusText = _tga.Status;
         TgaMetricsText = BuildRunningTgaMetrics();
-        RefreshOutputDiskSpace();
+        RefreshDiskSpace();
         OnPropertyChanged(nameof(IsTgaRunning));
         StartTgaCommand.NotifyCanExecuteChanged();
         StopTgaCommand.NotifyCanExecuteChanged();
@@ -230,7 +252,7 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "mmod_record_next")
             : settings.VideoOutputDirectory;
         Directory.CreateDirectory(outputDir);
-        RefreshOutputDiskSpace();
+        RefreshDiskSpace();
 
         try
         {
@@ -270,7 +292,7 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
                         {
                             item.Status = File.Exists(output) ? $"完成：{Path.GetFileName(output)}" : "完成（无文件？）";
                             item.ProgressPercent = 100;
-                            RefreshOutputDiskSpace();
+                            RefreshDiskSpace();
                         });
                     }
                     catch (OperationCanceledException)
