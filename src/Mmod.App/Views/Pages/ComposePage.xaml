@@ -41,7 +41,11 @@
                 Visibility="{Binding IsTgaMode, Converter={StaticResource BoolToVis}}">
             <StackPanel>
                 <TextBlock FontWeight="SemiBold" Text="游戏 TGA" />
-                <TextBlock Margin="0,6,0,0" Text="{Binding TgaMetricsText}" />
+                <TextBlock Margin="0,6,0,0"
+                           Text="{Binding TgaMetricsText}"
+                           TextWrapping="Wrap" />
+                <TextBlock Margin="0,4,0,0"
+                           Text="{Binding OutputDiskSpaceText}" />
                 <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                     <ui:Button Content="开始监视"
                                Appearance="Primary"
@@ -63,6 +67,8 @@
             <StackPanel>
                 <TextBlock FontWeight="SemiBold" Text="OBS 批量" />
                 <TextBlock Margin="0,6,0,0" Text="{Binding BatchSummary}" />
+                <TextBlock Margin="0,4,0,0"
+                           Text="{Binding OutputDiskSpaceText}" />
                 <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                     <ui:Button Content="添加视频…"
                                Command="{Binding AddVideosCommand}"

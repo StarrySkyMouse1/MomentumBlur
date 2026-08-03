@@ -18,12 +18,41 @@
     <AssemblyName>mmod_record_next</AssemblyName>
     <Product>Momentum 运动模糊合成</Product>
     <RootNamespace>Mmod.App</RootNamespace>
+    <!-- Set SkipNativeBuild=true to skip cmake when iterating on C# only -->
+    <SkipNativeBuild Condition="'$(SkipNativeBuild)' == ''">false</SkipNativeBuild>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Content Include="..\..\tools\ImDisk\**\*"
+             Link="ImDisk\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <NativeRoot>$(MSBuildThisFileDirectory)..\Mmod.Native</NativeRoot>
+    <NativeBuildDir>$(MSBuildThisFileDirectory)..\Mmod.Native\build</NativeBuildDir>
+    <NativeDll>$(MSBuildThisFileDirectory)..\Mmod.Native\build\bin\$(Configuration)\mmod_native.dll</NativeDll>
+    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\18\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    <CMakeExe Condition="'$(CMakeExe)' == ''">cmake</CMakeExe>
+  </PropertyGroup>
+
+  <Target Name="BuildNativeDll" BeforeTargets="BeforeBuild" Condition="'$(SkipNativeBuild)' != 'true'">
+    <Error Text="未找到 cmake（已尝试 VS 自带路径）。请安装「使用 C++ 的桌面开发」工作负载，或设置 /p:CMakeExe=完整路径。"
+           Condition="'$(CMakeExe)' == 'cmake'" />
+    <Exec Command="&quot;$(CMakeExe)&quot; -S &quot;$(NativeRoot)&quot; -B &quot;$(NativeBuildDir)&quot; -G &quot;Visual Studio 18 2026&quot; -A x64"
+          Condition="!Exists('$(NativeBuildDir)\mmod_native.vcxproj')" />
+    <Exec Command="&quot;$(CMakeExe)&quot; --build &quot;$(NativeBuildDir)&quot; --config $(Configuration)" />
+  </Target>
+
   <Target Name="CopyNativeDll" AfterTargets="Build">
-    <PropertyGroup>
-      <NativeDll>$(MSBuildThisFileDirectory)..\Mmod.Native\build\bin\$(Configuration)\mmod_native.dll</NativeDll>
-    </PropertyGroup>
+    <Warning Text="未找到 $(NativeDll)。Native 构建可能失败；可手动：cmake --build src\Mmod.Native\build --config $(Configuration)"
+             Condition="!Exists('$(NativeDll)')" />
     <Copy SourceFiles="$(NativeDll)"
           DestinationFolder="$(TargetDir)"
           SkipUnchangedFiles="true"

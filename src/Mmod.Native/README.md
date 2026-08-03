@@ -14,4 +14,6 @@ cmake --build build --config Release
 
 若生成器名不同，可用 `cmake -G` 列出。产物：`build\bin\Release\mmod_native.dll`。
 
+配置完成后，主解决方案 `MomentumBlur.slnx` 会加载 `build\mmod_native.vcxproj`，可在同一 VS 里改 C++ / C#。
+
 `Mmod.App` 构建后若该路径存在，会自动复制到输出目录。
