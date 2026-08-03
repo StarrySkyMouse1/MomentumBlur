@@ -12,6 +12,7 @@ public partial class TasksViewModel : ObservableObject
     private readonly SettingsViewModel _settings;
     private readonly ReplayCatalogService _catalog = new();
     private readonly RenderTaskRepository _repository = new();
+    private readonly RenderTaskRunner _runner;
 
     public ObservableCollection<ReplayTreeNode> Catalog { get; } = [];
     public ObservableCollection<TaskListItem> Queue { get; } = [];
@@ -19,7 +20,12 @@ public partial class TasksViewModel : ObservableObject
     [ObservableProperty] private string statusText = "请刷新回放记录并勾选需要执行的记录。";
     [ObservableProperty] private TaskListItem? selectedTask;
 
-    public TasksViewModel(SettingsViewModel settings) { _settings = settings; ReloadTasks(); }
+    public TasksViewModel(SettingsViewModel settings)
+    {
+        _settings = settings; _runner = new RenderTaskRunner(_repository);
+        _runner.Changed += () => System.Windows.Application.Current.Dispatcher.BeginInvoke(() => { StatusText = _runner.Status; ReloadTasks(); });
+        ReloadTasks();
+    }
 
     [RelayCommand]
     private void RefreshCatalog()
@@ -66,7 +72,7 @@ public partial class TasksViewModel : ObservableObject
             {
                 var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 var output = Path.Combine(settings.VideoOutputDirectory, Safe($"{group.Key.MapName}_{group.Key.PlayerName}_{stamp}.mp4"));
-                var nodes = group.OrderBy(x => x.StageNumber).Select((x, i) => new NewRenderNode(x.FilePath, x.StageNumber, i, x.RunTimeSeconds)).ToList();
+                var nodes = group.OrderBy(x => x.StageNumber).Select((x, i) => new NewRenderNode(x.FilePath, x.StageNumber, i, x.RunTimeSeconds, x.TickCount)).ToList();
                 var snapshot = new RenderSettingsSnapshot(settings.SupersamplingMultiplier, settings.Exposure, settings.RamDiskWatchDirectory, settings.VideoOutputDirectory, settings.GameRootPath!, settings.HideHudInCfg, ProjectConstants.FinalOutputFramerate, 140_000_000);
                 _repository.CreateTask(new NewRenderTask(group.Key.MapName, group.Key.PlayerName, group.Key.TrackNumber, output, snapshot, nodes));
                 count++;
@@ -86,6 +92,10 @@ public partial class TasksViewModel : ObservableObject
             if (task.Status is RenderTaskStatus.Completed or RenderTaskStatus.Canceled or RenderTaskStatus.ClipsReadyNeedsManualMerge) History.Add(item); else Queue.Add(item);
         }
     }
+
+    [RelayCommand] private async Task StartQueue() { await _runner.StartAsync(); StatusText = _runner.Status; }
+    [RelayCommand] private void PauseAfterNode() => _runner.PauseAfterCurrentNode();
+    [RelayCommand] private void StopNow() => _runner.StopImmediately();
 
     [RelayCommand] private void MoveUp() => Move(-1);
     [RelayCommand] private void MoveDown() => Move(1);
