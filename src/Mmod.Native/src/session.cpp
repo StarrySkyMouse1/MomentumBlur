@@ -122,7 +122,10 @@ static HRESULT ConfigureSinkWriter(MmodSession* session) {
   ComPtr<IMFAttributes> attrs;
   HRESULT hr = MFCreateAttributes(&attrs, 2);
   if (FAILED(hr)) return hr;
-  attrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+  // Blending remains GPU accelerated when D3D11 is available. Prefer the
+  // deterministic system H.264 encoder here: some display-driver MFTs block
+  // indefinitely for offline RGB32 input instead of reporting unsupported.
+  attrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, FALSE);
   attrs->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
 
   hr = MFCreateSinkWriterFromURL(session->output_path.c_str(), nullptr, attrs.Get(), &session->writer);
@@ -137,10 +140,13 @@ static HRESULT ConfigureSinkWriter(MmodSession* session) {
   if (FAILED(hr)) return hr;
   hr = out_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
   if (FAILED(hr)) return hr;
-  // 120 Mbps is about 900 MB per minute before the small MP4 container overhead.
-  // Media Foundation may use a hardware H.264 transform when available and
-  // otherwise falls back to an installed software transform.
-  hr = out_type->SetUINT32(MF_MT_AVG_BITRATE, 120'000'000);
+  // About one bit per pixel at 60 fps: 1080p reaches the 120 Mbps ceiling
+  // (roughly 900 MB/minute), while tiny diagnostic frames remain acceptable
+  // to hardware encoders instead of requesting an impossible 120 Mbps profile.
+  const uint64_t scaled_bitrate = static_cast<uint64_t>(session->width) *
+      static_cast<uint64_t>(session->height) * static_cast<uint64_t>(session->output_fps);
+  const UINT32 bitrate = static_cast<UINT32>(std::clamp<uint64_t>(scaled_bitrate, 2'000'000, 120'000'000));
+  hr = out_type->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
   if (FAILED(hr)) return hr;
   hr = out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
   if (FAILED(hr)) return hr;
@@ -346,6 +352,95 @@ extern "C" MMOD_API int32_t mmod_session_get_progress(MmodSession* session, int3
   return MmodError_Ok;
 }
 
+static std::vector<std::wstring> SplitInputPaths(const wchar_t* value) {
+  std::vector<std::wstring> paths;
+  std::wstring input(value ? value : L"");
+  size_t start = 0;
+  while (start <= input.size()) {
+    const size_t end = input.find(L'|', start);
+    const auto path = input.substr(start, end == std::wstring::npos ? input.size() - start : end - start);
+    if (!path.empty()) paths.push_back(path);
+    if (end == std::wstring::npos) break;
+    start = end + 1;
+  }
+  return paths;
+}
+
+extern "C" MMOD_API int32_t mmod_concat_video_files(const wchar_t* input_paths, const wchar_t* output_path, int32_t* out_error) {
+  if (out_error) *out_error = MmodError_Ok;
+  const auto paths = SplitInputPaths(input_paths);
+  if (paths.empty() || !output_path || !*output_path) {
+    if (out_error) *out_error = MmodError_InvalidArg;
+    return MmodError_InvalidArg;
+  }
+  HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  if (FAILED(hr) && hr != S_FALSE && hr != RPC_E_CHANGED_MODE) { if (out_error) *out_error = MmodError_ComFailed; return MmodError_ComFailed; }
+  hr = MFStartup(MF_VERSION);
+  if (FAILED(hr)) { if (out_error) *out_error = MmodError_ComFailed; return MmodError_ComFailed; }
+
+  ComPtr<IMFSinkWriter> writer;
+  DWORD output_stream = 0;
+  ComPtr<IMFMediaType> expected_type;
+  LONGLONG output_time = 0;
+  bool writer_started = false;
+
+  for (const auto& path : paths) {
+    ComPtr<IMFSourceReader> reader;
+    hr = MFCreateSourceReaderFromURL(path.c_str(), nullptr, &reader);
+    if (FAILED(hr)) break;
+    reader->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
+    reader->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
+    ComPtr<IMFMediaType> type;
+    hr = reader->GetNativeMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &type);
+    if (FAILED(hr)) break;
+    GUID subtype{};
+    if (FAILED(type->GetGUID(MF_MT_SUBTYPE, &subtype)) || subtype != MFVideoFormat_H264) { hr = MF_E_INVALIDMEDIATYPE; break; }
+
+    if (!writer_started) {
+      expected_type = type;
+      hr = MFCreateSinkWriterFromURL(output_path, nullptr, nullptr, &writer);
+      if (FAILED(hr)) break;
+      hr = writer->AddStream(type.Get(), &output_stream);
+      if (FAILED(hr)) break;
+      hr = writer->SetInputMediaType(output_stream, type.Get(), nullptr);
+      if (FAILED(hr)) break;
+      hr = writer->BeginWriting();
+      if (FAILED(hr)) break;
+      writer_started = true;
+    } else {
+      DWORD equal_flags = 0;
+      hr = expected_type->IsEqual(type.Get(), &equal_flags);
+      if (hr != S_OK) { hr = MF_E_INVALIDMEDIATYPE; break; }
+    }
+
+    LONGLONG input_first = -1;
+    LONGLONG last_end = output_time;
+    while (true) {
+      DWORD stream = 0, flags = 0; LONGLONG timestamp = 0; ComPtr<IMFSample> sample;
+      hr = reader->ReadSample((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &stream, &flags, &timestamp, &sample);
+      if (FAILED(hr)) break;
+      if (flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
+      if (!sample) continue;
+      LONGLONG sample_time = 0, duration = 0;
+      if (FAILED(sample->GetSampleTime(&sample_time))) sample_time = timestamp;
+      if (input_first < 0) input_first = sample_time;
+      if (FAILED(sample->GetSampleDuration(&duration)) || duration <= 0) duration = 10'000'000LL / 60;
+      sample->SetSampleTime(output_time + (sample_time - input_first));
+      sample->SetSampleDuration(duration);
+      hr = writer->WriteSample(output_stream, sample.Get());
+      if (FAILED(hr)) break;
+      last_end = output_time + (sample_time - input_first) + duration;
+    }
+    if (FAILED(hr)) break;
+    output_time = last_end;
+  }
+  if (SUCCEEDED(hr) && writer_started) hr = writer->Finalize();
+  writer.Reset(); expected_type.Reset(); MFShutdown();
+  const int32_t result = SUCCEEDED(hr) && writer_started ? MmodError_Ok : MmodError_EncodeFailed;
+  if (out_error) *out_error = result;
+  return result;
+}
+
 static HRESULT ConfigureSourceReaderRgb32(IMFSourceReader* reader, UINT32* width, UINT32* height) {
   ComPtr<IMFMediaType> partial;
   HRESULT hr = MFCreateMediaType(&partial);
@@ -446,7 +541,7 @@ extern "C" MMOD_API int32_t mmod_process_video_file(
   // Estimate total output frames from duration if available.
   PROPVARIANT var{};
   PropVariantInit(&var);
-  if (SUCCEEDED(reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &var)) &&
+  if (SUCCEEDED(reader->GetPresentationAttribute((DWORD)MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &var)) &&
       var.vt == VT_UI8) {
     const double seconds = static_cast<double>(var.uhVal.QuadPart) / 10'000'000.0;
     const int approx_input = static_cast<int>(seconds * 120.0); // rough; refined while reading

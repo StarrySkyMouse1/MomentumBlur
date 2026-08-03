@@ -3,13 +3,13 @@
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:vm="clr-namespace:Mmod.App.ViewModels">
     <Page.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
         <HierarchicalDataTemplate DataType="{x:Type vm:ReplayTreeNode}" ItemsSource="{Binding Children}">
             <StackPanel Orientation="Horizontal">
                 <CheckBox IsChecked="{Binding IsSelected}" Visibility="{Binding IsRecord, Converter={StaticResource BooleanToVisibilityConverter}}" Margin="0,0,8,0"/>
                 <TextBlock Text="{Binding Label}"/>
             </StackPanel>
         </HierarchicalDataTemplate>
-        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
     </Page.Resources>
     <Grid Margin="0,20,0,0">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -32,7 +32,7 @@
                 <TabItem Header="执行队列">
                     <DockPanel>
                         <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="8">
-                            <Button Content="上移" Command="{Binding MoveUpCommand}" Margin="0,0,8,0"/><Button Content="下移" Command="{Binding MoveDownCommand}" Margin="0,0,8,0"/><Button Content="删除" Command="{Binding DeleteTaskCommand}"/>
+                            <Button Content="上移" Command="{Binding MoveUpCommand}" Margin="0,0,8,0"/><Button Content="下移" Command="{Binding MoveDownCommand}" Margin="0,0,8,0"/><Button Content="刷新快照" Command="{Binding RefreshSnapshotCommand}" Margin="0,0,8,0"/><Button Content="删除记录" Command="{Binding DeleteTaskCommand}"/>
                         </StackPanel>
                         <ListBox ItemsSource="{Binding Queue}" SelectedItem="{Binding SelectedTask}">
                             <ListBox.ItemTemplate><DataTemplate><StackPanel Margin="4"><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Text="{Binding Detail}" Foreground="Gray"/></StackPanel></DataTemplate></ListBox.ItemTemplate>
@@ -40,10 +40,9 @@
                     </DockPanel>
                 </TabItem>
                 <TabItem Header="历史">
-                    <ListBox ItemsSource="{Binding History}" SelectedItem="{Binding SelectedTask}">
-                        <ListBox.ItemTemplate><DataTemplate><StackPanel Margin="4"><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Text="{Binding Detail}" Foreground="Gray"/></StackPanel></DataTemplate></ListBox.ItemTemplate>
-                    </ListBox>
+                    <DockPanel><StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="8"><Button Content="打开输出" Command="{Binding OpenOutputCommand}" Margin="0,0,8,0"/><Button Content="删除输出" Command="{Binding DeleteOutputCommand}" Margin="0,0,8,0"/><Button Content="删除记录/日志" Command="{Binding DeleteTaskCommand}"/></StackPanel><ListBox ItemsSource="{Binding History}" SelectedItem="{Binding SelectedTask}"><ListBox.ItemTemplate><DataTemplate><StackPanel Margin="4"><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Text="{Binding Detail}" Foreground="Gray"/></StackPanel></DataTemplate></ListBox.ItemTemplate></ListBox></DockPanel>
                 </TabItem>
+                <TabItem Header="详情/日志"><ScrollViewer Padding="8"><TextBlock Text="{Binding SelectedTaskDetail}" TextWrapping="Wrap"/></ScrollViewer></TabItem>
             </TabControl>
         </Grid>
         <TextBlock Grid.Row="2" Text="{Binding StatusText}" TextWrapping="Wrap"/>
