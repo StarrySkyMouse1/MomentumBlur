@@ -137,7 +137,10 @@ static HRESULT ConfigureSinkWriter(MmodSession* session) {
   if (FAILED(hr)) return hr;
   hr = out_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
   if (FAILED(hr)) return hr;
-  hr = out_type->SetUINT32(MF_MT_AVG_BITRATE, 12'000'000);
+  // 120 Mbps is about 900 MB per minute before the small MP4 container overhead.
+  // Media Foundation may use a hardware H.264 transform when available and
+  // otherwise falls back to an installed software transform.
+  hr = out_type->SetUINT32(MF_MT_AVG_BITRATE, 120'000'000);
   if (FAILED(hr)) return hr;
   hr = out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
   if (FAILED(hr)) return hr;

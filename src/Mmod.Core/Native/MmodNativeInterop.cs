@@ -1,11 +1,11 @@
 using System.Runtime.InteropServices;
-using Mmod.Core.Models;
 
 namespace Mmod.Core.Native;
 
 internal static class MmodNativeInterop
 {
     private const string DllName = "mmod_native";
+    internal const int AutomaticEncoder = 0;
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct SessionDesc
@@ -54,10 +54,4 @@ internal static class MmodNativeInterop
         return ptr == IntPtr.Zero ? $"error {error}" : Marshal.PtrToStringAnsi(ptr) ?? $"error {error}";
     }
 
-    internal static int ToNativeEncoder(EncoderPreference preference) => preference switch
-    {
-        EncoderPreference.Nvenc => 1,
-        EncoderPreference.Amf => 2,
-        _ => 0
-    };
 }

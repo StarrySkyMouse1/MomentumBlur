@@ -141,7 +141,6 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
                     blend,
                     (float)settings.Exposure,
                     ProjectConstants.FinalOutputFramerate,
-                    settings.Encoder,
                     OutputPath!);
 
                 _session.SubmitBgra(bgra, width * 4);
@@ -181,7 +180,6 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
                     blend,
                     (float)settings.Exposure,
                     ProjectConstants.FinalOutputFramerate,
-                    settings.Encoder,
                     OutputPath!);
                 _session.SubmitBgra(bgra, width * 4);
                 _fed++;
