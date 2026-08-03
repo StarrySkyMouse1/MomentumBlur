@@ -162,10 +162,6 @@
                               Content="CFG 中隐藏 HUD（cl_drawhud 0）"
                               IsChecked="{Binding HideHudInCfg, Mode=TwoWay}" />
 
-                    <TextBlock Margin="0,16,0,6"
-                               Text="{Binding JunctionState}"
-                               TextWrapping="Wrap" />
-
                     <TextBlock Margin="0,16,0,6" Text="执行 CFG 指令（进图后在控制台执行）" />
                     <TextBox IsReadOnly="True"
                              Text="{Binding CfgCommandBlock}"
@@ -197,6 +193,10 @@
                                    Command="{Binding OpenImDiskCommand}"
                                    Margin="0,0,8,8" />
                     </WrapPanel>
+
+                    <TextBlock Margin="0,8,0,0"
+                               Text="{Binding JunctionState}"
+                               TextWrapping="Wrap" />
                 </StackPanel>
 
                 <TextBlock Margin="0,16,0,24"
