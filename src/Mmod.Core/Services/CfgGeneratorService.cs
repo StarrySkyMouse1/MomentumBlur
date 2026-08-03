@@ -109,16 +109,21 @@ public static class CfgGeneratorService
             sb.AppendLine("cl_drawhud 0");
         sb.AppendLine($"host_framerate {hostFr}");
         sb.AppendLine($"bind {startKey} \"{startMovieCmd}\"");
-        var restoreCommands = new List<string>
+        sb.AppendLine($"bind {endKey} \"{BuildRestoreCommand(settings)}\"");
+        return sb.ToString().TrimEnd() + Environment.NewLine;
+    }
+
+    public static string BuildRestoreCommand(UserSettings settings)
+    {
+        var commands = new List<string>
         {
             "endmovie",
             "host_timescale 1",
             "host_framerate 0",
         };
         if (settings.HideHudInCfg)
-            restoreCommands.Add("cl_drawhud 1");
-        restoreCommands.Add("sv_cheats 0");
-        sb.AppendLine($"bind {endKey} \"{string.Join("; ", restoreCommands)}\"");
-        return sb.ToString().TrimEnd() + Environment.NewLine;
+            commands.Add("cl_drawhud 1");
+        commands.Add("sv_cheats 0");
+        return string.Join("; ", commands);
     }
 }
