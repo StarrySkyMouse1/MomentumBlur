@@ -1,0 +1,48 @@
+<Page x:Class="Mmod.App.Views.Pages.TasksPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:vm="clr-namespace:Mmod.App.ViewModels">
+    <Page.Resources>
+        <HierarchicalDataTemplate DataType="{x:Type vm:ReplayTreeNode}" ItemsSource="{Binding Children}">
+            <StackPanel Orientation="Horizontal">
+                <CheckBox IsChecked="{Binding IsSelected}" Visibility="{Binding IsRecord, Converter={StaticResource BooleanToVisibilityConverter}}" Margin="0,0,8,0"/>
+                <TextBlock Text="{Binding Label}"/>
+            </StackPanel>
+        </HierarchicalDataTemplate>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
+    </Page.Resources>
+    <Grid Margin="0,20,0,0">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel>
+            <TextBlock Text="任务" FontSize="28" FontWeight="SemiBold"/>
+            <TextBlock Text="选择回放后创建任务；同一阶段只能选择一条记录。" Margin="0,4,0,12" Foreground="Gray"/>
+            <StackPanel Orientation="Horizontal">
+                <Button Content="刷新回放" Command="{Binding RefreshCatalogCommand}" Margin="0,0,8,0"/>
+                <Button Content="创建任务" Command="{Binding CreateTasksCommand}" Margin="0,0,8,0"/>
+                <Button Content="刷新状态" Command="{Binding ReloadTasksCommand}"/>
+            </StackPanel>
+        </StackPanel>
+        <Grid Grid.Row="1" Margin="0,16,0,12">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="1.2*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <GroupBox Header="回放记录"><TreeView ItemsSource="{Binding Catalog}" Padding="8"/></GroupBox>
+            <TabControl Grid.Column="2">
+                <TabItem Header="执行队列">
+                    <DockPanel>
+                        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="8">
+                            <Button Content="上移" Command="{Binding MoveUpCommand}" Margin="0,0,8,0"/><Button Content="下移" Command="{Binding MoveDownCommand}" Margin="0,0,8,0"/><Button Content="删除" Command="{Binding DeleteTaskCommand}"/>
+                        </StackPanel>
+                        <ListBox ItemsSource="{Binding Queue}" SelectedItem="{Binding SelectedTask}">
+                            <ListBox.ItemTemplate><DataTemplate><StackPanel Margin="4"><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Text="{Binding Detail}" Foreground="Gray"/></StackPanel></DataTemplate></ListBox.ItemTemplate>
+                        </ListBox>
+                    </DockPanel>
+                </TabItem>
+                <TabItem Header="历史">
+                    <ListBox ItemsSource="{Binding History}" SelectedItem="{Binding SelectedTask}">
+                        <ListBox.ItemTemplate><DataTemplate><StackPanel Margin="4"><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Text="{Binding Detail}" Foreground="Gray"/></StackPanel></DataTemplate></ListBox.ItemTemplate>
+                    </ListBox>
+                </TabItem>
+            </TabControl>
+        </Grid>
+        <TextBlock Grid.Row="2" Text="{Binding StatusText}" TextWrapping="Wrap"/>
+    </Grid>
+</Page>
