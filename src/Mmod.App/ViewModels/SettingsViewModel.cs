@@ -299,7 +299,7 @@ public partial class SettingsViewModel : ObservableObject
             var s = Snapshot();
             var paths = MomentumDirectoryLinkService.ResolvePaths(s.GameRootPath!, s.RamDiskWatchDirectory);
             MomentumDirectoryLinkService.RemoveLink(paths);
-            StatusText = "Junction 已取消";
+            StatusText = "Junction 取消完成";
             RefreshDerived();
         }
         catch (Exception ex)
