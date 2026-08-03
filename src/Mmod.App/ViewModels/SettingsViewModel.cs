@@ -24,7 +24,6 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private int supersamplingMultiplier;
     [ObservableProperty] private double exposure;
     [ObservableProperty] private int obsCaptureFramerate;
-    [ObservableProperty] private EncoderPreference encoder;
     [ObservableProperty] private string videoOutputDirectory = string.Empty;
     [ObservableProperty] private string ramDiskWatchDirectory = string.Empty;
     [ObservableProperty] private string gameRootPath = string.Empty;
@@ -40,8 +39,6 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string cfgCommandBlock = string.Empty;
 
     public IReadOnlyList<CaptureMode> CaptureModeOptions { get; } = [CaptureMode.Tga, CaptureMode.Obs];
-    public IReadOnlyList<EncoderPreference> EncoderOptions { get; } =
-        [EncoderPreference.Auto, EncoderPreference.Nvenc, EncoderPreference.Amf];
     public IReadOnlyList<int> ObsCaptureFramerateOptions { get; } =
         ProjectConstants.SupportedObsCaptureFramerates;
 
@@ -57,7 +54,6 @@ public partial class SettingsViewModel : ObservableObject
 
     partial void OnSupersamplingMultiplierChanged(int value) => Persist();
     partial void OnObsCaptureFramerateChanged(int value) => Persist();
-    partial void OnEncoderChanged(EncoderPreference value) => Persist();
     partial void OnVideoOutputDirectoryChanged(string value) => Persist();
     partial void OnRamDiskWatchDirectoryChanged(string value)
     {
@@ -112,7 +108,6 @@ public partial class SettingsViewModel : ObservableObject
             SupersamplingMultiplier = s.SupersamplingMultiplier;
             Exposure = Math.Clamp(s.Exposure, 0.05, 1.0);
             ObsCaptureFramerate = s.ObsCaptureFramerate;
-            Encoder = s.Encoder;
             VideoOutputDirectory = s.VideoOutputDirectory ?? string.Empty;
             RamDiskWatchDirectory = s.RamDiskWatchDirectory ?? string.Empty;
             GameRootPath = s.GameRootPath ?? string.Empty;
@@ -138,7 +133,6 @@ public partial class SettingsViewModel : ObservableObject
             SupersamplingMultiplier = Math.Clamp(SupersamplingMultiplier, 1, 64),
             Exposure = Math.Clamp(Exposure, 0.05, 1.0),
             ObsCaptureFramerate = ObsCaptureFramerate,
-            Encoder = Encoder,
             VideoOutputDirectory = VideoOutputDirectory?.Trim() ?? string.Empty,
             RamDiskWatchDirectory = RamDiskWatchDirectory?.Trim() ?? string.Empty,
             GameRootPath = GameRootPath?.Trim(),

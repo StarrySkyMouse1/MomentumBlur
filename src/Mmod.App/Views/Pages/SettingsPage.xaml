@@ -54,11 +54,6 @@
                                       SpinButtonPlacementMode="Inline" />
                     </StackPanel>
 
-                    <StackPanel Grid.Row="1" Grid.Column="2" Margin="0,16,0,0">
-                        <TextBlock Margin="0,0,0,6" Text="编码器偏好" />
-                        <ComboBox ItemsSource="{Binding EncoderOptions}"
-                                  SelectedItem="{Binding Encoder, Mode=TwoWay}" />
-                    </StackPanel>
                 </Grid>
 
                 <TextBlock Margin="0,16,0,6" Text="成片输出目录" />

@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using Mmod.Core.Models;
 
 namespace Mmod.Core.Native;
 
@@ -28,7 +27,6 @@ public sealed class NativeBlendSession : IDisposable
         int blendFrames,
         float exposure,
         int outputFps,
-        EncoderPreference encoder,
         string outputPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
@@ -40,7 +38,7 @@ public sealed class NativeBlendSession : IDisposable
             BlendFrames = Math.Max(1, blendFrames),
             Exposure = exposure,
             OutputFps = outputFps <= 0 ? 60 : outputFps,
-            Encoder = MmodNativeInterop.ToNativeEncoder(encoder),
+            Encoder = MmodNativeInterop.AutomaticEncoder,
             OutputPath = pathPtr
         };
 

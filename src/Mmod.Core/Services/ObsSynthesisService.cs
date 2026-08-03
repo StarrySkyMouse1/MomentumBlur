@@ -32,7 +32,7 @@ public sealed class ObsSynthesisService
                 BlendFrames = blend,
                 Exposure = (float)settings.Exposure,
                 OutputFps = ProjectConstants.FinalOutputFramerate,
-                Encoder = MmodNativeInterop.ToNativeEncoder(settings.Encoder),
+                Encoder = MmodNativeInterop.AutomaticEncoder,
                 OutputPath = pathPtr
             };
 

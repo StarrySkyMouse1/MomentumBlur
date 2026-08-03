@@ -36,7 +36,7 @@ const int outputFrames = 30;
 
 Console.WriteLine($"Output: {outputPath}");
 using var session = NativeBlendSession.Create(
-    w, h, blend, 0.5f, 60, EncoderPreference.Auto, outputPath);
+    w, h, blend, 0.5f, 60, outputPath);
 
 var frame = new byte[w * h * 4];
 for (var of = 0; of < outputFrames * blend; of++)

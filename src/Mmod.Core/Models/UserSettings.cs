@@ -13,8 +13,6 @@ public sealed class UserSettings
     public int SupersamplingMultiplier { get; set; } = 10;
     public double Exposure { get; set; } = 0.5;
     public int ObsCaptureFramerate { get; set; } = 120;
-    public EncoderPreference Encoder { get; set; } = EncoderPreference.Auto;
-
     public string MovieSequenceName { get; set; } = "frame";
     public string StartMovieHotkey { get; set; } = "[";
     public string EndMovieHotkey { get; set; } = "]";
