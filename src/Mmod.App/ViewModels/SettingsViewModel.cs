@@ -37,6 +37,7 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string restoreBlock = string.Empty;
     [ObservableProperty] private string junctionState = string.Empty;
     [ObservableProperty] private string cfgCommandBlock = string.Empty;
+    [ObservableProperty] private string cfgRestoreCommandBlock = string.Empty;
 
     public IReadOnlyList<CaptureMode> CaptureModeOptions { get; } = [CaptureMode.Tga, CaptureMode.Obs];
     public IReadOnlyList<int> ObsCaptureFramerateOptions { get; } =
@@ -165,7 +166,8 @@ public partial class SettingsViewModel : ObservableObject
         SlowMotionBlock = GameSlowMotionCommandBuilder.BuildEnableSlowMotionBlock(
             s.ObsCaptureFramerate, s.SupersamplingMultiplier, s.HideHudInCfg);
         RestoreBlock = GameSlowMotionCommandBuilder.BuildRestoreBlock(s.HideHudInCfg);
-        CfgCommandBlock = BuildCfgCommandBlock(s);
+        CfgCommandBlock = CfgGeneratorService.GameExecCommand;
+        CfgRestoreCommandBlock = CfgGeneratorService.BuildRestoreCommand(s);
 
         if (string.IsNullOrWhiteSpace(s.GameRootPath) || string.IsNullOrWhiteSpace(s.RamDiskWatchDirectory))
         {
@@ -217,11 +219,6 @@ public partial class SettingsViewModel : ObservableObject
         }
     }
 
-    private static string BuildCfgCommandBlock(UserSettings s)
-    {
-        return CfgGeneratorService.BuildCfgContent(s);
-    }
-
     [RelayCommand]
     private void BrowseVideoOutput() => PickFolder("选择成片输出目录", VideoOutputDirectory, v => VideoOutputDirectory = v);
 
@@ -246,6 +243,13 @@ public partial class SettingsViewModel : ObservableObject
     {
         System.Windows.Clipboard.SetText(CfgGeneratorService.GameExecCommand);
         StatusText = "已复制 CFG 指令";
+    }
+
+    [RelayCommand]
+    private void CopyCfgRestoreCommand()
+    {
+        System.Windows.Clipboard.SetText(CfgRestoreCommandBlock);
+        StatusText = "已复制 CFG 还原指令";
     }
 
     [RelayCommand]

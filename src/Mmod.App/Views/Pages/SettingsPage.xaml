@@ -166,12 +166,19 @@
                                Text="{Binding JunctionState}"
                                TextWrapping="Wrap" />
 
-                    <TextBlock Margin="0,16,0,6" Text="实际写入的 CFG 指令（结束快捷键会关闭作弊并还原设置）" />
+                    <TextBlock Margin="0,16,0,6" Text="执行 CFG 指令（进图后在控制台执行）" />
                     <TextBox IsReadOnly="True"
                              Text="{Binding CfgCommandBlock}"
                              TextWrapping="Wrap"
                              AcceptsReturn="True"
-                             MinHeight="90" />
+                             MinHeight="48" />
+
+                    <TextBlock Margin="0,12,0,6" Text="还原指令（停止录制、恢复设置并关闭作弊）" />
+                    <TextBox IsReadOnly="True"
+                             Text="{Binding CfgRestoreCommandBlock}"
+                             TextWrapping="Wrap"
+                             AcceptsReturn="True"
+                             MinHeight="64" />
 
                     <WrapPanel Margin="0,16,0,0">
                         <ui:Button Content="创建并生成 CFG"
@@ -179,6 +186,9 @@
                                    Margin="0,0,8,8" />
                         <ui:Button Content="复制 CFG 指令"
                                    Command="{Binding CopyCfgCommandCommand}"
+                                   Margin="0,0,8,8" />
+                        <ui:Button Content="复制还原指令"
+                                   Command="{Binding CopyCfgRestoreCommandCommand}"
                                    Margin="0,0,8,8" />
                         <ui:Button Content="取消 Junction"
                                    Command="{Binding RemoveJunctionCommand}"
