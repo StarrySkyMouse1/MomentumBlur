@@ -36,14 +36,15 @@ public static class MtvReplayParser
         var map = ReadFixedUtf8(header.Slice(MapOffset, MapLength));
         var playerId = ReadFixedUtf8(header.Slice(PlayerIdOffset, PlayerIdLength));
         var player = ReadFixedUtf8(header.Slice(PlayerNameOffset, PlayerNameLength));
-        var track = header[TrackOffset];
+        // Older online MMTV v1 files encode the main track as zero; current files use one.
+        var track = header[TrackOffset] == 0 ? 1 : header[TrackOffset];
         var stage = header[StageOffset];
         var runTime = BitConverter.Int64BitsToDouble(BinaryPrimitives.ReadInt64LittleEndian(header.Slice(RunTimeOffset, 8)));
         var ticks = BinaryPrimitives.ReadInt32LittleEndian(header.Slice(TickCountOffset, 4));
 
         if (string.IsNullOrWhiteSpace(map))
             throw new InvalidDataException("回放缺少地图名。");
-        if (track <= 0 || stage <= 0)
+        if (stage <= 0)
             throw new InvalidDataException("回放缺少有效赛道或阶段编号。");
         if (!double.IsFinite(runTime) || runTime <= 0)
             throw new InvalidDataException("回放时长无效。");

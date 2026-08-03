@@ -45,6 +45,9 @@ internal static class MmodNativeInterop
         IntPtr progressUser,
         out int outError);
 
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+    internal static extern int mmod_concat_video_files(string inputPaths, string outputPath, out int outError);
+
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr mmod_error_string(int error);
 

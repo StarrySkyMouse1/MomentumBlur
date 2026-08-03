@@ -62,6 +62,12 @@ MMOD_API int32_t mmod_process_video_file(
     void* progress_user,
     int32_t* out_error);
 
+/* Lossless MP4/H.264 stream copy. Input paths are separated by |. */
+MMOD_API int32_t mmod_concat_video_files(
+    const wchar_t* input_paths,
+    const wchar_t* output_path,
+    int32_t* out_error);
+
 MMOD_API const char* mmod_error_string(int32_t error);
 
 #ifdef __cplusplus

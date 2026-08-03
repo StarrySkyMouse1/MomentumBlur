@@ -60,7 +60,25 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                     }
                 }
                 var nodes = _repository.GetNodes(task.Id);
-                _repository.UpdateTaskStatus(task.Id, nodes.Count == 1 ? RenderTaskStatus.Completed : RenderTaskStatus.Merging);
+                if (nodes.Count == 1)
+                {
+                    Mp4MergeService.Validate(task.OutputPath);
+                    _repository.UpdateTaskStatus(task.Id, RenderTaskStatus.Completed);
+                }
+                else
+                {
+                    _repository.UpdateTaskStatus(task.Id, RenderTaskStatus.Merging);
+                    try
+                    {
+                        Mp4MergeService.MergeAtomically(nodes.OrderBy(x => x.Sequence).Select(x => x.ClipPath!).ToList(), task.OutputPath);
+                        _repository.UpdateTaskStatus(task.Id, RenderTaskStatus.Completed);
+                    }
+                    catch (Exception ex)
+                    {
+                        _repository.UpdateTaskStatus(task.Id, RenderTaskStatus.ClipsReadyNeedsManualMerge, ex.Message);
+                        Status = $"{task.MapName} 无损合并失败，阶段片段已保留；继续下一任务。"; Changed?.Invoke();
+                    }
+                }
             }
             Status = "所有任务已完成";
             await game.CloseOwnedAsync(CancellationToken.None);

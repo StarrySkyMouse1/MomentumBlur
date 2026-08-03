@@ -2,6 +2,40 @@
 using Mmod.Core.Native;
 using Mmod.Core.Services;
 
+if (args.Length >= 2 && args[0] == "catalog")
+{
+    var result = new ReplayCatalogService().Scan(args[1]);
+    Console.WriteLine($"CATALOG records={result.Records.Count} issues={result.Issues.Count}");
+    foreach (var issue in result.Issues.Take(10)) Console.WriteLine($"ISSUE {issue.FilePath}: {issue.Message}");
+    return result.Records.Count > 0 && result.Issues.Count == 0 ? 0 : 3;
+}
+
+if (args.Length >= 3 && args[0] == "concat")
+{
+    var output = Path.Combine(Path.GetTempPath(), "mmod_smoke", $"concat_{DateTime.Now:HHmmss}.mp4");
+    Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+    NativeMp4Concatenator.Concatenate([args[1], args[2]], output);
+    Mp4MergeService.Validate(output);
+    Console.WriteLine($"CONCAT_OK path={output} size={new FileInfo(output).Length}");
+    return 0;
+}
+
+if (args.Length >= 1 && args[0] == "repository")
+{
+    var db = Path.Combine(Path.GetTempPath(), "mmod_smoke", $"tasks_{Guid.NewGuid():N}.db");
+    var repo = new RenderTaskRepository(db);
+    var settings = new RenderSettingsSnapshot(10, 0.5, @"R:\", @"C:\Videos", @"C:\Game", false, 60, 140_000_000);
+    var id = repo.CreateTask(new NewRenderTask("map", "player", 1, @"C:\Videos\out.mp4", settings, [new NewRenderNode(@"C:\record.mtv", 1, 0, 12.3, 738)]));
+    var task = repo.GetTasks().Single(x => x.Id == id);
+    var node = repo.GetNodes(id).Single();
+    if (task.Status != RenderTaskStatus.Pending || node.ExpectedTickCount != 738) return 4;
+    repo.UpdateTaskStatus(id, RenderTaskStatus.Running);
+    var reopened = new RenderTaskRepository(db);
+    if (reopened.GetTasks().Single().Status != RenderTaskStatus.Paused || reopened.GetNodes(id).Single().Status != RenderNodeStatus.Pending) return 5;
+    Console.WriteLine("REPOSITORY_OK");
+    return 0;
+}
+
 if (args.Length >= 2 && args[0] == "obs")
 {
     var input = args[1];

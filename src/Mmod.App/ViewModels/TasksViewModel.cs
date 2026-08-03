@@ -19,6 +19,7 @@ public partial class TasksViewModel : ObservableObject
     public ObservableCollection<TaskListItem> History { get; } = [];
     [ObservableProperty] private string statusText = "请刷新回放记录并勾选需要执行的记录。";
     [ObservableProperty] private TaskListItem? selectedTask;
+    [ObservableProperty] private string selectedTaskDetail = "选择任务后查看节点和日志。";
 
     public TasksViewModel(SettingsViewModel settings)
     {
@@ -113,6 +114,40 @@ public partial class TasksViewModel : ObservableObject
         if (SelectedTask is null) return;
         _repository.DeleteTaskRecord(SelectedTask.Record.Id);
         ReloadTasks();
+    }
+
+    partial void OnSelectedTaskChanged(TaskListItem? value)
+    {
+        if (value is null) { SelectedTaskDetail = "选择任务后查看节点和日志。"; return; }
+        var nodes = _repository.GetNodes(value.Record.Id).Select(x => $"节点 {x.Sequence + 1} / 阶段 {x.StageNumber}：{x.Status}，重试 {x.RetryCount}/2\n{x.ReplayPath}");
+        var logs = _repository.GetLogs(value.Record.Id).TakeLast(30).Select(x => $"{x.Timestamp.LocalDateTime:MM-dd HH:mm:ss} [{x.Level}] {x.Message}");
+        SelectedTaskDetail = string.Join("\n", nodes.Concat(["", "最近日志："]).Concat(logs));
+    }
+
+    [RelayCommand] private void RefreshSnapshot()
+    {
+        if (SelectedTask?.Record.Status != RenderTaskStatus.Pending) { StatusText = "只有待执行任务可以刷新设置快照。"; return; }
+        try
+        {
+            var s = _settings.Snapshot(); ValidateTaskSettings(s);
+            _repository.UpdatePendingTaskSettings(SelectedTask.Record.Id, new RenderSettingsSnapshot(s.SupersamplingMultiplier, s.Exposure, s.RamDiskWatchDirectory, s.VideoOutputDirectory, s.GameRootPath!, s.HideHudInCfg, ProjectConstants.FinalOutputFramerate, 140_000_000));
+            StatusText = "任务设置快照已刷新。"; ReloadTasks();
+        }
+        catch (Exception ex) { StatusText = ex.Message; }
+    }
+
+    [RelayCommand] private void OpenOutput()
+    {
+        if (SelectedTask is null) return;
+        var path = File.Exists(SelectedTask.Record.OutputPath) ? SelectedTask.Record.OutputPath : Path.GetDirectoryName(SelectedTask.Record.OutputPath);
+        if (!string.IsNullOrWhiteSpace(path) && (File.Exists(path) || Directory.Exists(path))) System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{SelectedTask.Record.OutputPath}\"") { UseShellExecute = true });
+    }
+
+    [RelayCommand] private void DeleteOutput()
+    {
+        if (SelectedTask is null || !File.Exists(SelectedTask.Record.OutputPath)) return;
+        if (System.Windows.MessageBox.Show("确定删除该任务的最终输出文件？回放源文件和阶段片段不会删除。", "删除输出", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Warning) != System.Windows.MessageBoxResult.Yes) return;
+        File.Delete(SelectedTask.Record.OutputPath); StatusText = "最终输出文件已删除。";
     }
 
     private static IEnumerable<ReplayTreeNode> Flatten(ReplayTreeNode root) { yield return root; foreach (var child in root.Children.SelectMany(Flatten)) yield return child; }
