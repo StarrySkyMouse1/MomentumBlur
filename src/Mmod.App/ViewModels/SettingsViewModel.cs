@@ -2,6 +2,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Mmod.Core.Models;
 using Mmod.Core.Services;
+using System.Diagnostics;
 using System.IO;
 
 namespace Mmod.App.ViewModels;
@@ -36,6 +37,7 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string slowMotionBlock = string.Empty;
     [ObservableProperty] private string restoreBlock = string.Empty;
     [ObservableProperty] private string junctionState = string.Empty;
+    [ObservableProperty] private string cfgCommandBlock = string.Empty;
 
     public IReadOnlyList<CaptureMode> CaptureModeOptions { get; } = [CaptureMode.Tga, CaptureMode.Obs];
     public IReadOnlyList<EncoderPreference> EncoderOptions { get; } =
@@ -57,11 +59,35 @@ public partial class SettingsViewModel : ObservableObject
     partial void OnObsCaptureFramerateChanged(int value) => Persist();
     partial void OnEncoderChanged(EncoderPreference value) => Persist();
     partial void OnVideoOutputDirectoryChanged(string value) => Persist();
-    partial void OnRamDiskWatchDirectoryChanged(string value) => Persist();
-    partial void OnGameRootPathChanged(string value) => Persist();
-    partial void OnMovieSequenceNameChanged(string value) => Persist();
-    partial void OnStartMovieHotkeyChanged(string value) => Persist();
-    partial void OnEndMovieHotkeyChanged(string value) => Persist();
+    partial void OnRamDiskWatchDirectoryChanged(string value)
+    {
+        Persist();
+        NotifyPathCommandsCanExecuteChanged();
+    }
+
+    partial void OnGameRootPathChanged(string value)
+    {
+        Persist();
+        NotifyPathCommandsCanExecuteChanged();
+    }
+
+    partial void OnMovieSequenceNameChanged(string value)
+    {
+        Persist();
+        CreateJunctionCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnStartMovieHotkeyChanged(string value)
+    {
+        Persist();
+        CreateJunctionCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnEndMovieHotkeyChanged(string value)
+    {
+        Persist();
+        CreateJunctionCommand.NotifyCanExecuteChanged();
+    }
     partial void OnHideHudInCfgChanged(bool value) => Persist();
     partial void OnMaxParallelJobsChanged(int value) => Persist();
 
@@ -145,6 +171,7 @@ public partial class SettingsViewModel : ObservableObject
         SlowMotionBlock = GameSlowMotionCommandBuilder.BuildEnableSlowMotionBlock(
             s.ObsCaptureFramerate, s.SupersamplingMultiplier, s.HideHudInCfg);
         RestoreBlock = GameSlowMotionCommandBuilder.BuildRestoreBlock(s.HideHudInCfg);
+        CfgCommandBlock = BuildCfgCommandBlock(s);
 
         if (string.IsNullOrWhiteSpace(s.GameRootPath) || string.IsNullOrWhiteSpace(s.RamDiskWatchDirectory))
         {
@@ -161,6 +188,52 @@ public partial class SettingsViewModel : ObservableObject
         {
             JunctionState = ex.Message;
         }
+
+        NotifyPathCommandsCanExecuteChanged();
+    }
+
+    private void NotifyPathCommandsCanExecuteChanged()
+    {
+        CreateJunctionCommand.NotifyCanExecuteChanged();
+        RemoveJunctionCommand.NotifyCanExecuteChanged();
+    }
+
+    private bool CanCreateJunction() =>
+        HasConfiguredPaths() &&
+        !string.IsNullOrWhiteSpace(MovieSequenceName) &&
+        !string.IsNullOrWhiteSpace(StartMovieHotkey) &&
+        !string.IsNullOrWhiteSpace(EndMovieHotkey);
+
+    private bool CanRemoveJunction() => HasConfiguredPaths();
+
+    private bool HasConfiguredPaths()
+    {
+        var gameRoot = GameRootPath?.Trim() ?? string.Empty;
+        var watch = RamDiskWatchDirectory?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(gameRoot) || string.IsNullOrWhiteSpace(watch))
+            return false;
+
+        try
+        {
+            return Directory.Exists(gameRoot) && Directory.Exists(watch);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string BuildCfgCommandBlock(UserSettings s)
+    {
+        var multiplier = Math.Clamp(s.SupersamplingMultiplier, 1, 120);
+        var hostFr = multiplier * ProjectConstants.FinalOutputFramerate;
+        var startMovieCmd = WatchDirectoryHelper.BuildGameStartmovieCommand(s.MovieSequenceName);
+        return
+            $"{CfgGeneratorService.GameExecCommand}\n" +
+            $"\n" +
+            $"超采样 {multiplier}x（host_framerate {hostFr} → 成片 60fps）\n" +
+            $"游戏内：{startMovieCmd}\n" +
+            $"快捷键：{s.StartMovieHotkey.Trim()} = startmovie，{s.EndMovieHotkey.Trim()} = endmovie";
     }
 
     [RelayCommand]
@@ -183,23 +256,10 @@ public partial class SettingsViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void GenerateCfg()
+    private void CopyCfgCommand()
     {
-        try
-        {
-            var s = Snapshot();
-            if (string.IsNullOrWhiteSpace(s.GameRootPath))
-                throw new InvalidOperationException("请先设置游戏根目录。");
-            var result = CfgGeneratorService.Generate(s, s.GameRootPath!);
-            _settings = s;
-            _store.Save(_settings);
-            StatusText = Path.GetFileName(result.CfgFilePath) + " 已生成";
-            RefreshDerived();
-        }
-        catch (Exception ex)
-        {
-            StatusText = $"CFG 失败：{ex.Message}";
-        }
+        System.Windows.Clipboard.SetText(CfgGeneratorService.GameExecCommand);
+        StatusText = "已复制 CFG 指令";
     }
 
     [RelayCommand]
@@ -216,33 +276,41 @@ public partial class SettingsViewModel : ObservableObject
         StatusText = "已复制恢复指令";
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanCreateJunction))]
     private void CreateJunction()
     {
         try
         {
+            if (!CanCreateJunction())
+                throw new InvalidOperationException("请先配置有效的游戏根目录与 TGA 监视目录，并填写序列名与快捷键。");
+
             var s = Snapshot();
-            if (string.IsNullOrWhiteSpace(s.GameRootPath) || string.IsNullOrWhiteSpace(s.RamDiskWatchDirectory))
-                throw new InvalidOperationException("需要游戏根目录与监视目录。");
             var paths = MomentumDirectoryLinkService.ResolvePaths(s.GameRootPath!, s.RamDiskWatchDirectory);
             MomentumDirectoryLinkService.CreateLink(paths, overwriteRamCopy: true);
-            StatusText = "Junction 已创建";
+
+            var result = CfgGeneratorService.Generate(s, s.GameRootPath!);
+            _settings = s;
+            _store.Save(_settings);
+
+            System.Windows.Clipboard.SetText(CfgGeneratorService.GameExecCommand);
+            StatusText = $"Junction 已创建，{Path.GetFileName(result.CfgFilePath)} 已生成，CFG 指令已复制";
             RefreshDerived();
         }
         catch (Exception ex)
         {
-            StatusText = $"Junction 失败：{ex.Message}";
+            StatusText = $"创建失败：{ex.Message}";
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanRemoveJunction))]
     private void RemoveJunction()
     {
         try
         {
+            if (!CanRemoveJunction())
+                throw new InvalidOperationException("需要有效的游戏根目录与监视目录。");
+
             var s = Snapshot();
-            if (string.IsNullOrWhiteSpace(s.GameRootPath) || string.IsNullOrWhiteSpace(s.RamDiskWatchDirectory))
-                throw new InvalidOperationException("需要游戏根目录与监视目录。");
             var paths = MomentumDirectoryLinkService.ResolvePaths(s.GameRootPath!, s.RamDiskWatchDirectory);
             MomentumDirectoryLinkService.RemoveLink(paths);
             StatusText = "Junction 已取消";
@@ -251,6 +319,32 @@ public partial class SettingsViewModel : ObservableObject
         catch (Exception ex)
         {
             StatusText = $"取消 Junction 失败：{ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void OpenImDisk()
+    {
+        try
+        {
+            var exe = Path.Combine(AppContext.BaseDirectory, "ImDisk", "RamDiskUI.exe");
+            if (!File.Exists(exe))
+            {
+                StatusText = "未找到 ImDisk：请确认 tools/ImDisk 已复制到输出目录。";
+                return;
+            }
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = exe,
+                UseShellExecute = true,
+                WorkingDirectory = Path.GetDirectoryName(exe)!,
+            });
+            StatusText = "已打开 ImDisk";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"打开 ImDisk 失败：{ex.Message}";
         }
     }
 }

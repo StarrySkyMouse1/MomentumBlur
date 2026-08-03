@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/Mmod.App/Mmod.App.csproj" />
     <Project Path="src/Mmod.Core/Mmod.Core.csproj" />
+    <Project Path="src/Mmod.Native/build/mmod_native.vcxproj" Id="f9e72b54-16ef-3da7-aa10-c6270b82cfc1" />
     <Project Path="src/Mmod.SmokeTest/Mmod.SmokeTest.csproj" />
   </Folder>
 </Solution>

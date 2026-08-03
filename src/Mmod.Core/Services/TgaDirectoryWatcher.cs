@@ -68,6 +68,35 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
         }
     }
 
+    private static bool LooksLikeCompleteTga(FileInfo info)
+    {
+        try
+        {
+            using var stream = info.Open(FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            if (stream.Length < MinTgaHeaderSize)
+                return false;
+            Span<byte> header = stackalloc byte[MinTgaHeaderSize];
+            if (stream.Read(header) < MinTgaHeaderSize)
+                return false;
+            if (header[2] != 2)
+                return false;
+            var width = header[12] | (header[13] << 8);
+            var height = header[14] | (header[15] << 8);
+            var bpp = header[16];
+            if (width is <= 0 or > 7680 || height is <= 0 or > 4320)
+                return false;
+            if (bpp is not (24 or 32))
+                return false;
+            var expected = (long)width * height * (bpp / 8) + MinTgaHeaderSize;
+            // 允许极小尾部差异，拒绝明显半截文件
+            return stream.Length >= expected && stream.Length <= expected + 64;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public void Start(DateTime? sessionStartedUtc = null, bool acceptPreSessionFiles = false)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -141,6 +170,29 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
         }
     }
 
+    private void PruneMissingPending()
+    {
+        var removed = false;
+        foreach (var (index, path) in _pending)
+        {
+            try
+            {
+                if (File.Exists(path))
+                    continue;
+            }
+            catch
+            {
+                // treat as missing
+            }
+
+            if (_pending.TryRemove(index, out _))
+                removed = true;
+        }
+
+        if (removed)
+            PendingChanged?.Invoke();
+    }
+
     private void OnFsEvent(object sender, FileSystemEventArgs e)
     {
         if (_disposed)
@@ -161,6 +213,7 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
             var fullScanInterval = PendingCount > 500 ? BackloggedFullScanIntervalMs : BaseFullScanIntervalMs;
             if ((now - _lastFullScanUtc).TotalMilliseconds >= fullScanInterval)
                 ScanDirectory();
+            PruneMissingPending();
             ProcessCandidates(now);
         }
         finally
@@ -195,6 +248,13 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
                 }
 
                 if (info.Length < MinTgaHeaderSize)
+                {
+                    candidate.Update(info.Length, info.LastWriteTimeUtc);
+                    continue;
+                }
+
+                // 已收尾的完整帧：文件大小应接近声明分辨率，避免误收半截写入
+                if (!LooksLikeCompleteTga(info))
                 {
                     candidate.Update(info.Length, info.LastWriteTimeUtc);
                     continue;

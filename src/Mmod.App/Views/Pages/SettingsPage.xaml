@@ -171,15 +171,25 @@
                                Text="{Binding JunctionState}"
                                TextWrapping="Wrap" />
 
+                    <TextBlock Margin="0,16,0,6" Text="CFG 指令（进图后控制台执行）" />
+                    <TextBox IsReadOnly="True"
+                             Text="{Binding CfgCommandBlock}"
+                             TextWrapping="Wrap"
+                             AcceptsReturn="True"
+                             MinHeight="90" />
+
                     <WrapPanel Margin="0,16,0,0">
-                        <ui:Button Content="生成 CFG"
-                                   Command="{Binding GenerateCfgCommand}"
-                                   Margin="0,0,8,8" />
-                        <ui:Button Content="创建 Junction"
+                        <ui:Button Content="创建并生成 CFG"
                                    Command="{Binding CreateJunctionCommand}"
+                                   Margin="0,0,8,8" />
+                        <ui:Button Content="复制 CFG 指令"
+                                   Command="{Binding CopyCfgCommandCommand}"
                                    Margin="0,0,8,8" />
                         <ui:Button Content="取消 Junction"
                                    Command="{Binding RemoveJunctionCommand}"
+                                   Margin="0,0,8,8" />
+                        <ui:Button Content="打开 ImDisk"
+                                   Command="{Binding OpenImDiskCommand}"
                                    Margin="0,0,8,8" />
                     </WrapPanel>
                 </StackPanel>

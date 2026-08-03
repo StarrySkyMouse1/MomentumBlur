@@ -199,15 +199,8 @@ static HRESULT WriteOutputFrame(MmodSession* session) {
   BYTE* data = nullptr;
   hr = buffer->Lock(&data, nullptr, nullptr);
   if (FAILED(hr)) return hr;
-  // MF RGB32 is commonly bottom-up; flip while copying.
-  const int width = session->width;
-  const int height = session->height;
-  const int stride = width * 4;
-  for (int y = 0; y < height; ++y) {
-    const uint8_t* src = session->output_bgra.data() + static_cast<size_t>(y) * static_cast<size_t>(stride);
-    uint8_t* dst = data + static_cast<size_t>(height - 1 - y) * static_cast<size_t>(stride);
-    std::memcpy(dst, src, static_cast<size_t>(stride));
-  }
+  // Positive MF_MT_DEFAULT_STRIDE means top-down; keep accumulator orientation.
+  std::memcpy(data, session->output_bgra.data(), buffer_size);
   buffer->Unlock();
   hr = buffer->SetCurrentLength(buffer_size);
   if (FAILED(hr)) return hr;

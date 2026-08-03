@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -39,18 +40,16 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
     public ComposeViewModel(SettingsViewModel settings)
     {
         _settings = settings;
+        _settings.PropertyChanged += OnSettingsPropertyChanged;
         _tga.Changed += () =>
         {
             System.Windows.Application.Current.Dispatcher.Invoke(() =>
             {
-                StatusText = _tga.Status;
-                TgaMetricsText = $"已喂入 {_tga.FedCount}，待处理 {_tga.PendingCount}";
-                OnPropertyChanged(nameof(IsTgaRunning));
-                OnPropertyChanged(nameof(CanStartTga));
-                OnPropertyChanged(nameof(CanStopTga));
+                RefreshTgaUi();
             });
         };
         RefreshModeSummary();
+        RefreshOutputDiskSpace();
     }
 
     public ObservableCollection<BatchVideoItem> BatchItems { get; } = [];
@@ -62,10 +61,13 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
     private string statusText = "就绪";
 
     [ObservableProperty]
-    private string tgaMetricsText = "已喂入 0，待处理 0";
+    private string tgaMetricsText = "未开始监视";
 
     [ObservableProperty]
     private string batchSummary = "队列：0";
+
+    [ObservableProperty]
+    private string outputDiskSpaceText = "输出盘剩余空间：正在读取…";
 
     [ObservableProperty]
     private bool isObsBusy;
@@ -73,8 +75,6 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
     public bool IsTgaMode => _settings.CaptureMode == CaptureMode.Tga;
     public bool IsObsMode => _settings.CaptureMode == CaptureMode.Obs;
     public bool IsTgaRunning => _tga.IsRunning;
-    public bool CanStartTga => IsTgaMode && !_tga.IsRunning;
-    public bool CanStopTga => IsTgaMode && _tga.IsRunning;
     public bool CanStartObs => IsObsMode && !IsObsBusy && BatchItems.Any(i => i.IsSelected);
 
     public void RefreshModeSummary()
@@ -85,18 +85,87 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
             : $"OBS · {s.ObsCaptureFramerate}fps · N={s.SupersamplingMultiplier}";
         OnPropertyChanged(nameof(IsTgaMode));
         OnPropertyChanged(nameof(IsObsMode));
-        OnPropertyChanged(nameof(CanStartTga));
-        OnPropertyChanged(nameof(CanStopTga));
+        StartTgaCommand.NotifyCanExecuteChanged();
+        StopTgaCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(CanStartObs));
         UpdateBatchSummary();
+        if (!_tga.IsRunning)
+            TgaMetricsText = BuildIdleTgaMetrics(s);
+        RefreshOutputDiskSpace();
     }
-    [RelayCommand]
+
+    private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(SettingsViewModel.VideoOutputDirectory))
+            RefreshOutputDiskSpace();
+    }
+
+    private void RefreshOutputDiskSpace()
+    {
+        try
+        {
+            var outputDirectory = string.IsNullOrWhiteSpace(_settings.VideoOutputDirectory)
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "mmod_record_next")
+                : _settings.VideoOutputDirectory;
+            var driveRoot = Path.GetPathRoot(Path.GetFullPath(outputDirectory));
+            if (string.IsNullOrWhiteSpace(driveRoot))
+                throw new IOException("无法确定输出盘符。");
+
+            var drive = new DriveInfo(driveRoot);
+            OutputDiskSpaceText = $"输出盘剩余空间：{drive.AvailableFreeSpace / 1024d / 1024d / 1024d:N1} GB（{drive.Name.TrimEnd(Path.DirectorySeparatorChar)}）";
+        }
+        catch
+        {
+            OutputDiskSpaceText = "输出盘剩余空间：无法读取";
+        }
+    }
+
+    private void RefreshTgaUi()
+    {
+        StatusText = _tga.Status;
+        TgaMetricsText = BuildRunningTgaMetrics();
+        RefreshOutputDiskSpace();
+        OnPropertyChanged(nameof(IsTgaRunning));
+        StartTgaCommand.NotifyCanExecuteChanged();
+        StopTgaCommand.NotifyCanExecuteChanged();
+    }
+
+    private string BuildRunningTgaMetrics()
+    {
+        var watch = string.IsNullOrWhiteSpace(_tga.WatchDirectory) ? "（未设置）" : _tga.WatchDirectory;
+        var output = string.IsNullOrWhiteSpace(_tga.OutputPath)
+            ? "（尚未创建）"
+            : Path.GetFileName(_tga.OutputPath);
+        return
+            $"监视目录：{watch}\n" +
+            $"已喂入 {_tga.FedCount} 帧，待处理 {_tga.PendingCount}\n" +
+            $"输出：{output}";
+    }
+
+    private static string BuildIdleTgaMetrics(UserSettings s)
+    {
+        try
+        {
+            var watch = WatchDirectoryHelper.ResolveEffectiveWatchDirectory(s, s.GameRootPath);
+            return $"将监视：{watch}\n已喂入 0 帧，待处理 0";
+        }
+        catch
+        {
+            return "请先在设置中配置 TGA 监视目录与游戏根目录";
+        }
+    }
+
+    private bool CanStartTga() => IsTgaMode && !_tga.IsRunning;
+
+    private bool CanStopTga() => IsTgaMode && _tga.IsRunning;
+
+    [RelayCommand(CanExecute = nameof(CanStartTga))]
     private async Task StartTgaAsync()
     {
         try
         {
             await _tga.StartAsync(_settings.Snapshot());
-            StatusText = _tga.Status;
+            RefreshTgaUi();
             RefreshModeSummary();
         }
         catch (Exception ex)
@@ -105,11 +174,11 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanStopTga))]
     private async Task StopTgaAsync()
     {
         await _tga.StopAsync();
-        StatusText = _tga.Status;
+        RefreshTgaUi();
         RefreshModeSummary();
     }
 
@@ -161,6 +230,7 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "mmod_record_next")
             : settings.VideoOutputDirectory;
         Directory.CreateDirectory(outputDir);
+        RefreshOutputDiskSpace();
 
         try
         {
@@ -200,6 +270,7 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
                         {
                             item.Status = File.Exists(output) ? $"完成：{Path.GetFileName(output)}" : "完成（无文件？）";
                             item.ProgressPercent = 100;
+                            RefreshOutputDiskSpace();
                         });
                     }
                     catch (OperationCanceledException)
@@ -262,6 +333,7 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _settings.PropertyChanged -= OnSettingsPropertyChanged;
         _obsCts?.Cancel();
         await _tga.DisposeAsync();
     }
