@@ -153,6 +153,18 @@ public static class MomentumDirectoryLinkService
         if (!hadJunction && !hadBackup && !hadRamCopy)
             return false;
 
+        // momentum 已是实体目录且没有待还原的 _momentum，说明链接取消已经完成。
+        // RAM 盘可能只残留上次未清理掉的副本；清掉它后仍按幂等成功处理。
+        if (!hadJunction && !hadBackup && Directory.Exists(paths.LinkPath))
+        {
+            if (hadRamCopy)
+            {
+                try { DeleteDirectoryTree(paths.RamMomentumPath); }
+                catch { /* 链接已取消；残留 RAM 副本不应将完成状态误报为失败 */ }
+            }
+            return hadRamCopy;
+        }
+
         if (hadJunction)
             RemoveLinkPathIfExists(paths.LinkPath);
 
