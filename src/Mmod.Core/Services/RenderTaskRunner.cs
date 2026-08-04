@@ -130,10 +130,19 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                 await using var pipeline = new TgaPipelineOrchestrator();
                 pipeline.Changed += () => { Status = $"{task.MapName}：节点 {node.Sequence + 1}，已处理 {pipeline.FedCount} 帧"; Changed?.Invoke(); };
                 await pipeline.StartAsync(user, clip, false);
-                var replay = node.ReplayPath.Replace("\\", "/").Replace("\"", "");
+                var replay = BuildGameReplayPath(settings.GameRootPath, node.ReplayPath);
                 await game.NetCon.SendAsync($"mom_tv_replay_watch {Quote(replay)}", token);
-                await game.NetCon.ExecuteAsync("echo MMOD_REPLAY_READY", TimeSpan.FromMinutes(2), token);
+                await game.NetCon.WaitForOutputAsync(
+                    line => line.Contains("Loaded replay", StringComparison.OrdinalIgnoreCase),
+                    line => line.Contains("Failed to load replay", StringComparison.OrdinalIgnoreCase)
+                        || line.Contains("Failed to open replay", StringComparison.OrdinalIgnoreCase)
+                        || line.Contains("Invalid replay file", StringComparison.OrdinalIgnoreCase),
+                    TimeSpan.FromMinutes(2), token);
+                // Watching starts playback. Pause only after the engine has
+                // confirmed `Loaded replay`, seek back to tick 0, then resume
+                // after startmovie is active so no replay frames are missed.
                 await game.NetCon.ExecuteAsync("mom_tv_replay_play_pause; mom_tv_replay_goto 0", TimeSpan.FromSeconds(30), token);
+                _repository.AddLog(task.Id, node.Id, "Info", "回放已加载并定位到 tick 0，正在启动 TGA 后继续播放。");
                 await game.NetCon.ExecuteAsync($"{WatchDirectoryHelper.BuildGameStartmovieCommand(user.MovieSequenceName)}; mom_tv_replay_play_pause", TimeSpan.FromSeconds(30), token);
                 var expectedFrames = Math.Max(1, (int)Math.Ceiling(node.ExpectedDurationSeconds * settings.SupersamplingMultiplier * ProjectConstants.FinalOutputFramerate));
                 var lastProgress = DateTime.UtcNow; var lastCount = -1;
@@ -172,6 +181,14 @@ public sealed class RenderTaskRunner : IAsyncDisposable
     private static string BuildSetup(RenderSettingsSnapshot s) => $"sv_cheats 1; {(s.HideHud ? "cl_drawhud 0; " : string.Empty)}host_framerate {s.SupersamplingMultiplier * ProjectConstants.FinalOutputFramerate}";
     private static UserSettings ToUserSettings(RenderSettingsSnapshot s) => new() { CaptureMode = CaptureMode.Tga, SupersamplingMultiplier = s.SupersamplingMultiplier, Exposure = s.Exposure, RamDiskWatchDirectory = s.WatchDirectory, VideoOutputDirectory = s.OutputDirectory, GameRootPath = s.GameRootPath, HideHudInCfg = s.HideHud, MovieSequenceName = "frame" };
     private static string Quote(string text) => $"\"{text.Replace("\"", string.Empty)}\"";
+    private static string BuildGameReplayPath(string gameRoot, string replayPath)
+    {
+        var contentRoot = Path.Combine(Path.GetFullPath(gameRoot), "momentum");
+        var relative = Path.GetRelativePath(contentRoot, Path.GetFullPath(replayPath));
+        if (relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            throw new InvalidOperationException("回放文件不在游戏 momentum 目录中。");
+        return relative.Replace('\\', '/').Replace("\"", string.Empty);
+    }
     private static void TryDelete(string path) { try { if (File.Exists(path)) File.Delete(path); } catch { } }
     public async ValueTask DisposeAsync() { if (IsRunning) { StopImmediately(); while (IsRunning) await Task.Delay(50); } }
 }

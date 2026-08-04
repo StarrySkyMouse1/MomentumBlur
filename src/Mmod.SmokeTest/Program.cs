@@ -23,9 +23,15 @@ if (args.Length >= 3 && args[0] == "control")
     if (args.Length >= 4)
     {
         await game.NetCon.ExecuteAsync("help mom_tv_replay_play_pause; help mom_tv_replay_goto; mom_tv_replay_goto", TimeSpan.FromSeconds(30), CancellationToken.None);
-        var replay = args[3].Replace("\\", "/").Replace("\"", string.Empty);
+        var replayRoot = Path.Combine(Path.GetFullPath(args[1]), "momentum");
+        var replay = Path.GetRelativePath(replayRoot, Path.GetFullPath(args[3])).Replace("\\", "/").Replace("\"", string.Empty);
         await game.NetCon.SendAsync($"mom_tv_replay_watch \"{replay}\"", CancellationToken.None);
-        await game.NetCon.ExecuteAsync("echo MMOD_CONTROL_REPLAY_READY", TimeSpan.FromMinutes(2), CancellationToken.None);
+        await game.NetCon.WaitForOutputAsync(
+            line => line.Contains("Loaded replay", StringComparison.OrdinalIgnoreCase),
+            line => line.Contains("Failed to load replay", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("Failed to open replay", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("Invalid replay file", StringComparison.OrdinalIgnoreCase),
+            TimeSpan.FromMinutes(2), CancellationToken.None);
         Console.WriteLine("CONTROL_REPLAY_OK");
         await game.NetCon.ExecuteAsync("mom_tv_replay_play_pause; mom_tv_replay_goto 0", TimeSpan.FromSeconds(30), CancellationToken.None);
         Console.WriteLine("CONTROL_REPLAY_RESET_OK");
