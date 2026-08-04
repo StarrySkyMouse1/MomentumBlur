@@ -39,6 +39,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
             game = new MomentumProcessController();
             Status = "正在启动 Momentum Mod 并验证 NetCon"; Changed?.Invoke();
             await game.StartAsync(firstSettings.GameRootPath, token);
+            Status = "NetCon 已连接，准备执行任务"; Changed?.Invoke();
 
             foreach (var task in runnable)
             {
@@ -46,7 +47,15 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                 var settings = Deserialize(task);
                 Validate(settings);
                 _repository.UpdateTaskStatus(task.Id, RenderTaskStatus.Starting);
-                await game.NetCon.ExecuteAsync($"map {Quote(task.MapName)}", TimeSpan.FromMinutes(3), token);
+                _repository.AddLog(task.Id, null, "Info", $"NetCon 已认证，正在切换地图 {task.MapName}。");
+                Status = $"正在切换地图：{task.MapName}"; Changed?.Invoke();
+                // `map` interrupts the current console command while the level
+                // loads, so an ACK appended with a semicolon is discarded.
+                // Send it as its own line, then use the next line's ACK as the
+                // condition that the engine command loop is responsive again.
+                await game.NetCon.SendAsync($"map {Quote(task.MapName)}", token);
+                await game.NetCon.ExecuteAsync("echo MMOD_MAP_READY", TimeSpan.FromMinutes(3), token);
+                _repository.AddLog(task.Id, null, "Info", $"地图 {task.MapName} 已加载，开始配置录制。");
                 await game.NetCon.ExecuteAsync(BuildSetup(settings), TimeSpan.FromSeconds(30), token);
                 _repository.UpdateTaskStatus(task.Id, RenderTaskStatus.Running);
                 var timer = Stopwatch.StartNew();
@@ -122,7 +131,10 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                 pipeline.Changed += () => { Status = $"{task.MapName}：节点 {node.Sequence + 1}，已处理 {pipeline.FedCount} 帧"; Changed?.Invoke(); };
                 await pipeline.StartAsync(user, clip, false);
                 var replay = node.ReplayPath.Replace("\\", "/").Replace("\"", "");
-                await game.NetCon.ExecuteAsync($"mom_replay_pause 1; mom_tv_replay_watch {Quote(replay)}; mom_replay_restart; {WatchDirectoryHelper.BuildGameStartmovieCommand(user.MovieSequenceName)}; mom_replay_pause 0", TimeSpan.FromMinutes(2), token);
+                await game.NetCon.SendAsync($"mom_tv_replay_watch {Quote(replay)}", token);
+                await game.NetCon.ExecuteAsync("echo MMOD_REPLAY_READY", TimeSpan.FromMinutes(2), token);
+                await game.NetCon.ExecuteAsync("mom_tv_replay_play_pause; mom_tv_replay_goto 0", TimeSpan.FromSeconds(30), token);
+                await game.NetCon.ExecuteAsync($"{WatchDirectoryHelper.BuildGameStartmovieCommand(user.MovieSequenceName)}; mom_tv_replay_play_pause", TimeSpan.FromSeconds(30), token);
                 var expectedFrames = Math.Max(1, (int)Math.Ceiling(node.ExpectedDurationSeconds * settings.SupersamplingMultiplier * ProjectConstants.FinalOutputFramerate));
                 var lastProgress = DateTime.UtcNow; var lastCount = -1;
                 while (pipeline.FedCount < expectedFrames)
@@ -132,7 +144,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                     if (DateTime.UtcNow - lastProgress > TimeSpan.FromMinutes(2)) throw new TimeoutException("TGA 帧连续两分钟没有增长。");
                     await Task.Delay(250, token);
                 }
-                await game.NetCon.ExecuteAsync("endmovie; mom_replay_pause 1; host_framerate 0; host_timescale 1; sv_cheats 0", TimeSpan.FromSeconds(30), token);
+                await game.NetCon.ExecuteAsync("endmovie; host_framerate 0; host_timescale 1; sv_cheats 0", TimeSpan.FromSeconds(30), token);
                 await pipeline.StopAsync();
                 if (!File.Exists(clip) || new FileInfo(clip).Length == 0) throw new InvalidDataException("节点没有生成有效 MP4 文件。");
                 node = node with { Status = RenderNodeStatus.Completed, FinishedAt = DateTimeOffset.UtcNow, ElapsedSeconds = node.ElapsedSeconds + (DateTimeOffset.UtcNow - started).TotalSeconds };

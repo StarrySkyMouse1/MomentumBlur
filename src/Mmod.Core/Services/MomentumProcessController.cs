@@ -19,7 +19,17 @@ public sealed class MomentumProcessController : IAsyncDisposable
         Process = System.Diagnostics.Process.Start(new ProcessStartInfo(exe, $"-console -novid -netconport {port} -netconpassword {password}") { WorkingDirectory = gameRoot, UseShellExecute = true });
         if (Process is null) throw new InvalidOperationException("Momentum Mod 启动失败。");
         OwnsProcess = true;
-        await NetCon.ConnectAsync(port, password, TimeSpan.FromMinutes(2), token);
+        using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var connect = NetCon.ConnectAsync(port, password, TimeSpan.FromMinutes(2), connectCts.Token);
+        var exited = Process.WaitForExitAsync(token);
+        var completed = await Task.WhenAny(connect, exited);
+        if (completed == exited)
+        {
+            connectCts.Cancel();
+            try { await connect; } catch { }
+            throw new InvalidOperationException($"Momentum Mod 在 NetCon 连接完成前退出（退出代码 {Process.ExitCode}）。");
+        }
+        await connect;
     }
 
     public async Task CloseOwnedAsync(CancellationToken token)
