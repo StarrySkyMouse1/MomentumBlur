@@ -38,6 +38,9 @@ public sealed class MomentumNetConClient : IAsyncDisposable
     }
 
     public async Task ExecuteAsync(string command, TimeSpan timeout, CancellationToken token)
+        => await ExecuteCheckedAsync(command, timeout, null, token);
+
+    public async Task ExecuteCheckedAsync(string command, TimeSpan timeout, Func<string, bool>? failure, CancellationToken token)
     {
         if (_writer is null || _reader is null) throw new InvalidOperationException("NetCon 尚未连接。");
         await _commands.WaitAsync(token);
@@ -51,6 +54,7 @@ public sealed class MomentumNetConClient : IAsyncDisposable
             {
                 var line = await _reader.ReadLineAsync(timeoutCts.Token) ?? throw new IOException("NetCon 连接已关闭。");
                 OutputReceived?.Invoke(line);
+                if (failure?.Invoke(line) == true) throw new InvalidOperationException(line.Trim());
                 if (line.Contains(marker, StringComparison.Ordinal)) return;
             }
         }

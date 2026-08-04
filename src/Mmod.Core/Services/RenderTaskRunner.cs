@@ -132,15 +132,20 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                 await pipeline.StartAsync(user, clip, false);
                 var replay = BuildGameReplayPath(settings.GameRootPath, node.ReplayPath);
                 await game.NetCon.SendAsync($"mom_tv_replay_watch {Quote(replay)}", token);
-                await game.NetCon.WaitForOutputAsync(
-                    line => line.Contains("Loaded replay", StringComparison.OrdinalIgnoreCase),
+                // This Playtest build does not emit its internal `Loaded replay`
+                // message to NetCon. The watch command itself is synchronous
+                // enough to create the controlled replay; use the next command
+                // line's ACK as readiness, while still rejecting explicit
+                // loading errors seen before that ACK.
+                await game.NetCon.ExecuteCheckedAsync(
+                    "echo MMOD_REPLAY_COMMAND_COMPLETE", TimeSpan.FromMinutes(2),
                     line => line.Contains("Failed to load replay", StringComparison.OrdinalIgnoreCase)
                         || line.Contains("Failed to open replay", StringComparison.OrdinalIgnoreCase)
                         || line.Contains("Invalid replay file", StringComparison.OrdinalIgnoreCase),
-                    TimeSpan.FromMinutes(2), token);
-                // Watching starts playback. Pause only after the engine has
-                // confirmed `Loaded replay`, seek back to tick 0, then resume
-                // after startmovie is active so no replay frames are missed.
+                    token);
+                // Watching starts playback. Once the following command ACKs,
+                // pause, seek back to tick 0, then resume after startmovie is
+                // active so no replay frames are missed.
                 await game.NetCon.ExecuteAsync("mom_tv_replay_play_pause; mom_tv_replay_goto 0", TimeSpan.FromSeconds(30), token);
                 _repository.AddLog(task.Id, node.Id, "Info", "回放已加载并定位到 tick 0，正在启动 TGA 后继续播放。");
                 await game.NetCon.ExecuteAsync($"{WatchDirectoryHelper.BuildGameStartmovieCommand(user.MovieSequenceName)}; mom_tv_replay_play_pause", TimeSpan.FromSeconds(30), token);
