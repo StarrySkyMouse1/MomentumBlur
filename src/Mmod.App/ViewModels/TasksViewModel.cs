@@ -48,7 +48,10 @@ public partial class TasksViewModel : ObservableObject
                         var label = staged ? $"{(trackGroup.Key == 1 ? "主赛道" : $"Bonus {trackGroup.Key - 1}")} · 阶段 {stageGroup.Key}" : (trackGroup.Key == 1 ? "完整地图" : $"Bonus {trackGroup.Key - 1}");
                         var stage = new ReplayTreeNode(label);
                         foreach (var record in stageGroup.OrderBy(x => x.RunTimeSeconds).ThenByDescending(x => x.RecordedAt))
-                            stage.Children.Add(new ReplayTreeNode($"{FormatDuration(record.RunTimeSeconds)} · {record.RecordedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}", record, stage));
+                        {
+                            var version = record.IsCompatible ? string.Empty : $" · 不兼容：MMTV v{record.FormatVersion}";
+                            stage.Children.Add(new ReplayTreeNode($"{FormatDuration(record.RunTimeSeconds)} · {record.RecordedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}{version}", record, stage));
+                        }
                         player.Children.Add(stage);
                     }
                 }
@@ -56,7 +59,9 @@ public partial class TasksViewModel : ObservableObject
             }
             Catalog.Add(map);
         }
-        StatusText = $"已解析 {result.Records.Count} 条回放；无法解析 {result.Issues.Count} 条。";
+        var compatible = result.Records.Count(x => x.IsCompatible);
+        var incompatible = result.Records.Count - compatible;
+        StatusText = $"已解析 {result.Records.Count} 条回放；可执行 {compatible} 条；旧版不兼容 {incompatible} 条；无法解析 {result.Issues.Count} 条。";
     }
 
     [RelayCommand]
@@ -68,6 +73,9 @@ public partial class TasksViewModel : ObservableObject
             ValidateTaskSettings(settings);
             var selected = Catalog.SelectMany(Flatten).Where(x => x.Record is not null && x.IsSelected).Select(x => x.Record!).ToList();
             if (selected.Count == 0) throw new InvalidOperationException("请至少勾选一条回放记录。");
+            var incompatible = selected.FirstOrDefault(x => !x.IsCompatible);
+            if (incompatible is not null)
+                throw new InvalidOperationException($"回放与当前游戏不兼容：{Path.GetFileName(incompatible.FilePath)}（{incompatible.CompatibilityIssue}）。");
             var count = 0;
             foreach (var group in selected.GroupBy(x => new { x.MapName, x.PlayerName, x.TrackNumber }))
             {
@@ -171,9 +179,12 @@ public partial class ReplayTreeNode : ObservableObject
     public ObservableCollection<ReplayTreeNode> Children { get; } = [];
     [ObservableProperty] private bool isSelected;
     public bool IsRecord => Record is not null;
+    public bool IsSelectable => Record?.IsCompatible == true;
+    public string? DisabledReason => Record?.CompatibilityIssue;
     public ReplayTreeNode(string label, ReplayRecord? record = null, ReplayTreeNode? selectionGroup = null) { Label = label; Record = record; SelectionGroup = selectionGroup; }
     partial void OnIsSelectedChanged(bool value)
     {
+        if (value && !IsSelectable) { IsSelected = false; return; }
         if (!value || SelectionGroup is null) return;
         foreach (var sibling in SelectionGroup.Children.Where(x => x != this && x.IsSelected)) sibling.IsSelected = false;
     }

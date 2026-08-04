@@ -6,8 +6,8 @@
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
         <HierarchicalDataTemplate DataType="{x:Type vm:ReplayTreeNode}" ItemsSource="{Binding Children}">
             <StackPanel Orientation="Horizontal">
-                <CheckBox IsChecked="{Binding IsSelected}" Visibility="{Binding IsRecord, Converter={StaticResource BooleanToVisibilityConverter}}" Margin="0,0,8,0"/>
-                <TextBlock Text="{Binding Label}"/>
+                <CheckBox IsChecked="{Binding IsSelected}" IsEnabled="{Binding IsSelectable}" ToolTip="{Binding DisabledReason}" Visibility="{Binding IsRecord, Converter={StaticResource BooleanToVisibilityConverter}}" Margin="0,0,8,0"/>
+                <TextBlock Text="{Binding Label}" ToolTip="{Binding DisabledReason}"/>
             </StackPanel>
         </HierarchicalDataTemplate>
     </Page.Resources>

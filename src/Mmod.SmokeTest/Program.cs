@@ -43,7 +43,9 @@ if (args.Length >= 3 && args[0] == "control")
 if (args.Length >= 2 && args[0] == "catalog")
 {
     var result = new ReplayCatalogService().Scan(args[1]);
-    Console.WriteLine($"CATALOG records={result.Records.Count} issues={result.Issues.Count}");
+    var compatible = result.Records.Count(x => x.IsCompatible);
+    var incompatible = result.Records.Count - compatible;
+    Console.WriteLine($"CATALOG records={result.Records.Count} compatible={compatible} incompatible={incompatible} issues={result.Issues.Count}");
     foreach (var issue in result.Issues.Take(10)) Console.WriteLine($"ISSUE {issue.FilePath}: {issue.Message}");
     return result.Records.Count > 0 && result.Issues.Count == 0 ? 0 : 3;
 }

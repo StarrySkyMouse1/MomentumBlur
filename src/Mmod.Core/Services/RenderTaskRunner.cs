@@ -126,6 +126,9 @@ public sealed class RenderTaskRunner : IAsyncDisposable
             _repository.AddLog(task.Id, node.Id, "Info", $"开始节点：{Path.GetFileName(node.ReplayPath)}");
             try
             {
+                var replayMetadata = MtvReplayParser.Parse(node.ReplayPath);
+                if (!replayMetadata.IsCompatible)
+                    throw new NotSupportedException($"回放格式不兼容：{replayMetadata.CompatibilityIssue}。请使用当前游戏版本重新下载或生成回放。");
                 var user = ToUserSettings(settings);
                 await using var pipeline = new TgaPipelineOrchestrator();
                 pipeline.Changed += () => { Status = $"{task.MapName}：节点 {node.Sequence + 1}，已处理 {pipeline.FedCount} 帧"; Changed?.Invoke(); };
@@ -150,14 +153,19 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                 _repository.AddLog(task.Id, node.Id, "Info", "回放已加载并定位到 tick 0，正在启动 TGA 后继续播放。");
                 await game.NetCon.ExecuteAsync($"{WatchDirectoryHelper.BuildGameStartmovieCommand(user.MovieSequenceName)}; mom_tv_replay_play_pause", TimeSpan.FromSeconds(30), token);
                 var expectedFrames = Math.Max(1, (int)Math.Ceiling(node.ExpectedDurationSeconds * settings.SupersamplingMultiplier * ProjectConstants.FinalOutputFramerate));
+                var validationFrames = Math.Min(expectedFrames, Math.Max(5, settings.SupersamplingMultiplier * 2));
                 var lastProgress = DateTime.UtcNow; var lastCount = -1;
                 while (pipeline.FedCount < expectedFrames)
                 {
                     token.ThrowIfCancellationRequested();
                     if (pipeline.FedCount != lastCount) { lastCount = pipeline.FedCount; lastProgress = DateTime.UtcNow; }
                     if (DateTime.UtcNow - lastProgress > TimeSpan.FromMinutes(2)) throw new TimeoutException("TGA 帧连续两分钟没有增长。");
+                    if (pipeline.FedCount >= validationFrames && !pipeline.HasVisualChange)
+                        throw new InvalidOperationException("回放未实际播放：已经生成 TGA 帧，但画面始终静止。请确认回放由当前游戏版本生成。");
                     await Task.Delay(250, token);
                 }
+                if (!pipeline.HasVisualChange)
+                    throw new InvalidOperationException("回放未实际播放：录制完成时画面仍然完全静止。请确认回放由当前游戏版本生成。");
                 await game.NetCon.ExecuteAsync("endmovie; host_framerate 0; host_timescale 1; sv_cheats 0", TimeSpan.FromSeconds(30), token);
                 await pipeline.StopAsync();
                 if (!File.Exists(clip) || new FileInfo(clip).Length == 0) throw new InvalidDataException("节点没有生成有效 MP4 文件。");
@@ -171,8 +179,16 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                 _repository.UpdateNode(node with { Status = RenderNodeStatus.Pending, ClipPath = null, LastError = "立即中断，继续时从头执行。" });
                 throw;
             }
+            catch (NotSupportedException ex)
+            {
+                try { await game.NetCon.ExecuteAsync("endmovie; host_framerate 0; host_timescale 1; sv_cheats 0", TimeSpan.FromSeconds(5), CancellationToken.None); } catch { }
+                TryDelete(clip);
+                _repository.UpdateNode(node with { Status = RenderNodeStatus.Failed, LastError = ex.Message });
+                throw;
+            }
             catch (Exception ex)
             {
+                try { await game.NetCon.ExecuteAsync("endmovie; host_framerate 0; host_timescale 1; sv_cheats 0", TimeSpan.FromSeconds(5), CancellationToken.None); } catch { }
                 TryDelete(clip);
                 if (node.RetryCount >= 2) { _repository.UpdateNode(node with { Status = RenderNodeStatus.Failed, LastError = ex.Message }); throw; }
                 node = node with { Status = RenderNodeStatus.Pending, RetryCount = node.RetryCount + 1, ClipPath = null, LastError = ex.Message };

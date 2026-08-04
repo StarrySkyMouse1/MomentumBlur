@@ -12,11 +12,13 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
     private NativeBlendSession? _session;
     private int _nextFrame = 0;
     private int _fed;
+    private ulong? _firstFrameSignature;
 
     public bool IsRunning => _loop is { IsCompleted: false };
 
     public int PendingCount => _watcher?.PendingCount ?? 0;
     public int FedCount => _fed;
+    public bool HasVisualChange { get; private set; }
     public string? OutputPath { get; private set; }
     public string? WatchDirectory { get; private set; }
     public string Status { get; private set; } = "空闲";
@@ -48,6 +50,8 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(OutputPath)!);
         WatchDirectory = watchDir;
         _fed = 0;
+        _firstFrameSignature = null;
+        HasVisualChange = false;
         _nextFrame = 0;
         _cts = new CancellationTokenSource();
         _watcher = new TgaDirectoryWatcher(watchDir);
@@ -147,6 +151,7 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
                     OutputPath!);
 
                 _session.SubmitBgra(bgra, width * 4);
+                TrackVisualChange(bgra);
                 _fed++;
                 Status = $"合成中：已喂入 {_fed} 帧，待处理 {_watcher.PendingCount}";
                 Changed?.Invoke();
@@ -193,6 +198,25 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
                 break;
             }
         }
+    }
+
+    private void TrackVisualChange(ReadOnlySpan<byte> bgra)
+    {
+        // A valid run changes many sampled pixels. A replay that failed to
+        // start produces exact copies of the static world frame.
+        const ulong offset = 14695981039346656037UL;
+        const ulong prime = 1099511628211UL;
+        var hash = offset;
+        var stride = Math.Max(4, bgra.Length / 4096);
+        stride -= stride % 4;
+        for (var i = 0; i < bgra.Length; i += stride)
+        {
+            hash ^= bgra[i];
+            hash *= prime;
+        }
+
+        if (_firstFrameSignature is null) _firstFrameSignature = hash;
+        else if (_firstFrameSignature.Value != hash) HasVisualChange = true;
     }
 
     public async ValueTask DisposeAsync()
