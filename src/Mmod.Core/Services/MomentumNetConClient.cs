@@ -57,5 +57,13 @@ public sealed class MomentumNetConClient : IAsyncDisposable
         finally { _commands.Release(); }
     }
 
+    public async Task SendAsync(string command, CancellationToken token)
+    {
+        if (_writer is null) throw new InvalidOperationException("NetCon 尚未连接。");
+        await _commands.WaitAsync(token);
+        try { await _writer.WriteLineAsync(command); }
+        finally { _commands.Release(); }
+    }
+
     public ValueTask DisposeAsync() { _writer?.Dispose(); _reader?.Dispose(); _client?.Dispose(); _commands.Dispose(); return ValueTask.CompletedTask; }
 }
