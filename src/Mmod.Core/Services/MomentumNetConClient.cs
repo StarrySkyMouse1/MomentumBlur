@@ -24,8 +24,12 @@ public sealed class MomentumNetConClient : IAsyncDisposable
                 await _client.ConnectAsync("127.0.0.1", port, token);
                 var stream = _client.GetStream();
                 _reader = new StreamReader(stream, Encoding.UTF8, false, leaveOpen: true);
-                _writer = new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true, NewLine = "\n" };
-                await _writer.WriteLineAsync(password);
+                _writer = new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true, NewLine = "\r\n" };
+                await _writer.WriteLineAsync($"PASS {password}");
+                // Authentication has no dedicated success packet. An echoed
+                // marker proves both that PASS was accepted and that commands
+                // are actually being executed before the runner continues.
+                await ExecuteAsync("echo MMOD_NETCON_AUTHENTICATED", TimeSpan.FromSeconds(10), token);
                 return;
             }
             catch (Exception ex) { last = ex; _client?.Dispose(); await Task.Delay(500, token); }

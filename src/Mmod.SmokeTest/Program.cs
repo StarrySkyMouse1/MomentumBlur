@@ -2,6 +2,15 @@
 using Mmod.Core.Native;
 using Mmod.Core.Services;
 
+if (args.Length >= 3 && args[0] == "netcon")
+{
+    await using var client = new MomentumNetConClient();
+    await client.ConnectAsync(int.Parse(args[1]), args[2], TimeSpan.FromSeconds(10), CancellationToken.None);
+    await client.ExecuteAsync("echo MMOD_NETCON_SMOKE_OK", TimeSpan.FromSeconds(10), CancellationToken.None);
+    Console.WriteLine("NETCON_OK");
+    return 0;
+}
+
 if (args.Length >= 2 && args[0] == "catalog")
 {
     var result = new ReplayCatalogService().Scan(args[1]);

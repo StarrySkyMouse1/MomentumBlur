@@ -32,11 +32,12 @@ public sealed class RenderTaskRunner : IAsyncDisposable
         MomentumProcessController? game = null;
         try
         {
-            var runnable = _repository.GetTasks(false).Where(x => x.Status is RenderTaskStatus.Pending or RenderTaskStatus.Paused).OrderBy(x => x.QueuePosition).ToList();
+            var runnable = _repository.GetTasks(false).Where(x => x.Status is RenderTaskStatus.Pending or RenderTaskStatus.Paused or RenderTaskStatus.FailedNeedsAttention).OrderBy(x => x.QueuePosition).ToList();
             if (runnable.Count == 0) { Status = "没有待执行任务"; return; }
             var firstSettings = Deserialize(runnable[0]);
+            _repository.UpdateTaskStatus(runnable[0].Id, RenderTaskStatus.Starting);
             game = new MomentumProcessController();
-            Status = "正在启动 Momentum Mod"; Changed?.Invoke();
+            Status = "正在启动 Momentum Mod 并验证 NetCon"; Changed?.Invoke();
             await game.StartAsync(firstSettings.GameRootPath, token);
 
             foreach (var task in runnable)
