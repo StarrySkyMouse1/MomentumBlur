@@ -15,12 +15,14 @@
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <StackPanel>
             <TextBlock Text="任务" FontSize="28" FontWeight="SemiBold"/>
-            <TextBlock Text="选择回放后创建任务；同一阶段只能选择一条记录。" Margin="0,4,0,12" Foreground="Gray"/>
+            <TextBlock Text="勾选一条回放后点「验证回放」：按 Capture Envelope 自动切图→临时 startmovie→watch→检测画面运动后 endmovie。下方显示阶段日志。" Margin="0,4,0,12" Foreground="Gray"/>
             <StackPanel Orientation="Horizontal">
                 <Button Content="刷新回放" Command="{Binding RefreshCatalogCommand}" Margin="0,0,8,0"/>
                 <Button Content="创建任务" Command="{Binding CreateTasksCommand}" Margin="0,0,8,0"/>
                 <Button Content="刷新状态" Command="{Binding ReloadTasksCommand}"/>
-                <Button Content="开始/继续" Command="{Binding StartQueueCommand}" Margin="16,0,8,0"/>
+                <Button Content="验证回放" Command="{Binding VerifyReplayCommand}" Margin="16,0,8,0"
+                        ToolTip="迷你 Capture Envelope：确认 TGA 可写且回放能产生 VisualActivity"/>
+                <Button Content="开始/继续" Command="{Binding StartQueueCommand}" Margin="0,0,8,0"/>
                 <Button Content="当前节点后暂停" Command="{Binding PauseAfterNodeCommand}" Margin="0,0,8,0"/>
                 <Button Content="立即停止" Command="{Binding StopNowCommand}"/>
             </StackPanel>
@@ -45,6 +47,7 @@
                 <TabItem Header="详情/日志"><ScrollViewer Padding="8"><TextBlock Text="{Binding SelectedTaskDetail}" TextWrapping="Wrap"/></ScrollViewer></TabItem>
             </TabControl>
         </Grid>
-        <TextBlock Grid.Row="2" Text="{Binding StatusText}" TextWrapping="Wrap"/>
+        <TextBlock Grid.Row="2" Text="{Binding StatusText}" TextWrapping="Wrap" MinHeight="72" MaxHeight="180"
+                   VerticalAlignment="Top"/>
     </Grid>
 </Page>

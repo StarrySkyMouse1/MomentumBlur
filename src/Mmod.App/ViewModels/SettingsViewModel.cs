@@ -56,35 +56,11 @@ public partial class SettingsViewModel : ObservableObject
     partial void OnSupersamplingMultiplierChanged(int value) => Persist();
     partial void OnObsCaptureFramerateChanged(int value) => Persist();
     partial void OnVideoOutputDirectoryChanged(string value) => Persist();
-    partial void OnRamDiskWatchDirectoryChanged(string value)
-    {
-        Persist();
-        NotifyPathCommandsCanExecuteChanged();
-    }
-
-    partial void OnGameRootPathChanged(string value)
-    {
-        Persist();
-        NotifyPathCommandsCanExecuteChanged();
-    }
-
-    partial void OnMovieSequenceNameChanged(string value)
-    {
-        Persist();
-        CreateJunctionCommand.NotifyCanExecuteChanged();
-    }
-
-    partial void OnStartMovieHotkeyChanged(string value)
-    {
-        Persist();
-        CreateJunctionCommand.NotifyCanExecuteChanged();
-    }
-
-    partial void OnEndMovieHotkeyChanged(string value)
-    {
-        Persist();
-        CreateJunctionCommand.NotifyCanExecuteChanged();
-    }
+    partial void OnRamDiskWatchDirectoryChanged(string value) => Persist();
+    partial void OnGameRootPathChanged(string value) => Persist();
+    partial void OnMovieSequenceNameChanged(string value) => Persist();
+    partial void OnStartMovieHotkeyChanged(string value) => Persist();
+    partial void OnEndMovieHotkeyChanged(string value) => Persist();
     partial void OnHideHudInCfgChanged(bool value) => Persist();
     partial void OnMaxParallelJobsChanged(int value) => Persist();
 
@@ -184,39 +160,6 @@ public partial class SettingsViewModel : ObservableObject
         {
             JunctionState = ex.Message;
         }
-
-        NotifyPathCommandsCanExecuteChanged();
-    }
-
-    private void NotifyPathCommandsCanExecuteChanged()
-    {
-        CreateJunctionCommand.NotifyCanExecuteChanged();
-        RemoveJunctionCommand.NotifyCanExecuteChanged();
-    }
-
-    private bool CanCreateJunction() =>
-        HasConfiguredPaths() &&
-        !string.IsNullOrWhiteSpace(MovieSequenceName) &&
-        !string.IsNullOrWhiteSpace(StartMovieHotkey) &&
-        !string.IsNullOrWhiteSpace(EndMovieHotkey);
-
-    private bool CanRemoveJunction() => HasConfiguredPaths();
-
-    private bool HasConfiguredPaths()
-    {
-        var gameRoot = GameRootPath?.Trim() ?? string.Empty;
-        var watch = RamDiskWatchDirectory?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(gameRoot) || string.IsNullOrWhiteSpace(watch))
-            return false;
-
-        try
-        {
-            return Directory.Exists(gameRoot) && Directory.Exists(watch);
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     [RelayCommand]
@@ -266,15 +209,21 @@ public partial class SettingsViewModel : ObservableObject
         StatusText = "已复制恢复指令";
     }
 
-    [RelayCommand(CanExecute = nameof(CanCreateJunction))]
+    [RelayCommand]
     private void CreateJunction()
     {
         try
         {
-            if (!CanCreateJunction())
-                throw new InvalidOperationException("请先配置有效的游戏根目录与 TGA 监视目录，并填写序列名与快捷键。");
-
             var s = Snapshot();
+            if (string.IsNullOrWhiteSpace(s.GameRootPath) || string.IsNullOrWhiteSpace(s.RamDiskWatchDirectory))
+                throw new InvalidOperationException("需要游戏根目录与监视目录。");
+            if (!Directory.Exists(s.GameRootPath) || !Directory.Exists(s.RamDiskWatchDirectory))
+                throw new InvalidOperationException("游戏根目录或 TGA 监视目录不存在（请确认 ImDisk 已挂载）。");
+            if (string.IsNullOrWhiteSpace(s.MovieSequenceName) ||
+                string.IsNullOrWhiteSpace(s.StartMovieHotkey) ||
+                string.IsNullOrWhiteSpace(s.EndMovieHotkey))
+                throw new InvalidOperationException("请填写序列名与快捷键。");
+
             var paths = MomentumDirectoryLinkService.ResolvePaths(s.GameRootPath!, s.RamDiskWatchDirectory);
             MomentumDirectoryLinkService.CreateLink(paths, overwriteRamCopy: true);
 
@@ -292,18 +241,26 @@ public partial class SettingsViewModel : ObservableObject
         }
     }
 
-    [RelayCommand(CanExecute = nameof(CanRemoveJunction))]
+    [RelayCommand]
     private void RemoveJunction()
     {
         try
         {
-            if (!CanRemoveJunction())
-                throw new InvalidOperationException("需要有效的游戏根目录与监视目录。");
-
             var s = Snapshot();
-            var paths = MomentumDirectoryLinkService.ResolvePaths(s.GameRootPath!, s.RamDiskWatchDirectory);
-            MomentumDirectoryLinkService.RemoveLink(paths);
-            StatusText = "Junction 取消完成";
+            if (string.IsNullOrWhiteSpace(s.GameRootPath))
+                throw new InvalidOperationException("请先设置游戏根目录。");
+            if (!Directory.Exists(s.GameRootPath))
+                throw new InvalidOperationException($"游戏根目录不存在：{s.GameRootPath}");
+
+            // 取消只需游戏根目录；RAM 盘未挂载时仍可删 junction 并还原 _momentum
+            var watch = string.IsNullOrWhiteSpace(s.RamDiskWatchDirectory)
+                ? (s.RamDiskDriveLetter ?? "R:\\")
+                : s.RamDiskWatchDirectory;
+            var paths = MomentumDirectoryLinkService.ResolvePaths(s.GameRootPath!, watch);
+            var removed = MomentumDirectoryLinkService.RemoveLink(paths);
+            StatusText = removed
+                ? "Junction 已取消，_momentum 已还原为 momentum"
+                : "无需取消（未发现 junction / _momentum）";
             RefreshDerived();
         }
         catch (Exception ex)

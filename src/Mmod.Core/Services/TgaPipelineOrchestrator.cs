@@ -10,15 +10,21 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
     private Task? _loop;
     private TgaDirectoryWatcher? _watcher;
     private NativeBlendSession? _session;
-    private int _nextFrame = 0;
+    private int _nextFrame;
     private int _fed;
     private ulong? _firstFrameSignature;
+    private ulong? _previousFrameSignature;
 
     public bool IsRunning => _loop is { IsCompleted: false };
 
     public int PendingCount => _watcher?.PendingCount ?? 0;
     public int FedCount => _fed;
+    /// <summary>True once any frame differed from the first sampled signature (PlaybackStartLowerBound reached).</summary>
     public bool HasVisualChange { get; private set; }
+    /// <summary>FedCount of the first frame that differed from the opening still; null until then.</summary>
+    public int? ActivityAnchorFrame { get; private set; }
+    /// <summary>FedCount of the most recent frame that differed from the previous frame.</summary>
+    public int? LastVisualChangeFrame { get; private set; }
     public string? OutputPath { get; private set; }
     public string? WatchDirectory { get; private set; }
     public string Status { get; private set; } = "空闲";
@@ -46,26 +52,72 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
             : settings.VideoOutputDirectory;
         Directory.CreateDirectory(outputDir);
 
-        OutputPath = string.IsNullOrWhiteSpace(outputPath) ? Path.Combine(outputDir, $"tga_{DateTime.Now:yyyyMMdd_HHmmss}.mp4") : Path.GetFullPath(outputPath);
+        OutputPath = string.IsNullOrWhiteSpace(outputPath)
+            ? Path.Combine(outputDir, $"tga_{DateTime.Now:yyyyMMdd_HHmmss}.mp4")
+            : Path.GetFullPath(outputPath);
         Directory.CreateDirectory(Path.GetDirectoryName(OutputPath)!);
         WatchDirectory = watchDir;
         _fed = 0;
         _firstFrameSignature = null;
+        _previousFrameSignature = null;
         HasVisualChange = false;
+        ActivityAnchorFrame = null;
+        LastVisualChangeFrame = null;
         _nextFrame = 0;
         _cts = new CancellationTokenSource();
         _watcher = new TgaDirectoryWatcher(watchDir);
         _watcher.PendingChanged += () => Changed?.Invoke();
-        // 接受目录中已有 TGA：允许「先录制再开监视」；新写入的帧仍照常接入
         _watcher.Start(acceptPreSessionFiles: acceptPreSessionFiles);
 
-        Status = $"监视中：{watchDir}（含已有 TGA）";
+        Status = $"监视中：{watchDir}";
         Changed?.Invoke();
 
         var blend = Math.Max(1, settings.SupersamplingMultiplier);
         var token = _cts.Token;
         _loop = Task.Run(() => RunLoop(settings, blend, token), token);
         await Task.CompletedTask;
+    }
+
+    public async Task WaitUntilFedAsync(int minimumFed, TimeSpan timeout, CancellationToken token)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (FedCount < minimumFed)
+        {
+            token.ThrowIfCancellationRequested();
+            if (DateTime.UtcNow >= deadline)
+                throw new TimeoutException($"等待 TGA 写帧超时：需要至少 {minimumFed} 帧，当前 {FedCount}。");
+            if (!string.IsNullOrWhiteSpace(Status) && Status.StartsWith("错误：", StringComparison.Ordinal))
+                throw new InvalidOperationException(Status);
+            await Task.Delay(100, token).ConfigureAwait(false);
+        }
+    }
+
+    public async Task WaitUntilActivityAsync(TimeSpan timeout, CancellationToken token)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (ActivityAnchorFrame is null)
+        {
+            token.ThrowIfCancellationRequested();
+            if (DateTime.UtcNow >= deadline)
+                throw new TimeoutException($"等待回放画面运动超时（{timeout.TotalSeconds:0}s 内无 VisualActivity）。");
+            if (!string.IsNullOrWhiteSpace(Status) && Status.StartsWith("错误：", StringComparison.Ordinal))
+                throw new InvalidOperationException(Status);
+            await Task.Delay(100, token).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Clears ActivityAnchor / signatures so CaptureReady still frames cannot count as PlaybackActivity.
+    /// Call after CaptureReady, immediately before mom_tv_replay_watch.
+    /// </summary>
+    public void ResetActivityTracking()
+    {
+        _firstFrameSignature = null;
+        _previousFrameSignature = null;
+        HasVisualChange = false;
+        ActivityAnchorFrame = null;
+        LastVisualChangeFrame = null;
+        Changed?.Invoke();
     }
 
     public async Task StopAsync()
@@ -117,7 +169,6 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
             if (_watcher is null)
                 break;
 
-            // 始终取最小待处理帧，避免 nextFrame 超前后卡死（重入队/删文件后残留）
             if (!_watcher.TryGetMinPendingFrameIndex(out var frameIndex))
             {
                 Thread.Sleep(30);
@@ -151,8 +202,15 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
                     OutputPath!);
 
                 _session.SubmitBgra(bgra, width * 4);
-                TrackVisualChange(bgra);
+                var changed = TrackVisualChange(bgra);
                 _fed++;
+                if (changed)
+                {
+                    LastVisualChangeFrame = _fed;
+                    ActivityAnchorFrame ??= _fed;
+                    HasVisualChange = true;
+                }
+
                 Status = $"合成中：已喂入 {_fed} 帧，待处理 {_watcher.PendingCount}";
                 Changed?.Invoke();
 
@@ -166,7 +224,6 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
             }
         }
 
-        // drain briefly after cancel
         var drainDeadline = DateTime.UtcNow.AddSeconds(15);
         while (_watcher is not null && DateTime.UtcNow < drainDeadline)
         {
@@ -200,10 +257,9 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
         }
     }
 
-    private void TrackVisualChange(ReadOnlySpan<byte> bgra)
+    /// <returns>True when this frame's signature differs from the previous frame.</returns>
+    private bool TrackVisualChange(ReadOnlySpan<byte> bgra)
     {
-        // A valid run changes many sampled pixels. A replay that failed to
-        // start produces exact copies of the static world frame.
         const ulong offset = 14695981039346656037UL;
         const ulong prime = 1099511628211UL;
         var hash = offset;
@@ -215,8 +271,10 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
             hash *= prime;
         }
 
-        if (_firstFrameSignature is null) _firstFrameSignature = hash;
-        else if (_firstFrameSignature.Value != hash) HasVisualChange = true;
+        _firstFrameSignature ??= hash;
+        var changed = _previousFrameSignature is not null && _previousFrameSignature.Value != hash;
+        _previousFrameSignature = hash;
+        return changed;
     }
 
     public async ValueTask DisposeAsync()

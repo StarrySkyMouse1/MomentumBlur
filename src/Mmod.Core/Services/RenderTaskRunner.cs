@@ -9,7 +9,9 @@ public sealed class RenderTaskRunner : IAsyncDisposable
     private readonly RenderTaskRepository _repository;
     private CancellationTokenSource? _cts;
     private bool _pauseAfterNode;
+    private MomentumProcessController? _verifyGame;
     public bool IsRunning { get; private set; }
+    public bool IsVerifying { get; private set; }
     public string Status { get; private set; } = "空闲";
     public event Action? Changed;
 
@@ -17,28 +19,179 @@ public sealed class RenderTaskRunner : IAsyncDisposable
 
     public Task StartAsync()
     {
-        if (IsRunning) return Task.CompletedTask;
+        if (IsRunning || IsVerifying) return Task.CompletedTask;
         _pauseAfterNode = false; _cts = new CancellationTokenSource(); IsRunning = true;
         _ = RunQueueAsync(_cts.Token);
         Changed?.Invoke();
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Mini Capture Envelope：map Ready → TEMP startmovie → CaptureReady → watch → Activity → endmovie.
+    /// </summary>
+    public async Task VerifyReplayAsync(UserSettings settings, string mapName, string replayFilePath)
+    {
+        if (IsRunning || IsVerifying)
+            throw new InvalidOperationException("已有任务或验证在进行中，请先点「立即停止」。");
+
+        _cts = new CancellationTokenSource();
+        IsVerifying = true;
+        Status = "正在验证回放（Capture Envelope）…";
+        Changed?.Invoke();
+        try
+        {
+            await RunVerifyAsync(settings, mapName, replayFilePath, _cts.Token);
+        }
+        finally
+        {
+            IsVerifying = false;
+            _cts?.Dispose();
+            _cts = null;
+            Changed?.Invoke();
+        }
+    }
+
     public void PauseAfterCurrentNode() { _pauseAfterNode = true; Status = "将在当前节点完成后暂停"; Changed?.Invoke(); }
     public void StopImmediately() { Status = "正在立即停止"; _cts?.Cancel(); Changed?.Invoke(); }
+
+    private async Task RunVerifyAsync(UserSettings settings, string mapName, string replayFilePath, CancellationToken token)
+    {
+        var logLines = new List<string>();
+        void Log(string line)
+        {
+            logLines.Add($"{DateTime.Now:HH:mm:ss} {line}");
+            Status = string.Join("\n", logLines.TakeLast(40));
+            Changed?.Invoke();
+        }
+
+        var gameRoot = settings.GameRootPath?.Trim() ?? string.Empty;
+        var tempClip = Path.Combine(
+            Path.GetTempPath(),
+            "mmod_record_verify",
+            $"verify_{DateTime.Now:yyyyMMdd_HHmmss}.mp4");
+        Directory.CreateDirectory(Path.GetDirectoryName(tempClip)!);
+
+        try
+        {
+            if (!Directory.Exists(gameRoot))
+                throw new DirectoryNotFoundException("游戏根目录不存在。");
+            if (!File.Exists(replayFilePath))
+                throw new FileNotFoundException("回放文件不存在。", replayFilePath);
+
+            var metadata = MtvReplayParser.Parse(replayFilePath);
+            if (!metadata.IsCompatible)
+                throw new NotSupportedException($"回放格式不兼容：{metadata.CompatibilityIssue}");
+
+            var relative = MomentumReplaySession.BuildGameRelativeReplayPath(gameRoot, replayFilePath);
+            Log($"地图={mapName}");
+            Log($"文件={Path.GetFileName(replayFilePath)}");
+            Log($"相对路径={relative}");
+
+            if (_verifyGame is null || _verifyGame.Process is null || _verifyGame.Process.HasExited)
+            {
+                if (_verifyGame is not null)
+                    await _verifyGame.DisposeAsync();
+                _verifyGame = new MomentumProcessController();
+                _verifyGame.NetCon.OutputReceived += line => Log($"« {line.Trim()}");
+                Log("正在启动 Momentum Mod 并连接 NetCon…");
+                await _verifyGame.StartAsync(gameRoot, token);
+                Log("NetCon 已连接");
+            }
+            else
+            {
+                Log("复用已打开的游戏实例");
+            }
+
+            await MomentumReplaySession.ChangeMapAsync(_verifyGame.NetCon, mapName, Log, token);
+
+            var verifySettings = CloneForVerify(settings);
+            var hostFps = verifySettings.SupersamplingMultiplier * ProjectConstants.FinalOutputFramerate;
+            Log($"配置 host_framerate {hostFps}");
+            await _verifyGame.NetCon.ExecuteAsync(
+                $"sv_cheats 1; host_framerate {hostFps}",
+                TimeSpan.FromSeconds(30),
+                token);
+
+            await using var pipeline = new TgaPipelineOrchestrator();
+            pipeline.Changed += () =>
+            {
+                Status = string.Join("\n", logLines.TakeLast(36).Append($"Fed={pipeline.FedCount} Anchor={pipeline.ActivityAnchorFrame}"));
+                Changed?.Invoke();
+            };
+            await pipeline.StartAsync(verifySettings, tempClip, acceptPreSessionFiles: false);
+
+            await CaptureEnvelopeRecorder.VerifyActivityAsync(
+                _verifyGame.NetCon,
+                pipeline,
+                verifySettings,
+                relative,
+                Log,
+                token);
+
+            await pipeline.StopAsync();
+            Log("验证成功：回放可被自动拉起（已检测到 VisualActivity）。");
+            Status = string.Join("\n", logLines.TakeLast(40));
+        }
+        catch (OperationCanceledException)
+        {
+            Log("回放验证已取消");
+            if (_verifyGame is not null)
+            {
+                await _verifyGame.DisposeAsync();
+                _verifyGame = null;
+            }
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log("失败：" + ex.Message);
+            if (_verifyGame is not null)
+            {
+                try { await CaptureEnvelopeRecorder.TryEndMovieAsync(_verifyGame.NetCon); } catch { }
+                try { await _verifyGame.CloseOwnedAsync(CancellationToken.None); } catch { }
+                await _verifyGame.DisposeAsync();
+                _verifyGame = null;
+            }
+            throw new InvalidOperationException(string.Join("\n", logLines.TakeLast(20)), ex);
+        }
+        finally
+        {
+            TryDelete(tempClip);
+            try
+            {
+                var dir = Path.GetDirectoryName(tempClip);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any())
+                    Directory.Delete(dir);
+            }
+            catch { /* ignore */ }
+        }
+    }
 
     private async Task RunQueueAsync(CancellationToken token)
     {
         MomentumProcessController? game = null;
         try
         {
-            var runnable = _repository.GetTasks(false).Where(x => x.Status is RenderTaskStatus.Pending or RenderTaskStatus.Paused or RenderTaskStatus.FailedNeedsAttention).OrderBy(x => x.QueuePosition).ToList();
+            if (_verifyGame is not null)
+            {
+                game = _verifyGame;
+                _verifyGame = null;
+            }
+
+            var runnable = _repository.GetTasks(false)
+                .Where(x => x.Status is RenderTaskStatus.Pending or RenderTaskStatus.Paused or RenderTaskStatus.FailedNeedsAttention)
+                .OrderBy(x => x.QueuePosition)
+                .ToList();
             if (runnable.Count == 0) { Status = "没有待执行任务"; return; }
             var firstSettings = Deserialize(runnable[0]);
             _repository.UpdateTaskStatus(runnable[0].Id, RenderTaskStatus.Starting);
-            game = new MomentumProcessController();
-            Status = "正在启动 Momentum Mod 并验证 NetCon"; Changed?.Invoke();
-            await game.StartAsync(firstSettings.GameRootPath, token);
+
+            if (game is null)
+            {
+                game = new MomentumProcessController();
+                Status = "正在启动 Momentum Mod 并验证 NetCon"; Changed?.Invoke();
+                await game.StartAsync(firstSettings.GameRootPath, token);
+            }
             Status = "NetCon 已连接，准备执行任务"; Changed?.Invoke();
 
             foreach (var task in runnable)
@@ -48,13 +201,12 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                 Validate(settings);
                 _repository.UpdateTaskStatus(task.Id, RenderTaskStatus.Starting);
                 _repository.AddLog(task.Id, null, "Info", $"NetCon 已认证，正在切换地图 {task.MapName}。");
-                Status = $"正在切换地图：{task.MapName}"; Changed?.Invoke();
-                // `map` interrupts the current console command while the level
-                // loads, so an ACK appended with a semicolon is discarded.
-                // Send it as its own line, then use the next line's ACK as the
-                // condition that the engine command loop is responsive again.
-                await game.NetCon.SendAsync($"map {Quote(task.MapName)}", token);
-                await game.NetCon.ExecuteAsync("echo MMOD_MAP_READY", TimeSpan.FromMinutes(3), token);
+                Status = $"WaitingMapReady：{task.MapName}"; Changed?.Invoke();
+                await MomentumReplaySession.ChangeMapAsync(
+                    game.NetCon,
+                    task.MapName,
+                    line => { Status = line; _repository.AddLog(task.Id, null, "Info", line); Changed?.Invoke(); },
+                    token);
                 _repository.AddLog(task.Id, null, "Info", $"地图 {task.MapName} 已加载，开始配置录制。");
                 await game.NetCon.ExecuteAsync(BuildSetup(settings), TimeSpan.FromSeconds(30), token);
                 _repository.UpdateTaskStatus(task.Id, RenderTaskStatus.Running);
@@ -112,104 +264,197 @@ public sealed class RenderTaskRunner : IAsyncDisposable
         }
     }
 
-    private async Task ExecuteNodeWithRetryAsync(MomentumProcessController game, RenderTaskRecord task, RenderNodeRecord original, RenderSettingsSnapshot settings, CancellationToken token)
+    private async Task ExecuteNodeWithRetryAsync(
+        MomentumProcessController game,
+        RenderTaskRecord task,
+        RenderNodeRecord original,
+        RenderSettingsSnapshot settings,
+        CancellationToken token)
     {
         var node = original;
         while (true)
         {
             var started = DateTimeOffset.UtcNow;
-            var workDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ProjectConstants.AppDataFolderName, ProjectConstants.TaskWorkFolderName, task.Id);
+            var workDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                ProjectConstants.AppDataFolderName,
+                ProjectConstants.TaskWorkFolderName,
+                task.Id);
             Directory.CreateDirectory(workDir);
-            var clip = _repository.GetNodes(task.Id).Count == 1 ? task.OutputPath : Path.Combine(workDir, $"stage_{node.Sequence + 1:D3}.mp4");
-            node = node with { Status = RenderNodeStatus.Recording, StartedAt = started, FinishedAt = null, ClipPath = clip, LastError = null };
+            var clip = _repository.GetNodes(task.Id).Count == 1
+                ? task.OutputPath
+                : Path.Combine(workDir, $"stage_{node.Sequence + 1:D3}.mp4");
+            node = node with
+            {
+                Status = RenderNodeStatus.Recording,
+                StartedAt = started,
+                FinishedAt = null,
+                ClipPath = clip,
+                LastError = null,
+            };
             _repository.UpdateNode(node);
-            _repository.AddLog(task.Id, node.Id, "Info", $"开始节点：{Path.GetFileName(node.ReplayPath)}");
+            _repository.AddLog(task.Id, node.Id, "Info", $"开始节点（Capture-first）：{Path.GetFileName(node.ReplayPath)}");
+
             try
             {
                 var replayMetadata = MtvReplayParser.Parse(node.ReplayPath);
                 if (!replayMetadata.IsCompatible)
                     throw new NotSupportedException($"回放格式不兼容：{replayMetadata.CompatibilityIssue}。请使用当前游戏版本重新下载或生成回放。");
+
                 var user = ToUserSettings(settings);
+                var relative = MomentumReplaySession.BuildGameRelativeReplayPath(settings.GameRootPath, node.ReplayPath);
+                _repository.AddLog(task.Id, node.Id, "Info", "可复制控制台命令：\n" + MomentumReplaySession.BuildManualConsoleScript(task.MapName, relative));
+                _repository.AddLog(
+                    task.Id,
+                    node.Id,
+                    "Info",
+                    $"RunTime={replayMetadata.RunTimeSeconds:0.###}s → envelope frames ≈ {CaptureEnvelopeRecorder.ComputeEnvelopeFrameCount(replayMetadata.RunTimeSeconds, settings.SupersamplingMultiplier)} @ {settings.SupersamplingMultiplier * ProjectConstants.FinalOutputFramerate} fps");
+
                 await using var pipeline = new TgaPipelineOrchestrator();
-                pipeline.Changed += () => { Status = $"{task.MapName}：节点 {node.Sequence + 1}，已处理 {pipeline.FedCount} 帧"; Changed?.Invoke(); };
-                await pipeline.StartAsync(user, clip, false);
-                var replay = BuildGameReplayPath(settings.GameRootPath, node.ReplayPath);
-                await game.NetCon.SendAsync($"mom_tv_replay_watch {Quote(replay)}", token);
-                // This Playtest build does not emit its internal `Loaded replay`
-                // message to NetCon. The watch command itself is synchronous
-                // enough to create the controlled replay; use the next command
-                // line's ACK as readiness, while still rejecting explicit
-                // loading errors seen before that ACK.
-                await game.NetCon.ExecuteCheckedAsync(
-                    "echo MMOD_REPLAY_COMMAND_COMPLETE", TimeSpan.FromMinutes(2),
-                    line => line.Contains("Failed to load replay", StringComparison.OrdinalIgnoreCase)
-                        || line.Contains("Failed to open replay", StringComparison.OrdinalIgnoreCase)
-                        || line.Contains("Invalid replay file", StringComparison.OrdinalIgnoreCase),
-                    token);
-                // Watching starts playback. Once the following command ACKs,
-                // pause, seek back to tick 0, then resume after startmovie is
-                // active so no replay frames are missed.
-                await game.NetCon.ExecuteAsync("mom_tv_replay_play_pause; mom_tv_replay_goto 0", TimeSpan.FromSeconds(30), token);
-                _repository.AddLog(task.Id, node.Id, "Info", "回放已加载并定位到 tick 0，正在启动 TGA 后继续播放。");
-                await game.NetCon.ExecuteAsync($"{WatchDirectoryHelper.BuildGameStartmovieCommand(user.MovieSequenceName)}; mom_tv_replay_play_pause", TimeSpan.FromSeconds(30), token);
-                var expectedFrames = Math.Max(1, (int)Math.Ceiling(node.ExpectedDurationSeconds * settings.SupersamplingMultiplier * ProjectConstants.FinalOutputFramerate));
-                var validationFrames = Math.Min(expectedFrames, Math.Max(5, settings.SupersamplingMultiplier * 2));
-                var lastProgress = DateTime.UtcNow; var lastCount = -1;
-                while (pipeline.FedCount < expectedFrames)
+                pipeline.Changed += () =>
                 {
-                    token.ThrowIfCancellationRequested();
-                    if (pipeline.FedCount != lastCount) { lastCount = pipeline.FedCount; lastProgress = DateTime.UtcNow; }
-                    if (DateTime.UtcNow - lastProgress > TimeSpan.FromMinutes(2)) throw new TimeoutException("TGA 帧连续两分钟没有增长。");
-                    if (pipeline.FedCount >= validationFrames && !pipeline.HasVisualChange)
-                        throw new InvalidOperationException("回放未实际播放：已经生成 TGA 帧，但画面始终静止。请确认回放由当前游戏版本生成。");
-                    await Task.Delay(250, token);
+                    Status = $"{task.MapName}：节点 {node.Sequence + 1} · Fed={pipeline.FedCount} Anchor={pipeline.ActivityAnchorFrame}";
+                    Changed?.Invoke();
+                };
+                await pipeline.StartAsync(user, clip, acceptPreSessionFiles: false);
+
+                void OnPhase(string phase)
+                {
+                    Status = $"{task.MapName}：{phase}";
+                    if (!phase.StartsWith("Recording：", StringComparison.Ordinal)
+                        || phase.Contains("SafeEndFrame", StringComparison.Ordinal))
+                    {
+                        _repository.AddLog(task.Id, node.Id, "Info", phase);
+                    }
+
+                    Changed?.Invoke();
                 }
-                if (!pipeline.HasVisualChange)
-                    throw new InvalidOperationException("回放未实际播放：录制完成时画面仍然完全静止。请确认回放由当前游戏版本生成。");
-                await game.NetCon.ExecuteAsync("endmovie; host_framerate 0; host_timescale 1; sv_cheats 0", TimeSpan.FromSeconds(30), token);
+
+                await CaptureEnvelopeRecorder.RecordAsync(
+                    game.NetCon,
+                    pipeline,
+                    user,
+                    relative,
+                    replayMetadata.RunTimeSeconds,
+                    OnPhase,
+                    token);
+
                 await pipeline.StopAsync();
-                if (!File.Exists(clip) || new FileInfo(clip).Length == 0) throw new InvalidDataException("节点没有生成有效 MP4 文件。");
-                node = node with { Status = RenderNodeStatus.Completed, FinishedAt = DateTimeOffset.UtcNow, ElapsedSeconds = node.ElapsedSeconds + (DateTimeOffset.UtcNow - started).TotalSeconds };
-                _repository.UpdateNode(node); return;
+                if (!File.Exists(clip) || new FileInfo(clip).Length == 0)
+                    throw new InvalidDataException("节点没有生成有效 MP4 文件。");
+
+                node = node with
+                {
+                    Status = RenderNodeStatus.Completed,
+                    FinishedAt = DateTimeOffset.UtcNow,
+                    ElapsedSeconds = node.ElapsedSeconds + (DateTimeOffset.UtcNow - started).TotalSeconds,
+                };
+                _repository.UpdateNode(node);
+                return;
             }
             catch (OperationCanceledException)
             {
-                try { await game.NetCon.ExecuteAsync("endmovie; host_framerate 0; host_timescale 1; sv_cheats 0", TimeSpan.FromSeconds(5), CancellationToken.None); } catch { }
+                await CaptureEnvelopeRecorder.TryEndMovieAsync(game.NetCon);
                 TryDelete(clip);
-                _repository.UpdateNode(node with { Status = RenderNodeStatus.Pending, ClipPath = null, LastError = "立即中断，继续时从头执行。" });
+                _repository.UpdateNode(node with
+                {
+                    Status = RenderNodeStatus.Pending,
+                    ClipPath = null,
+                    LastError = "立即中断，继续时从头执行。",
+                });
                 throw;
             }
             catch (NotSupportedException ex)
             {
-                try { await game.NetCon.ExecuteAsync("endmovie; host_framerate 0; host_timescale 1; sv_cheats 0", TimeSpan.FromSeconds(5), CancellationToken.None); } catch { }
+                await CaptureEnvelopeRecorder.TryEndMovieAsync(game.NetCon);
                 TryDelete(clip);
                 _repository.UpdateNode(node with { Status = RenderNodeStatus.Failed, LastError = ex.Message });
                 throw;
             }
             catch (Exception ex)
             {
-                try { await game.NetCon.ExecuteAsync("endmovie; host_framerate 0; host_timescale 1; sv_cheats 0", TimeSpan.FromSeconds(5), CancellationToken.None); } catch { }
+                await CaptureEnvelopeRecorder.TryEndMovieAsync(game.NetCon);
                 TryDelete(clip);
-                if (node.RetryCount >= 2) { _repository.UpdateNode(node with { Status = RenderNodeStatus.Failed, LastError = ex.Message }); throw; }
-                node = node with { Status = RenderNodeStatus.Pending, RetryCount = node.RetryCount + 1, ClipPath = null, LastError = ex.Message };
-                _repository.UpdateNode(node); _repository.AddLog(task.Id, node.Id, "Warning", $"节点失败，将重试（{node.RetryCount}/2）：{ex.Message}");
+                if (node.RetryCount >= 2)
+                {
+                    _repository.UpdateNode(node with { Status = RenderNodeStatus.Failed, LastError = ex.Message });
+                    throw;
+                }
+
+                node = node with
+                {
+                    Status = RenderNodeStatus.Pending,
+                    RetryCount = node.RetryCount + 1,
+                    ClipPath = null,
+                    LastError = ex.Message,
+                };
+                _repository.UpdateNode(node);
+                _repository.AddLog(task.Id, node.Id, "Warning", $"节点失败，将重试（{node.RetryCount}/2）：{ex.Message}");
             }
         }
     }
 
-    private static RenderSettingsSnapshot Deserialize(RenderTaskRecord task) => JsonSerializer.Deserialize<RenderSettingsSnapshot>(task.SettingsJson) ?? throw new InvalidDataException("任务设置快照无效。");
-    private static void Validate(RenderSettingsSnapshot s) { if (!Directory.Exists(s.GameRootPath)) throw new DirectoryNotFoundException("游戏根目录不存在。"); if (!Directory.Exists(s.WatchDirectory)) throw new DirectoryNotFoundException("TGA 监视目录不存在。"); Directory.CreateDirectory(s.OutputDirectory); }
-    private static string BuildSetup(RenderSettingsSnapshot s) => $"sv_cheats 1; {(s.HideHud ? "cl_drawhud 0; " : string.Empty)}host_framerate {s.SupersamplingMultiplier * ProjectConstants.FinalOutputFramerate}";
-    private static UserSettings ToUserSettings(RenderSettingsSnapshot s) => new() { CaptureMode = CaptureMode.Tga, SupersamplingMultiplier = s.SupersamplingMultiplier, Exposure = s.Exposure, RamDiskWatchDirectory = s.WatchDirectory, VideoOutputDirectory = s.OutputDirectory, GameRootPath = s.GameRootPath, HideHudInCfg = s.HideHud, MovieSequenceName = "frame" };
-    private static string Quote(string text) => $"\"{text.Replace("\"", string.Empty)}\"";
-    private static string BuildGameReplayPath(string gameRoot, string replayPath)
+    private static UserSettings CloneForVerify(UserSettings settings)
     {
-        var contentRoot = Path.Combine(Path.GetFullPath(gameRoot), "momentum");
-        var relative = Path.GetRelativePath(contentRoot, Path.GetFullPath(replayPath));
-        if (relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            throw new InvalidOperationException("回放文件不在游戏 momentum 目录中。");
-        return relative.Replace('\\', '/').Replace("\"", string.Empty);
+        var s = new UserSettings
+        {
+            CaptureMode = CaptureMode.Tga,
+            SupersamplingMultiplier = Math.Max(1, settings.SupersamplingMultiplier),
+            Exposure = settings.Exposure,
+            RamDiskWatchDirectory = settings.RamDiskWatchDirectory,
+            RamDiskDriveLetter = settings.RamDiskDriveLetter,
+            VideoOutputDirectory = settings.VideoOutputDirectory,
+            GameRootPath = settings.GameRootPath,
+            HideHudInCfg = settings.HideHudInCfg,
+            MovieSequenceName = "mmod_verify",
+        };
+        WatchDirectoryHelper.EnsureDerivedPaths(s, s.GameRootPath);
+        return s;
     }
-    private static void TryDelete(string path) { try { if (File.Exists(path)) File.Delete(path); } catch { } }
-    public async ValueTask DisposeAsync() { if (IsRunning) { StopImmediately(); while (IsRunning) await Task.Delay(50); } }
+
+    private static RenderSettingsSnapshot Deserialize(RenderTaskRecord task) =>
+        JsonSerializer.Deserialize<RenderSettingsSnapshot>(task.SettingsJson)
+        ?? throw new InvalidDataException("任务设置快照无效。");
+
+    private static void Validate(RenderSettingsSnapshot s)
+    {
+        if (!Directory.Exists(s.GameRootPath)) throw new DirectoryNotFoundException("游戏根目录不存在。");
+        if (!Directory.Exists(s.WatchDirectory)) throw new DirectoryNotFoundException("TGA 监视目录不存在。");
+        Directory.CreateDirectory(s.OutputDirectory);
+    }
+
+    private static string BuildSetup(RenderSettingsSnapshot s) =>
+        $"sv_cheats 1; {(s.HideHud ? "cl_drawhud 0; " : string.Empty)}host_framerate {s.SupersamplingMultiplier * ProjectConstants.FinalOutputFramerate}";
+
+    private static UserSettings ToUserSettings(RenderSettingsSnapshot s) => new()
+    {
+        CaptureMode = CaptureMode.Tga,
+        SupersamplingMultiplier = s.SupersamplingMultiplier,
+        Exposure = s.Exposure,
+        RamDiskWatchDirectory = s.WatchDirectory,
+        VideoOutputDirectory = s.OutputDirectory,
+        GameRootPath = s.GameRootPath,
+        HideHudInCfg = s.HideHud,
+        MovieSequenceName = "frame",
+    };
+
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (IsRunning || IsVerifying)
+        {
+            StopImmediately();
+            while (IsRunning || IsVerifying) await Task.Delay(50);
+        }
+
+        if (_verifyGame is not null)
+        {
+            await _verifyGame.DisposeAsync();
+            _verifyGame = null;
+        }
+    }
 }

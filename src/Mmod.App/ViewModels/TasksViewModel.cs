@@ -106,6 +106,53 @@ public partial class TasksViewModel : ObservableObject
     [RelayCommand] private void PauseAfterNode() => _runner.PauseAfterCurrentNode();
     [RelayCommand] private void StopNow() => _runner.StopImmediately();
 
+    [RelayCommand]
+    private async Task VerifyReplay()
+    {
+        try
+        {
+            if (_runner.IsRunning || _runner.IsVerifying)
+            {
+                StatusText = "已有任务或验证在进行中，请先点「立即停止」。";
+                return;
+            }
+
+            var selected = Catalog.SelectMany(Flatten).Where(x => x.Record is not null && x.IsSelected).Select(x => x.Record!).ToList();
+            if (selected.Count == 0)
+                throw new InvalidOperationException("请先勾选一条要验证的回放记录。");
+            if (selected.Count > 1)
+                throw new InvalidOperationException("验证回放一次只支持勾选一条记录。");
+
+            var record = selected[0];
+            if (!record.IsCompatible)
+                throw new InvalidOperationException($"回放不兼容：{record.CompatibilityIssue}");
+
+            var gameRoot = _settings.GameRootPath?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(gameRoot) || !Directory.Exists(gameRoot))
+                throw new InvalidOperationException("请先在设置中配置有效的游戏根目录。");
+
+            var snapshot = _settings.Snapshot();
+            snapshot.GameRootPath = gameRoot;
+            StatusText = "正在验证回放（Capture Envelope：startmovie→Activity），请稍候…\n过程日志会显示在下方。";
+            await _runner.VerifyReplayAsync(snapshot, record.MapName, record.FilePath);
+            StatusText = _runner.Status;
+            System.Windows.MessageBox.Show(
+                "验证成功：已检测到回放画面运动（VisualActivity）。\n\n该回放可被自动拉起。下方状态区有逐步日志。",
+                "验证回放",
+                System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            System.Windows.MessageBox.Show(
+                ex.Message,
+                "验证回放失败",
+                System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Warning);
+        }
+    }
+
     [RelayCommand] private void MoveUp() => Move(-1);
     [RelayCommand] private void MoveDown() => Move(1);
     private void Move(int delta)

@@ -138,7 +138,8 @@ public static class MomentumDirectoryLinkService
         Directory.Exists(paths.RamMomentumPath);
 
     /// <summary>
-    /// 删除 junction、将 <c>_momentum</c> 还原为 <c>momentum</c>，并删除 RAM 盘上的副本目录。
+    /// 删除 junction、将 <c>_momentum</c> 还原为 <c>momentum</c>，并尽量删除 RAM 盘副本。
+    /// RAM 盘未挂载时仍会完成 junction 删除与备份还原。
     /// </summary>
     /// <returns>若已执行清理为 <c>true</c>；若本就已无链接相关目录则为 <c>false</c>（幂等）。</returns>
     public static bool RemoveLink(LinkPaths paths)
@@ -146,9 +147,9 @@ public static class MomentumDirectoryLinkService
         if (!Directory.Exists(paths.GameRoot))
             throw new InvalidOperationException($"游戏根目录不存在：{paths.GameRoot}");
 
-        var hadJunction = IsDirectoryJunction(paths.LinkPath);
+        var hadJunction = IsDirectoryJunction(paths.LinkPath) || IsBrokenDirectoryJunction(paths.LinkPath);
         var hadBackup = Directory.Exists(paths.BackupPath);
-        var hadRamCopy = Directory.Exists(paths.RamMomentumPath);
+        var hadRamCopy = SafeDirectoryExists(paths.RamMomentumPath);
 
         if (!hadJunction && !hadBackup && !hadRamCopy)
             return false;
@@ -158,10 +159,7 @@ public static class MomentumDirectoryLinkService
         if (!hadJunction && !hadBackup && Directory.Exists(paths.LinkPath))
         {
             if (hadRamCopy)
-            {
-                try { DeleteDirectoryTree(paths.RamMomentumPath); }
-                catch { /* 链接已取消；残留 RAM 副本不应将完成状态误报为失败 */ }
-            }
+                TryDeleteRamCopy(paths.RamMomentumPath);
             return hadRamCopy;
         }
 
@@ -170,17 +168,70 @@ public static class MomentumDirectoryLinkService
 
         if (Directory.Exists(paths.LinkPath) && !IsDirectoryJunction(paths.LinkPath))
         {
-            throw new InvalidOperationException(
-                $"存在实体目录 {paths.LinkPath}，无法自动还原。请手动处理后再试。");
+            // 已有实体 momentum，同时还有 _momentum：优先删掉多余备份，避免双份残留
+            if (hadBackup)
+            {
+                try { DeleteDirectoryTree(paths.BackupPath); }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException(
+                        $"已存在实体 {MomentumFolderName}，无法自动清理 {BackupFolderName}：{ex.Message}");
+                }
+            }
+
+            TryDeleteRamCopy(paths.RamMomentumPath);
+            return true;
         }
 
         if (hadBackup)
             RestoreBackupFolder(paths.BackupPath, paths.LinkPath);
 
-        if (hadRamCopy)
-            DeleteDirectoryTree(paths.RamMomentumPath);
-
+        TryDeleteRamCopy(paths.RamMomentumPath);
         return true;
+    }
+
+    private static bool SafeDirectoryExists(string path)
+    {
+        try
+        {
+            return Directory.Exists(path);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 目标盘未挂载时，Directory.Exists 可能为 false，但仍可能是损坏的 junction。
+    /// </summary>
+    private static bool IsBrokenDirectoryJunction(string path)
+    {
+        try
+        {
+            if (!Path.Exists(path))
+                return false;
+            var attrs = File.GetAttributes(path);
+            return (attrs & FileAttributes.Directory) != 0 &&
+                   (attrs & FileAttributes.ReparsePoint) != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void TryDeleteRamCopy(string ramMomentumPath)
+    {
+        try
+        {
+            if (SafeDirectoryExists(ramMomentumPath))
+                DeleteDirectoryTree(ramMomentumPath);
+        }
+        catch
+        {
+            // RAM 未挂载或清理失败不影响本地还原
+        }
     }
 
     /// <summary>
@@ -269,13 +320,16 @@ public static class MomentumDirectoryLinkService
 
     private static void RemoveLinkPathIfExists(string linkPath)
     {
+        if (IsDirectoryJunction(linkPath) || IsBrokenDirectoryJunction(linkPath))
+        {
+            Directory.Delete(linkPath, recursive: false);
+            return;
+        }
+
         if (!Directory.Exists(linkPath))
             return;
 
-        if (IsDirectoryJunction(linkPath))
-            Directory.Delete(linkPath, recursive: false);
-        else
-            DeleteDirectoryTree(linkPath);
+        DeleteDirectoryTree(linkPath);
     }
 
     private static void CreateJunction(string junctionPath, string targetPath)

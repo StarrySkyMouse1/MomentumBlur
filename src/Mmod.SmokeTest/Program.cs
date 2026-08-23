@@ -17,24 +17,29 @@ if (args.Length >= 3 && args[0] == "control")
     game.NetCon.OutputReceived += line => Console.WriteLine("NETCON " + line);
     await game.StartAsync(args[1], CancellationToken.None);
     Console.WriteLine("CONTROL_AUTH_OK");
-    await game.NetCon.SendAsync($"map \"{args[2].Replace("\"", string.Empty)}\"", CancellationToken.None);
-    await game.NetCon.ExecuteAsync("echo MMOD_CONTROL_MAP_READY", TimeSpan.FromMinutes(3), CancellationToken.None);
-    Console.WriteLine("CONTROL_MAP_OK");
     if (args.Length >= 4)
     {
-        await game.NetCon.ExecuteAsync("help mom_tv_replay_play_pause; help mom_tv_replay_goto; mom_tv_replay_goto", TimeSpan.FromSeconds(30), CancellationToken.None);
         var replayRoot = Path.Combine(Path.GetFullPath(args[1]), "momentum");
-        var replay = Path.GetRelativePath(replayRoot, Path.GetFullPath(args[3])).Replace("\\", "/").Replace("\"", string.Empty);
-        await game.NetCon.SendAsync($"mom_tv_replay_watch \"{replay}\"", CancellationToken.None);
-        await game.NetCon.ExecuteCheckedAsync(
-            "echo MMOD_CONTROL_REPLAY_READY", TimeSpan.FromMinutes(2),
-            line => line.Contains("Failed to load replay", StringComparison.OrdinalIgnoreCase)
-                || line.Contains("Failed to open replay", StringComparison.OrdinalIgnoreCase)
-                || line.Contains("Invalid replay file", StringComparison.OrdinalIgnoreCase),
+        var relative = Path.GetRelativePath(replayRoot, Path.GetFullPath(args[3])).Replace("\\", "/").Replace("\"", string.Empty);
+        Console.WriteLine("--- CONSOLE SCRIPT ---");
+        Console.WriteLine(MomentumReplaySession.BuildManualConsoleScript(args[2], relative));
+        Console.WriteLine("--- END SCRIPT ---");
+        await MomentumReplaySession.ChangeMapAsync(
+            game.NetCon,
+            args[2],
+            line => Console.WriteLine("STEP " + line),
             CancellationToken.None);
-        Console.WriteLine("CONTROL_REPLAY_OK");
-        await game.NetCon.ExecuteAsync("mom_tv_replay_play_pause; mom_tv_replay_goto 0", TimeSpan.FromSeconds(30), CancellationToken.None);
-        Console.WriteLine("CONTROL_REPLAY_RESET_OK");
+        await MomentumReplaySession.StartWatchAsync(
+            game.NetCon,
+            relative,
+            line => Console.WriteLine("STEP " + line),
+            CancellationToken.None);
+        Console.WriteLine("CONTROL_REPLAY_WATCH_OK");
+    }
+    else
+    {
+        await MomentumReplaySession.ChangeMapAsync(game.NetCon, args[2], line => Console.WriteLine("STEP " + line), CancellationToken.None);
+        Console.WriteLine("CONTROL_MAP_OK");
     }
     await game.CloseOwnedAsync(CancellationToken.None);
     return 0;
