@@ -193,6 +193,200 @@ public sealed class RenderTaskRepository
         command.ExecuteNonQuery();
     }
 
+    // ---- render_attempts (fine-grained state machine persistence) ----
+
+    public string CreateAttempt(RenderAttemptRecord attempt)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO render_attempts
+                (id, session_id, task_id, node_id, attempt_number, stage, sequence_prefix,
+                 temp_clip_path, created_at, updated_at, last_error, failure_kind, cleanup_state,
+                 game_process_id, game_process_started_at, netcon_port, expected_map,
+                 fed_count, submitted_frame_count, last_tga_index)
+            VALUES ($id, $session, $task, $node, $attempt, $stage, $prefix,
+                    $temp, $created, $updated, $error, $kind, $cleanup,
+                    $gamePid, $gameStart, $port, $map,
+                    $fed, $submitted, $lastTga);
+            """;
+        command.Parameters.AddWithValue("$id", attempt.Id);
+        command.Parameters.AddWithValue("$session", attempt.SessionId);
+        command.Parameters.AddWithValue("$task", attempt.TaskId);
+        command.Parameters.AddWithValue("$node", attempt.NodeId);
+        command.Parameters.AddWithValue("$attempt", attempt.AttemptNumber);
+        command.Parameters.AddWithValue("$stage", (int)attempt.Stage);
+        command.Parameters.AddWithValue("$prefix", attempt.SequencePrefix);
+        command.Parameters.AddWithValue("$temp", (object?)attempt.TempClipPath ?? DBNull.Value);
+        command.Parameters.AddWithValue("$created", attempt.CreatedAt.ToString("O"));
+        command.Parameters.AddWithValue("$updated", attempt.UpdatedAt.ToString("O"));
+        command.Parameters.AddWithValue("$error", (object?)attempt.LastError ?? DBNull.Value);
+        command.Parameters.AddWithValue("$kind", attempt.FailureKind is null ? DBNull.Value : (int)attempt.FailureKind);
+        command.Parameters.AddWithValue("$cleanup", (int)attempt.CleanupState);
+        command.Parameters.AddWithValue("$gamePid", (object?)attempt.GameProcessId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$gameStart", attempt.GameProcessStartedUtc is null ? DBNull.Value : attempt.GameProcessStartedUtc.Value.ToString("O"));
+        command.Parameters.AddWithValue("$port", (object?)attempt.NetConPort ?? DBNull.Value);
+        command.Parameters.AddWithValue("$map", (object?)attempt.ExpectedMap ?? DBNull.Value);
+        command.Parameters.AddWithValue("$fed", attempt.FedCount);
+        command.Parameters.AddWithValue("$submitted", attempt.SubmittedFrameCount);
+        command.Parameters.AddWithValue("$lastTga", (object?)attempt.LastTgaIndex ?? DBNull.Value);
+        command.ExecuteNonQuery();
+        return attempt.Id;
+    }
+
+    /// <summary>
+    /// Atomic stage transition guarded by the expected old stage. Returns false
+    /// when the stored stage differs (the transition is rejected).
+    /// </summary>
+    public bool TryTransitionAttemptStage(string attemptId, NodeExecutionStage expectedOld, NodeExecutionStage newStage, long fedCount, long submitted, int? lastTga)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE render_attempts SET stage=$new, updated_at=$now,
+                fed_count=$fed, submitted_frame_count=$submitted, last_tga_index=$lastTga
+            WHERE id=$id AND stage=$old;
+            """;
+        command.Parameters.AddWithValue("$new", (int)newStage);
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$fed", fedCount);
+        command.Parameters.AddWithValue("$submitted", submitted);
+        command.Parameters.AddWithValue("$lastTga", (object?)lastTga ?? DBNull.Value);
+        command.Parameters.AddWithValue("$id", attemptId);
+        command.Parameters.AddWithValue("$old", (int)expectedOld);
+        return command.ExecuteNonQuery() == 1;
+    }
+
+    public void UpdateAttemptFailure(string attemptId, RecordingFailureKind? kind, string? error, CaptureCleanupState cleanupState)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE render_attempts SET failure_kind=$kind, last_error=$error,
+                cleanup_state=$cleanup, finished_at=$now, updated_at=$now, stage=$stage
+            WHERE id=$id;
+            """;
+        command.Parameters.AddWithValue("$kind", kind is null ? DBNull.Value : (int)kind);
+        command.Parameters.AddWithValue("$error", (object?)error ?? DBNull.Value);
+        command.Parameters.AddWithValue("$cleanup", (int)cleanupState);
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$stage", (int)NodeExecutionStage.Failed);
+        command.Parameters.AddWithValue("$id", attemptId);
+        command.ExecuteNonQuery();
+    }
+
+    public void CompleteAttempt(string attemptId, long fedCount, long submitted, int? lastTga)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE render_attempts SET stage=$stage, finished_at=$now, updated_at=$now,
+                fed_count=$fed, submitted_frame_count=$submitted, last_tga_index=$lastTga
+            WHERE id=$id;
+            """;
+        command.Parameters.AddWithValue("$stage", (int)NodeExecutionStage.Completed);
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$fed", fedCount);
+        command.Parameters.AddWithValue("$submitted", submitted);
+        command.Parameters.AddWithValue("$lastTga", (object?)lastTga ?? DBNull.Value);
+        command.Parameters.AddWithValue("$id", attemptId);
+        command.ExecuteNonQuery();
+    }
+
+    public IReadOnlyList<RenderAttemptRecord> GetAttemptsForNode(string taskId, string nodeId)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT * FROM render_attempts WHERE task_id=$task AND node_id=$node ORDER BY attempt_number;";
+        command.Parameters.AddWithValue("$task", taskId);
+        command.Parameters.AddWithValue("$node", nodeId);
+        using var reader = command.ExecuteReader();
+        var result = new List<RenderAttemptRecord>();
+        while (reader.Read())
+            result.Add(ReadAttempt(reader));
+        return result;
+    }
+
+    /// <summary>All non-terminal attempts (crash recovery + diagnostics).</summary>
+    public IReadOnlyList<RenderAttemptRecord> GetActiveAttempts()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT * FROM render_attempts WHERE stage NOT IN ($completed, $failed, $canceled);";
+        command.Parameters.AddWithValue("$completed", (int)NodeExecutionStage.Completed);
+        command.Parameters.AddWithValue("$failed", (int)NodeExecutionStage.Failed);
+        command.Parameters.AddWithValue("$canceled", (int)NodeExecutionStage.Canceled);
+        using var reader = command.ExecuteReader();
+        var result = new List<RenderAttemptRecord>();
+        while (reader.Read())
+            result.Add(ReadAttempt(reader));
+        return result;
+    }
+
+    // ---- runner_session (crash recovery) ----
+
+    public void SaveRunnerSession(RunnerSessionRecord session)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO runner_session (singleton, process_id, netcon_port, netcon_password,
+                task_id, node_id, updated_at, exe_path, process_started_at, game_session_id,
+                capture_session_id, sequence_prefix, ownership_token, watch_directory)
+            VALUES (1, $pid, $port, $password, $task, $node, $now, $exe, $start, $game, $cap, $prefix, $token, $watch)
+            ON CONFLICT(singleton) DO UPDATE SET
+                process_id=$pid, netcon_port=$port, netcon_password=$password, task_id=$task,
+                node_id=$node, updated_at=$now, exe_path=$exe, process_started_at=$start,
+                game_session_id=$game, capture_session_id=$cap, sequence_prefix=$prefix,
+                ownership_token=$token, watch_directory=$watch;
+            """;
+        command.Parameters.AddWithValue("$pid", (object?)session.ProcessId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$port", (object?)session.NetConPort ?? DBNull.Value);
+        command.Parameters.AddWithValue("$password", (object?)session.NetConPassword ?? DBNull.Value);
+        command.Parameters.AddWithValue("$task", (object?)session.TaskId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$node", (object?)session.NodeId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$exe", (object?)session.ExePath ?? DBNull.Value);
+        command.Parameters.AddWithValue("$start", session.ProcessStartedAt is null ? DBNull.Value : session.ProcessStartedAt.Value.ToString("O"));
+        command.Parameters.AddWithValue("$game", (object?)session.GameSessionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$cap", (object?)session.CaptureSessionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$prefix", (object?)session.SequencePrefix ?? DBNull.Value);
+        command.Parameters.AddWithValue("$token", (object?)session.OwnershipToken ?? DBNull.Value);
+        command.Parameters.AddWithValue("$watch", (object?)session.WatchDirectory ?? DBNull.Value);
+        command.ExecuteNonQuery();
+    }
+
+    public RunnerSessionRecord? GetRunnerSession()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT * FROM runner_session WHERE singleton=1;";
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+            return null;
+        return new RunnerSessionRecord(
+            GetNullableInt(reader, "process_id"),
+            GetNullableInt(reader, "netcon_port"),
+            GetNullableString(reader, "netcon_password"),
+            GetNullableString(reader, "task_id"),
+            GetNullableString(reader, "node_id"),
+            GetNullableString(reader, "exe_path"),
+            GetNullableDateTimeUtc(reader, "process_started_at"),
+            GetNullableString(reader, "game_session_id"),
+            GetNullableString(reader, "capture_session_id"),
+            GetNullableString(reader, "sequence_prefix"),
+            GetNullableString(reader, "ownership_token"),
+            GetNullableString(reader, "watch_directory"));
+    }
+
+    public void ClearRunnerSession()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM runner_session;";
+        command.ExecuteNonQuery();
+    }
+
     public void AddLog(string taskId, string? nodeId, string level, string message)
     {
         using var connection = Open();
@@ -264,9 +458,28 @@ public sealed class RenderTaskRepository
                 netcon_port INTEGER NULL, netcon_password TEXT NULL, task_id TEXT NULL,
                 node_id TEXT NULL, updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS render_attempts (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, task_id TEXT NOT NULL,
+                node_id TEXT NOT NULL, attempt_number INTEGER NOT NULL, stage INTEGER NOT NULL,
+                sequence_prefix TEXT NOT NULL, temp_clip_path TEXT NULL, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, finished_at TEXT NULL, last_error TEXT NULL,
+                failure_kind INTEGER NULL, cleanup_state INTEGER NOT NULL DEFAULT 0,
+                game_process_id INTEGER NULL, game_process_started_at TEXT NULL,
+                netcon_port INTEGER NULL, expected_map TEXT NULL,
+                fed_count INTEGER NOT NULL DEFAULT 0, submitted_frame_count INTEGER NOT NULL DEFAULT 0,
+                last_tga_index INTEGER NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_render_attempts_node ON render_attempts(task_id, node_id, attempt_number);
+            CREATE INDEX IF NOT EXISTS ix_render_attempts_active ON render_attempts(stage);
             """;
         command.ExecuteNonQuery();
         EnsureColumn(connection, "render_nodes", "expected_tick_count", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn(connection, "runner_session", "exe_path", "TEXT NULL");
+        EnsureColumn(connection, "runner_session", "process_started_at", "TEXT NULL");
+        EnsureColumn(connection, "runner_session", "game_session_id", "TEXT NULL");
+        EnsureColumn(connection, "runner_session", "capture_session_id", "TEXT NULL");
+        EnsureColumn(connection, "runner_session", "sequence_prefix", "TEXT NULL");
+        EnsureColumn(connection, "runner_session", "ownership_token", "TEXT NULL");
         NormalizeInterruptedWork(connection);
     }
 
@@ -368,10 +581,45 @@ public sealed class RenderTaskRepository
         GetNullableDate(reader, "finished_at"), reader.GetDouble(reader.GetOrdinal("elapsed_seconds")),
         GetNullableString(reader, "last_error"), reader.GetInt32(reader.GetOrdinal("expected_tick_count")));
 
+    private static RenderAttemptRecord ReadAttempt(SqliteDataReader reader) => new(
+        reader.GetString(reader.GetOrdinal("id")),
+        reader.GetString(reader.GetOrdinal("session_id")),
+        reader.GetString(reader.GetOrdinal("task_id")),
+        reader.GetString(reader.GetOrdinal("node_id")),
+        reader.GetInt32(reader.GetOrdinal("attempt_number")),
+        (NodeExecutionStage)reader.GetInt32(reader.GetOrdinal("stage")),
+        reader.GetString(reader.GetOrdinal("sequence_prefix")),
+        GetNullableString(reader, "temp_clip_path"),
+        DateTimeOffset.Parse(reader.GetString(reader.GetOrdinal("created_at"))),
+        DateTimeOffset.Parse(reader.GetString(reader.GetOrdinal("updated_at"))),
+        GetNullableDate(reader, "finished_at"),
+        GetNullableString(reader, "last_error"),
+        GetNullableInt(reader, "failure_kind") is { } kind ? (RecordingFailureKind)kind : null,
+        (CaptureCleanupState)reader.GetInt32(reader.GetOrdinal("cleanup_state")),
+        GetNullableInt(reader, "game_process_id"),
+        GetNullableDateTimeUtc(reader, "game_process_started_at"),
+        GetNullableInt(reader, "netcon_port"),
+        GetNullableString(reader, "expected_map"),
+        reader.GetInt64(reader.GetOrdinal("fed_count")),
+        reader.GetInt64(reader.GetOrdinal("submitted_frame_count")),
+        GetNullableInt(reader, "last_tga_index"));
+
     private static DateTimeOffset? GetNullableDate(SqliteDataReader reader, string name)
     {
         var ordinal = reader.GetOrdinal(name);
         return reader.IsDBNull(ordinal) ? null : DateTimeOffset.Parse(reader.GetString(ordinal));
+    }
+
+    private static int? GetNullableInt(SqliteDataReader reader, string name)
+    {
+        var ordinal = reader.GetOrdinal(name);
+        return reader.IsDBNull(ordinal) ? null : reader.GetInt32(ordinal);
+    }
+
+    private static DateTime? GetNullableDateTimeUtc(SqliteDataReader reader, string name)
+    {
+        var ordinal = reader.GetOrdinal(name);
+        return reader.IsDBNull(ordinal) ? null : DateTime.Parse(reader.GetString(ordinal)).ToUniversalTime();
     }
 
     private static string? GetNullableString(SqliteDataReader reader, string name)

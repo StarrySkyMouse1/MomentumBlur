@@ -7,7 +7,9 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #pragma comment(lib, "d3d11.lib")
@@ -60,11 +62,155 @@ void main(uint3 id : SV_DispatchThreadID) {
 }
 )";
 
+/* All processing shaders operate on float RGB in 0..255 space, matching the
+   CPU fallback in frame_processing.cpp. p0..p3 map to the descriptor p0..p3. */
+
+static const char* kMotionAdaptiveCs = R"(
+Texture2D<float4> Cur : register(t0);
+Texture2D<float4> Prev : register(t1);
+RWTexture2D<float4> Out : register(u0);
+cbuffer Params : register(b0) { float4 P; }; // x=strength y=motion-threshold z=edge-protection
+
+float3 LoadC(Texture2D<float4> tex, int2 p, int w, int h) {
+  int2 c = clamp(p, int2(0, 0), int2(w - 1, h - 1));
+  return tex.Load(int3(c, 0)).rgb;
+}
+float Luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+
+[numthreads(16, 16, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+  uint w, h; Cur.GetDimensions(w, h);
+  if (id.x >= w || id.y >= h) return;
+  int2 p = int2((int)id.x, (int)id.y);
+  float3 cur = Cur.Load(int3(p, 0)).rgb;
+  float3 prev = Prev.Load(int3(p, 0)).rgb;
+
+  float motion = abs(Luma(cur) - Luma(prev)) / 255.0;
+  float th = max(P.y, 0.001);
+  float mask = smoothstep(th, th * 2.5, motion);
+
+  float3 blur = 0;
+  for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx)
+      blur += LoadC(Cur, p + int2(dx, dy), w, h);
+  blur /= 9.0;
+
+  float gx = abs(Luma(LoadC(Cur, p + int2(1, 0), w, h)) - Luma(LoadC(Cur, p + int2(-1, 0), w, h)));
+  float gy = abs(Luma(LoadC(Cur, p + int2(0, 1), w, h)) - Luma(LoadC(Cur, p + int2(0, -1), w, h)));
+  float edge = sqrt(gx * gx + gy * gy) / 255.0;
+  float edge_mask = saturate(edge / 0.6);
+  float protect = 1.0 - edge_mask * P.z;
+
+  float t = mask * P.x * protect;
+  Out[id.xy] = float4(lerp(cur, blur, t), 1.0);
+}
+)";
+
+static const char* kLowPassCs = R"(
+Texture2D<float4> Cur : register(t0);
+RWTexture2D<float4> Out : register(u0);
+cbuffer Params : register(b0) { float4 P; }; // x=strength y=radius
+
+float3 LoadC(Texture2D<float4> tex, int2 p, int w, int h) {
+  int2 c = clamp(p, int2(0, 0), int2(w - 1, h - 1));
+  return tex.Load(int3(c, 0)).rgb;
+}
+
+[numthreads(16, 16, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+  uint w, h; Cur.GetDimensions(w, h);
+  if (id.x >= w || id.y >= h) return;
+  int2 p = int2((int)id.x, (int)id.y);
+  int radius = (P.y >= 1.5) ? 2 : 1;
+  float3 acc = 0;
+  for (int dy = -radius; dy <= radius; ++dy)
+    for (int dx = -radius; dx <= radius; ++dx)
+      acc += LoadC(Cur, p + int2(dx, dy), w, h);
+  float3 blur = acc / (float)((2 * radius + 1) * (2 * radius + 1));
+  float3 cur = Cur.Load(int3(p, 0)).rgb;
+  Out[id.xy] = float4(lerp(cur, blur, P.x), 1.0);
+}
+)";
+
+static const char* kDebandCs = R"(
+Texture2D<float4> Cur : register(t0);
+RWTexture2D<float4> Out : register(u0);
+cbuffer Params : register(b0) { float4 P; }; // x=strength y=threshold
+
+float3 LoadC(Texture2D<float4> tex, int2 p, int w, int h) {
+  int2 c = clamp(p, int2(0, 0), int2(w - 1, h - 1));
+  return tex.Load(int3(c, 0)).rgb;
+}
+
+[numthreads(16, 16, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+  uint w, h; Cur.GetDimensions(w, h);
+  if (id.x >= w || id.y >= h) return;
+  int2 p = int2((int)id.x, (int)id.y);
+  float3 acc = 0;
+  for (int dy = -2; dy <= 2; ++dy)
+    for (int dx = -2; dx <= 2; ++dx)
+      acc += LoadC(Cur, p + int2(dx, dy), w, h);
+  float3 mean = acc / 25.0;
+  float3 cur = Cur.Load(int3(p, 0)).rgb;
+  float diff = max(max(abs(cur.r - mean.r), abs(cur.g - mean.g)), abs(cur.b - mean.b)) / 255.0;
+  float th = max(P.y, 0.001);
+  float flat = 1.0 - smoothstep(th, th * 3.0, diff);
+  Out[id.xy] = float4(lerp(cur, mean, P.x * flat), 1.0);
+}
+)";
+
+static const char* kShimmerCs = R"(
+Texture2D<float4> Cur : register(t0);
+Texture2D<float4> Prev : register(t1);
+RWTexture2D<float4> Out : register(u0);
+cbuffer Params : register(b0) { float4 P; }; // x=strength y=temporal-threshold
+
+float3 LoadC(Texture2D<float4> tex, int2 p, int w, int h) {
+  int2 c = clamp(p, int2(0, 0), int2(w - 1, h - 1));
+  return tex.Load(int3(c, 0)).rgb;
+}
+float Luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+
+[numthreads(16, 16, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+  uint w, h; Cur.GetDimensions(w, h);
+  if (id.x >= w || id.y >= h) return;
+  int2 p = int2((int)id.x, (int)id.y);
+  float3 cur = Cur.Load(int3(p, 0)).rgb;
+  float3 prev = Prev.Load(int3(p, 0)).rgb;
+
+  float diff = max(max(abs(cur.r - prev.r), abs(cur.g - prev.g)), abs(cur.b - prev.b)) / 255.0;
+  float th = max(P.y, 0.001);
+  float k = 1.0 - smoothstep(th * 0.5, th * 2.0, diff);
+
+  float3 acc = 0;
+  for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx)
+      acc += LoadC(Cur, p + int2(dx, dy), w, h);
+  float3 blur = acc / 9.0;
+  float hf = abs(Luma(cur) - Luma(blur)) / 255.0;
+  float hf_mask = smoothstep(0.02, 0.10, hf);
+
+  Out[id.xy] = float4(lerp(cur, prev, P.x * k * hf_mask), 1.0);
+}
+)";
+
 HRESULT CompileCs(const char* src, const char* entry, ID3DBlob** blob) {
   ComPtr<ID3DBlob> error;
   HRESULT hr = D3DCompile(src, strlen(src), nullptr, nullptr, nullptr, entry, "cs_5_0",
                           D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blob, &error);
   return hr;
+}
+
+int EffectStage(int32_t effect_type) {
+  switch (effect_type) {
+    case MmodEffect_TemporalShimmerReduction: return 0;
+    case MmodEffect_MotionAdaptiveDetail: return 1;
+    case MmodEffect_MicroDetailLowPass:
+    case MmodEffect_DebandNoDither: return 2;
+    default: return 3;
+  }
 }
 
 } // namespace
@@ -86,7 +232,46 @@ struct GpuBlendContext {
   ComPtr<ID3D11ComputeShader> cs_clear;
   ComPtr<ID3D11ComputeShader> cs_accum;
   ComPtr<ID3D11ComputeShader> cs_pack;
+
+  // Quality processing resources (created lazily in GpuBlendConfigureEffects).
+  std::vector<MmodEffectDescV1> enabled_effects;
+  bool first_processed = true;
+  bool processing_configured = false;
+  ComPtr<ID3D11Texture2D> work_a_tex;
+  ComPtr<ID3D11Texture2D> work_b_tex;
+  ComPtr<ID3D11ShaderResourceView> work_a_srv;
+  ComPtr<ID3D11ShaderResourceView> work_b_srv;
+  ComPtr<ID3D11UnorderedAccessView> work_a_uav;
+  ComPtr<ID3D11UnorderedAccessView> work_b_uav;
+  ComPtr<ID3D11Texture2D> prev_prequality_tex;
+  ComPtr<ID3D11ShaderResourceView> prev_prequality_srv;
+  ComPtr<ID3D11Texture2D> prev_preprocessed_tex;
+  ComPtr<ID3D11ShaderResourceView> prev_preprocessed_srv;
+  ComPtr<ID3D11Buffer> effect_cb;
+  ComPtr<ID3D11ComputeShader> cs_motion_adaptive;
+  ComPtr<ID3D11ComputeShader> cs_lowpass;
+  ComPtr<ID3D11ComputeShader> cs_deband;
+  ComPtr<ID3D11ComputeShader> cs_shimmer;
 };
+
+static bool CreateFloatTexture(GpuBlendContext* ctx,
+                               ID3D11Texture2D** tex,
+                               ID3D11ShaderResourceView** srv,
+                               ID3D11UnorderedAccessView** uav) {
+  D3D11_TEXTURE2D_DESC td{};
+  td.Width = static_cast<UINT>(ctx->width);
+  td.Height = static_cast<UINT>(ctx->height);
+  td.MipLevels = 1;
+  td.ArraySize = 1;
+  td.SampleDesc.Count = 1;
+  td.Usage = D3D11_USAGE_DEFAULT;
+  td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+  td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+  if (FAILED(ctx->device->CreateTexture2D(&td, nullptr, tex))) return false;
+  if (srv && FAILED(ctx->device->CreateShaderResourceView(*tex, nullptr, srv))) return false;
+  if (uav && FAILED(ctx->device->CreateUnorderedAccessView(*tex, nullptr, uav))) return false;
+  return true;
+}
 
 GpuBlendContext* GpuBlendCreate(int width, int height, int /*blend_frames*/) {
   if (width <= 0 || height <= 0) return nullptr;
@@ -261,5 +446,171 @@ bool GpuBlendPack(GpuBlendContext* ctx, std::vector<uint8_t>& out_bgra) {
     }
   }
   ctx->context->Unmap(ctx->out_staging.Get(), 0);
+  return true;
+}
+
+bool GpuBlendConfigureEffects(GpuBlendContext* ctx,
+                              const MmodEffectDescV1* effects,
+                              int32_t count,
+                              char* error_message,
+                              size_t error_message_size) {
+  if (!ctx) return false;
+  if (error_message && error_message_size > 0) error_message[0] = '\0';
+
+  ctx->enabled_effects.clear();
+  if (!effects || count <= 0) {
+    ctx->processing_configured = true;
+    return true;
+  }
+  for (int32_t i = 0; i < count; ++i) {
+    if (effects[i].enabled && effects[i].effect_type != MmodEffect_None) {
+      ctx->enabled_effects.push_back(effects[i]);
+    }
+  }
+  if (ctx->enabled_effects.empty()) {
+    ctx->processing_configured = true;
+    return true;
+  }
+
+  std::stable_sort(ctx->enabled_effects.begin(), ctx->enabled_effects.end(),
+                   [](const MmodEffectDescV1& a, const MmodEffectDescV1& b) {
+                     const int sa = EffectStage(a.effect_type);
+                     const int sb = EffectStage(b.effect_type);
+                     if (sa != sb) return sa < sb;
+                     return a.order < b.order;
+                   });
+
+  ComPtr<ID3DBlob> blob;
+  if (FAILED(CompileCs(kMotionAdaptiveCs, "main", &blob))) {
+    if (error_message) snprintf(error_message, error_message_size, "compile motion-adaptive-detail shader failed");
+    return false;
+  }
+  ctx->device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &ctx->cs_motion_adaptive);
+  blob.Reset();
+  if (FAILED(CompileCs(kLowPassCs, "main", &blob))) {
+    if (error_message) snprintf(error_message, error_message_size, "compile micro-detail-lowpass shader failed");
+    return false;
+  }
+  ctx->device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &ctx->cs_lowpass);
+  blob.Reset();
+  if (FAILED(CompileCs(kDebandCs, "main", &blob))) {
+    if (error_message) snprintf(error_message, error_message_size, "compile deband shader failed");
+    return false;
+  }
+  ctx->device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &ctx->cs_deband);
+  blob.Reset();
+  if (FAILED(CompileCs(kShimmerCs, "main", &blob))) {
+    if (error_message) snprintf(error_message, error_message_size, "compile temporal-shimmer shader failed");
+    return false;
+  }
+  ctx->device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &ctx->cs_shimmer);
+  blob.Reset();
+
+  if (!ctx->cs_motion_adaptive || !ctx->cs_lowpass || !ctx->cs_deband || !ctx->cs_shimmer) {
+    if (error_message) snprintf(error_message, error_message_size, "create compute shader failed");
+    return false;
+  }
+
+  if (!CreateFloatTexture(ctx, &ctx->work_a_tex, &ctx->work_a_srv, &ctx->work_a_uav) ||
+      !CreateFloatTexture(ctx, &ctx->work_b_tex, &ctx->work_b_srv, &ctx->work_b_uav) ||
+      !CreateFloatTexture(ctx, &ctx->prev_prequality_tex, &ctx->prev_prequality_srv, nullptr) ||
+      !CreateFloatTexture(ctx, &ctx->prev_preprocessed_tex, &ctx->prev_preprocessed_srv, nullptr)) {
+    if (error_message) snprintf(error_message, error_message_size, "create processing textures failed");
+    return false;
+  }
+
+  D3D11_BUFFER_DESC cbd{};
+  cbd.ByteWidth = 16;
+  cbd.Usage = D3D11_USAGE_DYNAMIC;
+  cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+  cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+  if (FAILED(ctx->device->CreateBuffer(&cbd, nullptr, &ctx->effect_cb))) {
+    if (error_message) snprintf(error_message, error_message_size, "create effect constant buffer failed");
+    return false;
+  }
+
+  ctx->first_processed = true;
+  ctx->processing_configured = true;
+  return true;
+}
+
+bool GpuBlendHasEnabledEffects(GpuBlendContext* ctx) {
+  return ctx && !ctx->enabled_effects.empty();
+}
+
+static bool UpdateEffectParams(GpuBlendContext* ctx, const MmodEffectDescV1& e) {
+  D3D11_MAPPED_SUBRESOURCE map{};
+  if (FAILED(ctx->context->Map(ctx->effect_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map)))
+    return false;
+  float* f = static_cast<float*>(map.pData);
+  f[0] = e.p0;
+  f[1] = e.p1;
+  f[2] = e.p2;
+  f[3] = e.p3;
+  ctx->context->Unmap(ctx->effect_cb.Get(), 0);
+  return true;
+}
+
+bool GpuBlendProcess(GpuBlendContext* ctx) {
+  if (!ctx || ctx->enabled_effects.empty()) return true;
+
+  if (ctx->first_processed) {
+    // First processed frame: no motion/reference history, seed with current.
+    ctx->context->CopyResource(ctx->prev_prequality_tex.Get(), ctx->acc_tex.Get());
+    ctx->context->CopyResource(ctx->prev_preprocessed_tex.Get(), ctx->acc_tex.Get());
+    ctx->first_processed = false;
+  }
+
+  // work_a holds the unprocessed current frame; effects ping-pong to work_b.
+  ctx->context->CopyResource(ctx->work_a_tex.Get(), ctx->acc_tex.Get());
+
+  ID3D11Texture2D* cur = ctx->work_a_tex.Get();
+  ID3D11Texture2D* dst = ctx->work_b_tex.Get();
+  ID3D11ShaderResourceView* cur_srv = ctx->work_a_srv.Get();
+  ID3D11ShaderResourceView* dst_srv = ctx->work_b_srv.Get();
+  ID3D11UnorderedAccessView* dst_uav = ctx->work_b_uav.Get();
+
+  const UINT gx = (ctx->width + 15) / 16;
+  const UINT gy = (ctx->height + 15) / 16;
+
+  for (const auto& e : ctx->enabled_effects) {
+    ID3D11ComputeShader* cs = nullptr;
+    switch (e.effect_type) {
+      case MmodEffect_MotionAdaptiveDetail: cs = ctx->cs_motion_adaptive.Get(); break;
+      case MmodEffect_MicroDetailLowPass: cs = ctx->cs_lowpass.Get(); break;
+      case MmodEffect_DebandNoDither: cs = ctx->cs_deband.Get(); break;
+      case MmodEffect_TemporalShimmerReduction: cs = ctx->cs_shimmer.Get(); break;
+      default: continue; /* unknown effect: ignore safely */
+    }
+    if (!cs || !UpdateEffectParams(ctx, e)) return false;
+
+    ID3D11ShaderResourceView* prev_srv = (e.effect_type == MmodEffect_TemporalShimmerReduction)
+        ? ctx->prev_preprocessed_srv.Get()
+        : ctx->prev_prequality_srv.Get();
+
+    ctx->context->CSSetShader(cs, nullptr, 0);
+    ID3D11ShaderResourceView* srvs[] = { cur_srv, prev_srv };
+    ctx->context->CSSetShaderResources(0, 2, srvs);
+    ID3D11UnorderedAccessView* uavs[] = { dst_uav };
+    ctx->context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+    ID3D11Buffer* cbs[] = { ctx->effect_cb.Get() };
+    ctx->context->CSSetConstantBuffers(0, 1, cbs);
+    ctx->context->Dispatch(gx, gy, 1);
+
+    ID3D11ShaderResourceView* nullsrv[] = { nullptr, nullptr };
+    ID3D11UnorderedAccessView* nulluav[] = { nullptr };
+    ctx->context->CSSetShaderResources(0, 2, nullsrv);
+    ctx->context->CSSetUnorderedAccessViews(0, 1, nulluav, nullptr);
+
+    std::swap(cur, dst);
+    std::swap(cur_srv, dst_srv);
+    dst_uav = (dst == ctx->work_a_tex.Get()) ? ctx->work_a_uav.Get() : ctx->work_b_uav.Get();
+  }
+
+  // acc_tex still holds the unprocessed frame: save it as prev_prequality,
+  // then write the processed result into acc_tex and save prev_preprocessed.
+  ctx->context->CopyResource(ctx->prev_prequality_tex.Get(), ctx->acc_tex.Get());
+  ctx->context->CopyResource(ctx->acc_tex.Get(), cur);
+  ctx->context->CopyResource(ctx->prev_preprocessed_tex.Get(), ctx->acc_tex.Get());
   return true;
 }

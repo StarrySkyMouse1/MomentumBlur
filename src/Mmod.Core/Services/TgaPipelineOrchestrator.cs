@@ -4,36 +4,72 @@ using Mmod.Core.Native;
 
 namespace Mmod.Core.Services;
 
-public sealed class TgaPipelineOrchestrator : IAsyncDisposable
+/// <summary>
+/// Capture pipeline: session-scoped TGA watcher → Native blend session →
+/// encoder. UI Status is only a projection; correctness lives in the strong
+/// lifecycle (State / Completion / Fault) and FinalizeAsync, which never
+/// swallows Native faults and never reports success without proof.
+/// </summary>
+public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
 {
+    private readonly VisualPlaybackEvidenceProbe _evidenceProbe;
     private CancellationTokenSource? _cts;
     private Task? _loop;
+    private TaskCompletionSource _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private TgaDirectoryWatcher? _watcher;
     private NativeBlendSession? _session;
     private int _nextFrame;
-    private int _fed;
-    private ulong? _firstFrameSignature;
-    private ulong? _previousFrameSignature;
+    private long _fed;
+    private long _submittedInputFrames;
+    private int _firstFrameWidth;
+    private int _firstFrameHeight;
+    private Exception? _fault;
+    private PipelineState _state = PipelineState.Created;
+    private string? _sessionDiagnostics;
 
-    public bool IsRunning => _loop is { IsCompleted: false };
+    public TgaPipelineOrchestrator(RecordingTimeoutPolicy? timeouts = null)
+    {
+        Timeouts = timeouts ?? RecordingTimeoutPolicy.Default;
+        _evidenceProbe = new VisualPlaybackEvidenceProbe(Timeouts);
+    }
 
-    public int PendingCount => _watcher?.PendingCount ?? 0;
-    public int FedCount => _fed;
-    /// <summary>True once any frame differed from the first sampled signature (PlaybackStartLowerBound reached).</summary>
-    public bool HasVisualChange { get; private set; }
-    /// <summary>FedCount of the first frame that differed from the opening still; null until then.</summary>
-    public int? ActivityAnchorFrame { get; private set; }
-    /// <summary>FedCount of the most recent frame that differed from the previous frame.</summary>
-    public int? LastVisualChangeFrame { get; private set; }
-    public string? OutputPath { get; private set; }
-    public string? WatchDirectory { get; private set; }
-    public string Status { get; private set; } = "空闲";
+    public RecordingTimeoutPolicy Timeouts { get; }
 
     public event Action? Changed;
 
-    public Task StartAsync(UserSettings settings) => StartAsync(settings, null, true);
+    public bool IsRunning => _loop is { IsCompleted: false };
+    public long FedCount => _fed;
+    public int PendingCount => _watcher?.PendingCount ?? 0;
+    public int CandidateCount => _watcher?.CandidateCount ?? 0;
+    public PipelineState State => _state;
+    public Exception? Fault => _fault;
+    public bool IsFaulted => _fault is not null;
+    public Task Completion => _completion.Task;
+    public string? OutputPath { get; private set; }
+    public string? WatchDirectory { get; private set; }
+    public string? SessionDiagnostics => _sessionDiagnostics;
+    public string Status { get; private set; } = "空闲";
+    public ITgaCaptureWatcher Watcher => _watcher ?? throw new InvalidOperationException("Watcher 尚未启动。");
+    public string? CaptureSessionId { get; private set; }
+    public string? SequencePrefix { get; private set; }
 
-    public async Task StartAsync(UserSettings settings, string? outputPath, bool acceptPreSessionFiles = false)
+    /// <summary>True once any frame differed from the baseline (evidence probe).</summary>
+    public bool HasVisualChange { get; private set; }
+    /// <summary>FedCount of the first frame that established playback evidence.</summary>
+    public int? ActivityAnchorFrame { get; private set; }
+    /// <summary>FedCount of the most recent frame with significant scene activity.</summary>
+    public int? LastVisualChangeFrame { get; private set; }
+
+    public Task StartAsync(UserSettings settings) => StartAsync(settings, null, null, true);
+
+    public Task StartAsync(UserSettings settings, string? outputPath, bool acceptPreSessionFiles = false)
+        => StartAsync(settings, outputPath, null, acceptPreSessionFiles);
+
+    public async Task StartAsync(
+        UserSettings settings,
+        string? outputPath,
+        CaptureSessionInfo? session,
+        bool acceptPreSessionFiles = false)
     {
         if (IsRunning)
             throw new InvalidOperationException("管线已在运行");
@@ -57,19 +93,31 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
             : Path.GetFullPath(outputPath);
         Directory.CreateDirectory(Path.GetDirectoryName(OutputPath)!);
         WatchDirectory = watchDir;
+
+        // Session-scoped prefix: watcher only consumes files of this session.
+        var effectiveSession = session ?? CaptureSessionInfo.Create("manual", 0, 0);
+        CaptureSessionId = effectiveSession.CaptureSessionId;
+        SequencePrefix = effectiveSession.SequencePrefix;
+        // startmovie name = the exact prefix (trailing underscore included) so
+        // produced files are {prefix}{index}.tga, matching the watcher regex.
+        settings.MovieSequenceName = effectiveSession.SequencePrefix;
+
         _fed = 0;
-        _firstFrameSignature = null;
-        _previousFrameSignature = null;
+        _submittedInputFrames = 0;
         HasVisualChange = false;
         ActivityAnchorFrame = null;
         LastVisualChangeFrame = null;
+        _fault = null;
         _nextFrame = 0;
+        _state = PipelineState.Watching;
+        _completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _cts = new CancellationTokenSource();
-        _watcher = new TgaDirectoryWatcher(watchDir);
+
+        _watcher = new TgaDirectoryWatcher(watchDir, effectiveSession.SequencePrefix);
         _watcher.PendingChanged += () => Changed?.Invoke();
         _watcher.Start(acceptPreSessionFiles: acceptPreSessionFiles);
 
-        Status = $"监视中：{watchDir}";
+        Status = $"监视中：{watchDir}（prefix={effectiveSession.SequencePrefix}）";
         Changed?.Invoke();
 
         var blend = Math.Max(1, settings.SupersamplingMultiplier);
@@ -84,11 +132,12 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
         while (FedCount < minimumFed)
         {
             token.ThrowIfCancellationRequested();
+            ThrowIfFaulted();
             if (DateTime.UtcNow >= deadline)
                 throw new TimeoutException($"等待 TGA 写帧超时：需要至少 {minimumFed} 帧，当前 {FedCount}。");
             if (!string.IsNullOrWhiteSpace(Status) && Status.StartsWith("错误：", StringComparison.Ordinal))
                 throw new InvalidOperationException(Status);
-            await Task.Delay(100, token).ConfigureAwait(false);
+            await Task.WhenAny(Task.Delay(100, token), Completion).ConfigureAwait(false);
         }
     }
 
@@ -98,35 +147,50 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
         while (ActivityAnchorFrame is null)
         {
             token.ThrowIfCancellationRequested();
+            ThrowIfFaulted();
             if (DateTime.UtcNow >= deadline)
-                throw new TimeoutException($"等待回放画面运动超时（{timeout.TotalSeconds:0}s 内无 VisualActivity）。");
+                throw new TimeoutException($"等待回放画面运动超时（{timeout.TotalSeconds:0}s 内无 PlaybackEvidence）。");
             if (!string.IsNullOrWhiteSpace(Status) && Status.StartsWith("错误：", StringComparison.Ordinal))
                 throw new InvalidOperationException(Status);
-            await Task.Delay(100, token).ConfigureAwait(false);
+            await Task.WhenAny(Task.Delay(100, token), Completion).ConfigureAwait(false);
         }
     }
 
     /// <summary>
-    /// Clears ActivityAnchor / signatures so CaptureReady still frames cannot count as PlaybackActivity.
-    /// Call after CaptureReady, immediately before mom_tv_replay_watch.
+    /// Clears ActivityAnchor / evidence baseline so CaptureReady still frames
+    /// cannot count as PlaybackActivity. Call after CaptureReady, immediately
+    /// before mom_tv_replay_watch.
     /// </summary>
     public void ResetActivityTracking()
     {
-        _firstFrameSignature = null;
-        _previousFrameSignature = null;
         HasVisualChange = false;
         ActivityAnchorFrame = null;
         LastVisualChangeFrame = null;
+        _evidenceProbe.Reset(); // force re-baseline on next frame
         Changed?.Invoke();
     }
 
-    public async Task StopAsync()
+    public void ThrowIfFaulted()
+    {
+        if (_fault is not null)
+            throw new PipelineFaultException(_fault.Message, _fault);
+    }
+
+    /// <summary>
+    /// Deterministic shutdown. Order: request loop stop → await completion
+    /// (fault propagates) → final full scan → physical quiescence → freeze →
+    /// drain pending in order → assert empty → native Finish. Any step failure
+    /// throws; success is only reported after every boundary is proven.
+    /// </summary>
+    public async Task<PipelineFinalizeResult> FinalizeAsync(RecordingTimeoutPolicy timeouts, CancellationToken token)
     {
         if (_cts is null)
-            return;
+            throw new InvalidOperationException("管线尚未启动。");
 
+        _state = PipelineState.FreezeRequested;
         Status = "停止中，排空并收尾…";
         Changed?.Invoke();
+
         _cts.Cancel();
         try
         {
@@ -138,148 +202,214 @@ public sealed class TgaPipelineOrchestrator : IAsyncDisposable
             // expected
         }
 
-        _watcher?.Stop();
-        _watcher?.Dispose();
-        _watcher = null;
+        ThrowIfFaulted(); // P0-05: pipeline background fault must fail the attempt
 
-        try
+        var watcher = _watcher ?? throw new InvalidOperationException("Watcher 不存在。");
+        if (_session is null)
+            throw new InvalidOperationException("无已喂入帧，无法 finalize。");
+
+        _state = PipelineState.Draining;
+
+        // Final scan + positive physical quiescence proof.
+        watcher.ForceFullScan();
+        await watcher.WaitForQuiescenceAsync(
+            timeouts.TgaQuiescenceQuietWindow,
+            timeouts.TgaQuiescenceHardTimeout,
+            token);
+
+        watcher.Freeze();
+
+        // Deterministic drain: lowest index first.
+        var drainDeadline = DateTime.UtcNow + timeouts.DrainTimeout;
+        while (watcher.TryGetMinPendingFrameIndex(out var min))
         {
-            _session?.Finish();
-            Status = File.Exists(OutputPath) ? $"完成：{OutputPath}" : "已停止（无输出帧）";
+            token.ThrowIfCancellationRequested();
+            if (DateTime.UtcNow >= drainDeadline)
+                throw new TimeoutException($"TGA drain 超时（{timeouts.DrainTimeout.TotalSeconds:0}s），剩余 {watcher.PendingCount} 帧。");
+            if (!watcher.TryTake(min, out var path))
+                continue;
+            SubmitFile(path);
         }
-        catch (Exception ex)
-        {
-            Status = $"收尾失败：{ex.Message}";
-        }
-        finally
-        {
-            _session?.Dispose();
-            _session = null;
-            _cts.Dispose();
-            _cts = null;
-            _loop = null;
-            Changed?.Invoke();
-        }
+
+        // Assert nothing is left unmanaged (P0-07 fail-safe).
+        if (watcher.PendingCount != 0 || watcher.CandidateCount != 0 || watcher.HasUnstableFiles)
+            throw new InvalidDataException(
+                $"排空后仍有未管理 TGA：pending={watcher.PendingCount} candidate={watcher.CandidateCount} unstable={watcher.HasUnstableFiles}");
+
+        _state = PipelineState.Finalizing;
+        var progress = _session.GetProgress();
+        _session.Finish(); // P0-06: Finish fault must propagate
+
+        _state = PipelineState.Finalized;
+        Status = File.Exists(OutputPath) ? $"完成：{OutputPath}" : "已停止（无输出文件）";
+        Changed?.Invoke();
+
+        return new PipelineFinalizeResult(
+            SubmittedFrames: _submittedInputFrames,
+            ProducedFrames: progress.Done,
+            FirstFrameIndex: 0,
+            LastFrameIndex: _nextFrame - 1,
+            OutputPath: OutputPath ?? string.Empty,
+            FinishSucceeded: true,
+            FirstFrameWidth: _firstFrameWidth,
+            FirstFrameHeight: _firstFrameHeight);
+    }
+
+    public async Task StopAsync()
+    {
+        // Legacy convenience: finalize with defaults; used by manual TGA mode.
+        await FinalizeAsync(Timeouts, CancellationToken.None);
     }
 
     private void RunLoop(UserSettings settings, int blend, CancellationToken token)
     {
-        while (!token.IsCancellationRequested)
+        try
         {
-            if (_watcher is null)
-                break;
-
-            if (!_watcher.TryGetMinPendingFrameIndex(out var frameIndex))
+            while (!token.IsCancellationRequested)
             {
-                Thread.Sleep(30);
-                continue;
-            }
+                if (_watcher is null)
+                    break;
 
-            if (!_watcher.TryTake(frameIndex, out var path))
-            {
-                Thread.Sleep(20);
-                continue;
-            }
-
-            _nextFrame = frameIndex + 1;
-
-            if (!File.Exists(path) || !TgaFrameReader.TryReadBgra(path, out var width, out var height, out var bgra))
-            {
-                try { File.Delete(path); } catch { /* ignore */ }
-                Status = $"合成中：已喂入 {_fed} 帧，待处理 {_watcher.PendingCount}";
-                Changed?.Invoke();
-                continue;
-            }
-
-            try
-            {
-                _session ??= NativeBlendSession.Create(
-                    width,
-                    height,
-                    blend,
-                    (float)settings.Exposure,
-                    ProjectConstants.FinalOutputFramerate,
-                    OutputPath!);
-
-                _session.SubmitBgra(bgra, width * 4);
-                var changed = TrackVisualChange(bgra);
-                _fed++;
-                if (changed)
+                if (!_watcher.TryGetMinPendingFrameIndex(out var frameIndex))
                 {
-                    LastVisualChangeFrame = _fed;
-                    ActivityAnchorFrame ??= _fed;
-                    HasVisualChange = true;
+                    Thread.Sleep(30);
+                    continue;
                 }
 
+                if (!_watcher.TryTake(frameIndex, out var path))
+                {
+                    Thread.Sleep(20);
+                    continue;
+                }
+
+                _nextFrame = frameIndex + 1;
+
+                if (!File.Exists(path) || !TgaFrameReader.TryReadBgra(path, out var width, out var height, out var bgra))
+                {
+                    try { File.Delete(path); } catch { /* ignore */ }
+                    Status = $"合成中：已喂入 {_fed} 帧，待处理 {_watcher.PendingCount}";
+                    Changed?.Invoke();
+                    continue;
+                }
+
+                _session ??= CreateSession(settings, width, height, blend);
+                if (_firstFrameWidth == 0)
+                {
+                    _firstFrameWidth = width;
+                    _firstFrameHeight = height;
+                }
+                _session.SubmitBgra(bgra, width * 4);
+                _submittedInputFrames++;
+                _fed++;
+                TrackPlaybackEvidence(bgra, width, height);
+
                 Status = $"合成中：已喂入 {_fed} 帧，待处理 {_watcher.PendingCount}";
                 Changed?.Invoke();
 
                 try { File.Delete(path); } catch { /* ignore */ }
             }
-            catch (Exception ex)
-            {
-                Status = $"错误：{ex.Message}";
-                Changed?.Invoke();
-                break;
-            }
         }
-
-        var drainDeadline = DateTime.UtcNow.AddSeconds(15);
-        while (_watcher is not null && DateTime.UtcNow < drainDeadline)
+        catch (Exception ex)
         {
-            if (!_watcher.TryGetMinPendingFrameIndex(out var min))
-                break;
-            if (!_watcher.TryTake(min, out var path))
-                break;
-            if (!TgaFrameReader.TryReadBgra(path, out var width, out var height, out var bgra))
-            {
-                try { File.Delete(path); } catch { }
-                continue;
-            }
-
-            try
-            {
-                _session ??= NativeBlendSession.Create(
-                    width,
-                    height,
-                    blend,
-                    (float)settings.Exposure,
-                    ProjectConstants.FinalOutputFramerate,
-                    OutputPath!);
-                _session.SubmitBgra(bgra, width * 4);
-                _fed++;
-                try { File.Delete(path); } catch { }
-            }
-            catch
-            {
-                break;
-            }
+            _fault = ex;
+            _state = PipelineState.Faulted;
+            Status = $"错误：{ex.Message}";
+            Changed?.Invoke();
+            _completion.TrySetException(ex);
+            return;
         }
+
+        if (_fault is null)
+            _completion.TrySetResult();
     }
 
-    /// <returns>True when this frame's signature differs from the previous frame.</returns>
-    private bool TrackVisualChange(ReadOnlySpan<byte> bgra)
+    private NativeBlendSession CreateSession(UserSettings settings, int width, int height, int blend)
     {
-        const ulong offset = 14695981039346656037UL;
-        const ulong prime = 1099511628211UL;
-        var hash = offset;
-        var stride = Math.Max(4, bgra.Length / 4096);
-        stride -= stride % 4;
-        for (var i = 0; i < bgra.Length; i += stride)
+        var session = NativeBlendSession.Create(
+            width,
+            height,
+            blend,
+            (float)settings.Exposure,
+            ProjectConstants.FinalOutputFramerate,
+            OutputPath!,
+            NativeSessionFactory.BuildOptions(settings));
+        _sessionDiagnostics = NativeSessionDiagnostics.Describe(
+            settings, width, height, blend, ProjectConstants.FinalOutputFramerate);
+        return session;
+    }
+
+    private void SubmitFile(string path)
+    {
+        // Drain path: the session must already exist (frames were fed during
+        // capture). A corrupt pending frame here is a hard error, not a skip.
+        if (_session is null)
+            throw new InvalidOperationException("Finalize 排空阶段缺少 Native Session。");
+
+        if (!TgaFrameReader.TryReadBgra(path, out var width, out var height, out var bgra))
         {
-            hash ^= bgra[i];
-            hash *= prime;
+            throw new InvalidDataException($"drain 阶段无法读取 TGA：{path}");
         }
 
-        _firstFrameSignature ??= hash;
-        var changed = _previousFrameSignature is not null && _previousFrameSignature.Value != hash;
-        _previousFrameSignature = hash;
-        return changed;
+        _session.SubmitBgra(bgra, width * 4);
+        _submittedInputFrames++;
+        _fed++;
+        try { File.Delete(path); } catch { /* ignore */ }
+    }
+
+    private void TrackPlaybackEvidence(ReadOnlySpan<byte> bgra, int width, int height)
+    {
+        var sample = _evidenceProbe.Sample(bgra, width, height);
+        if (_evidenceProbe.IsPlaybackStarted)
+        {
+            ActivityAnchorFrame ??= (int)_fed;
+            LastVisualChangeFrame = (int)_fed;
+            HasVisualChange = true;
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
         if (IsRunning)
-            await StopAsync().ConfigureAwait(false);
+        {
+            // Best-effort stop for disposal; real cleanup is FinalizeAsync's job.
+            try
+            {
+                _cts?.Cancel();
+                if (_loop is not null)
+                    await _loop.ConfigureAwait(false);
+            }
+            catch
+            {
+                // secondary; do not throw from Dispose
+            }
+        }
+
+        try
+        {
+            _session?.Finish();
+        }
+        catch
+        {
+            // secondary cleanup error
+        }
+        finally
+        {
+            _session?.Dispose();
+            _session = null;
+            _watcher?.Stop();
+            _watcher?.Dispose();
+            _watcher = null;
+            _cts?.Dispose();
+            _cts = null;
+            _loop = null;
+            _state = PipelineState.Disposed;
+            Changed?.Invoke();
+        }
     }
+}
+
+/// <summary>Strongly-typed pipeline fault (plan P0-05).</summary>
+public sealed class PipelineFaultException : Exception
+{
+    public PipelineFaultException(string message, Exception inner) : base(message, inner) { }
 }

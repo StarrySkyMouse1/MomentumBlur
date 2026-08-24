@@ -2,10 +2,81 @@
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      xmlns:vm="clr-namespace:Mmod.App.ViewModels"
       Title="设置"
       VerticalAlignment="Stretch">
     <Page.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVis" />
+        <DataTemplate x:Key="QualityParameterTemplate" DataType="{x:Type vm:QualityParameterViewModel}">
+            <StackPanel Margin="0,4,0,0">
+                <DockPanel LastChildFill="True">
+                    <TextBlock DockPanel.Dock="Left"
+                               Text="{Binding DisplayName}"
+                               VerticalAlignment="Center"
+                               MinWidth="120" />
+                    <ui:NumberBox Value="{Binding Value, Mode=TwoWay}"
+                                  Minimum="{Binding Minimum}"
+                                  Maximum="{Binding Maximum}"
+                                  SmallChange="{Binding Step}"
+                                  SpinButtonPlacementMode="Inline"
+                                  Width="140"
+                                  HorizontalAlignment="Right" />
+                    <TextBlock DockPanel.Dock="Right"
+                               Text="{Binding UnitLabel}"
+                               VerticalAlignment="Center"
+                               Margin="6,0,0,0"
+                               Opacity="0.6" />
+                </DockPanel>
+                <TextBlock Text="{Binding Description}"
+                           TextWrapping="Wrap"
+                           Opacity="0.55"
+                           FontSize="11"
+                           Margin="0,2,0,0" />
+            </StackPanel>
+        </DataTemplate>
+        <DataTemplate x:Key="QualityModuleTemplate" DataType="{x:Type vm:QualityModuleViewModel}">
+            <Border Margin="0,0,0,10"
+                    Padding="12"
+                    BorderBrush="{DynamicResource ControlElevationBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8">
+                <StackPanel>
+                    <DockPanel LastChildFill="True">
+                        <CheckBox DockPanel.Dock="Left"
+                                  IsChecked="{Binding IsEnabled, Mode=TwoWay}"
+                                  VerticalAlignment="Center"
+                                  Margin="0,0,8,0" />
+                        <ui:Button DockPanel.Dock="Right"
+                                   Content="恢复默认值"
+                                   Command="{Binding RestoreDefaultsCommand}"
+                                   VerticalAlignment="Center"
+                                   Margin="8,0,0,0"
+                                   Padding="10,4" />
+                        <StackPanel>
+                            <TextBlock Text="{Binding DisplayName}"
+                                       FontWeight="SemiBold"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding Description}"
+                                       TextWrapping="Wrap"
+                                       Opacity="0.75"
+                                       FontSize="12"
+                                       Margin="0,2,0,0" />
+                        </StackPanel>
+                    </DockPanel>
+                    <StackPanel Visibility="{Binding IsEnabled, Converter={StaticResource BoolToVis}}"
+                                Margin="28,8,0,0">
+                        <ItemsControl ItemsSource="{Binding Parameters}"
+                                      ItemTemplate="{StaticResource QualityParameterTemplate}" />
+                        <TextBlock Text="{Binding RiskDescription}"
+                                   TextWrapping="Wrap"
+                                   Opacity="0.6"
+                                   FontSize="11"
+                                   Foreground="#C8A45C"
+                                   Margin="0,6,0,0" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </DataTemplate>
     </Page.Resources>
 
     <Grid Margin="0,0,0,8">
@@ -29,6 +100,7 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
                     <StackPanel Grid.Row="0" Grid.Column="0">
@@ -46,7 +118,14 @@
                     </StackPanel>
 
                     <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,16,0,0">
-                        <TextBlock Margin="0,0,0,6" Text="Exposure" />
+                        <TextBlock Margin="0,0,0,6" Text="Motion Blur 模式" />
+                        <ComboBox ItemsSource="{Binding MotionBlurModeOptions}"
+                                  SelectedItem="{Binding MotionBlurWeightMode, Mode=TwoWay}" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Row="1" Grid.Column="2" Margin="0,16,0,0"
+                                Visibility="{Binding IsLegacyMode, Converter={StaticResource BoolToVis}}">
+                        <TextBlock Margin="0,0,0,6" Text="Exposure（Legacy Gaussian 宽度）" />
                         <ui:NumberBox Value="{Binding Exposure, Mode=TwoWay}"
                                       Minimum="0.05"
                                       Maximum="1"
@@ -54,22 +133,87 @@
                                       SpinButtonPlacementMode="Inline" />
                     </StackPanel>
 
+                    <StackPanel Grid.Row="2" Grid.Column="0" Margin="0,16,0,0"
+                                Visibility="{Binding IsShutterMode, Converter={StaticResource BoolToVis}}">
+                        <TextBlock Margin="0,0,0,6" Text="Shutter Angle（180°~360°）" />
+                        <ui:NumberBox Value="{Binding ShutterAngle, Mode=TwoWay}"
+                                      Minimum="180"
+                                      Maximum="360"
+                                      SmallChange="10"
+                                      SpinButtonPlacementMode="Inline" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Row="2" Grid.Column="2" Margin="0,16,0,0">
+                        <TextBlock Margin="0,0,0,6" Text="中间母版码率（Mbps，0 = 自动）" />
+                        <ui:NumberBox Value="{Binding IntermediateTargetBitrate, Mode=TwoWay}"
+                                      Minimum="0"
+                                      Maximum="120000000"
+                                      SmallChange="1000000"
+                                      SpinButtonPlacementMode="Compact" />
+                    </StackPanel>
                 </Grid>
 
-                <TextBlock Margin="0,16,0,6" Text="成片输出目录" />
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <TextBox Grid.Column="0"
-                             Margin="0,0,8,0"
-                             IsReadOnly="True"
-                             Text="{Binding VideoOutputDirectory, Mode=TwoWay}" />
-                    <ui:Button Grid.Column="1"
-                               Content="浏览…"
-                               Command="{Binding BrowseVideoOutputCommand}" />
-                </Grid>
+                <TextBlock Margin="0,8,0,0"
+                           Text="兼顾 4K60 上传与 1080p30 低码率档观看：建议先 AB 测试 300°~360° 的 Shutter Angle，不硬编码唯一最佳值。"
+                           TextWrapping="Wrap"
+                           Opacity="0.6"
+                           FontSize="11" />
+
+                <!-- 画质处理 -->
+                <TextBlock Margin="0,28,0,6" FontSize="18" FontWeight="SemiBold" Text="画质处理" />
+                <TextBlock Margin="0,0,0,8"
+                           Text="这些处理发生在 1080p60 中间母版阶段，目标是提升平台低码率转码后的高速运动观感，而不是让暂停截图尽可能锐利。全部可独立勾选关闭，关闭时保持旧版输出行为。"
+                           TextWrapping="Wrap"
+                           Opacity="0.75" />
+
+                <StackPanel Orientation="Horizontal" Margin="0,4,0,10">
+                    <TextBlock Text="预设：" VerticalAlignment="Center" Margin="0,0,8,0" />
+                    <ComboBox Width="240"
+                              ItemsSource="{Binding PresetOptions}"
+                              DisplayMemberPath="DisplayName"
+                              SelectedValuePath="Id"
+                              SelectedValue="{Binding SelectedPresetId, Mode=TwoWay}" />
+                    <ui:Button Content="全部恢复默认"
+                               Command="{Binding RestoreAllQualityDefaultsCommand}"
+                               Margin="8,0,0,0"
+                               Padding="10,4" />
+                </StackPanel>
+
+                <TextBlock Text="{Binding ProcessingSummary}"
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,8"
+                           TextWrapping="Wrap" />
+
+                <ItemsControl ItemsSource="{Binding QualityModules}"
+                              ItemTemplate="{StaticResource QualityModuleTemplate}" />
+
+                <!-- 后期 / 4K 工作流 -->
+                <TextBlock Margin="0,24,0,6" FontSize="18" FontWeight="SemiBold" Text="后期 / 4K 工作流" />
+                <CheckBox Content="DaVinci 4K AI 后处理指引"
+                          IsChecked="{Binding EnableDaVinci4KWorkflowGuide, Mode=TwoWay}"
+                          Margin="0,0,0,6" />
+                <TextBlock Text="本工具不会执行 AI 放大。这里仅生成 DaVinci Resolve Studio 中的操作步骤（Super Scale 2x Enhanced 属 Studio 功能）。"
+                           TextWrapping="Wrap"
+                           Opacity="0.7"
+                           Margin="0,0,0,8" />
+
+                <StackPanel Visibility="{Binding IsDaVinciGuideEnabled, Converter={StaticResource BoolToVis}}">
+                    <WrapPanel Margin="0,0,0,8">
+                        <ui:Button Content="复制 DaVinci 操作步骤"
+                                   Command="{Binding CopyDaVinciStepsCommand}"
+                                   Margin="0,0,8,8" />
+                        <ui:Button Content="复制 Bilibili 导出建议"
+                                   Command="{Binding CopyBilibiliExportCommand}"
+                                   Margin="0,0,8,8" />
+                    </WrapPanel>
+                    <TextBox IsReadOnly="True"
+                             Text="{Binding DavinciGuideText}"
+                             TextWrapping="Wrap"
+                             AcceptsReturn="True"
+                             MinHeight="220"
+                             FontFamily="Consolas"
+                             FontSize="12" />
+                </StackPanel>
 
                 <StackPanel Visibility="{Binding IsObsMode, Converter={StaticResource BoolToVis}}">
                     <TextBlock Margin="0,24,0,6" FontWeight="SemiBold" Text="OBS 模式" />

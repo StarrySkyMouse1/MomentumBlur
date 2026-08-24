@@ -1,4 +1,4 @@
-using System.Text;
+using Mmod.Core.Models;
 using Mmod.Core.Native;
 
 namespace Mmod.Core.Services;
@@ -20,20 +20,17 @@ public static class Mp4MergeService
         catch { try { if (File.Exists(temp)) File.Delete(temp); } catch { } throw; }
     }
 
-    public static void Validate(string path)
+    /// <summary>
+    /// Media-level validation (container, stream, resolution, fps, duration,
+    /// frame count). A file with ftyp/moov but broken duration no longer passes.
+    /// </summary>
+    public static void Validate(string path) =>
+        Validate(path, out _);
+
+    public static void Validate(string path, out MediaProbeResult probe)
     {
-        var info = new FileInfo(path);
-        if (!info.Exists || info.Length < 1024) throw new InvalidDataException("MP4 文件不存在或过小。");
-        using var stream = File.OpenRead(path);
-        var probeSize = (int)Math.Min(1024 * 1024, info.Length);
-        var head = new byte[probeSize];
-        stream.ReadExactly(head);
-        stream.Position = Math.Max(0, info.Length - probeSize);
-        var tail = new byte[probeSize];
-        stream.ReadExactly(tail);
-        var headText = Encoding.ASCII.GetString(head);
-        var tailText = Encoding.ASCII.GetString(tail);
-        if (!headText.Contains("ftyp", StringComparison.Ordinal) || (!headText.Contains("moov", StringComparison.Ordinal) && !tailText.Contains("moov", StringComparison.Ordinal)))
-            throw new InvalidDataException("MP4 容器校验失败（缺少 ftyp/moov）。");
+        probe = new MediaProbe().Probe(path);
+        if (!probe.IsValid)
+            throw new InvalidDataException($"MP4 校验失败：{probe.Error}");
     }
 }

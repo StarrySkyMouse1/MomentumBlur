@@ -82,7 +82,18 @@ public partial class TasksViewModel : ObservableObject
                 var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 var output = Path.Combine(settings.VideoOutputDirectory, Safe($"{group.Key.MapName}_{group.Key.PlayerName}_{stamp}.mp4"));
                 var nodes = group.OrderBy(x => x.StageNumber).Select((x, i) => new NewRenderNode(x.FilePath, x.StageNumber, i, x.RunTimeSeconds, x.TickCount)).ToList();
-                var snapshot = new RenderSettingsSnapshot(settings.SupersamplingMultiplier, settings.Exposure, settings.RamDiskWatchDirectory, settings.VideoOutputDirectory, settings.GameRootPath!, settings.HideHudInCfg, ProjectConstants.FinalOutputFramerate, 140_000_000);
+                var snapshot = new RenderSettingsSnapshot(
+                    settings.SupersamplingMultiplier,
+                    settings.Exposure,
+                    settings.RamDiskWatchDirectory,
+                    settings.VideoOutputDirectory,
+                    settings.GameRootPath!,
+                    settings.HideHudInCfg,
+                    ProjectConstants.FinalOutputFramerate,
+                    settings.IntermediateTargetBitrate,
+                    settings.MotionBlurWeightMode,
+                    settings.ShutterAngle,
+                    settings.VideoProcessing?.Clone());
                 _repository.CreateTask(new NewRenderTask(group.Key.MapName, group.Key.PlayerName, group.Key.TrackNumber, output, snapshot, nodes));
                 count++;
             }
@@ -176,7 +187,27 @@ public partial class TasksViewModel : ObservableObject
         if (value is null) { SelectedTaskDetail = "选择任务后查看节点和日志。"; return; }
         var nodes = _repository.GetNodes(value.Record.Id).Select(x => $"节点 {x.Sequence + 1} / 阶段 {x.StageNumber}：{x.Status}，重试 {x.RetryCount}/2\n{x.ReplayPath}");
         var logs = _repository.GetLogs(value.Record.Id).TakeLast(30).Select(x => $"{x.Timestamp.LocalDateTime:MM-dd HH:mm:ss} [{x.Level}] {x.Message}");
-        SelectedTaskDetail = string.Join("\n", nodes.Concat(["", "最近日志："]).Concat(logs));
+
+        var configLines = new List<string>();
+        try
+        {
+            var snapshot = System.Text.Json.JsonSerializer.Deserialize<RenderSettingsSnapshot>(value.Record.SettingsJson);
+            if (snapshot is not null)
+            {
+                var blur = snapshot.MotionBlurMode == MotionBlurWeightMode.ShutterAngle
+                    ? $"Shutter {snapshot.ShutterAngle:0}°"
+                    : $"Legacy Exposure {snapshot.Exposure:0.##}";
+                var bitrate = snapshot.TargetBitrate > 0 ? $" · 码率 {snapshot.TargetBitrate / 1_000_000.0:0.#} Mbps" : " · 码率 自动";
+                configLines.Add($"合成：N={snapshot.SupersamplingMultiplier} · {blur} · {snapshot.OutputFramerate}fps{bitrate}");
+                configLines.Add(VideoProcessingSummary.Build(snapshot.VideoProcessing));
+            }
+        }
+        catch
+        {
+            // old SettingsJson without new fields: keep legacy display
+        }
+
+        SelectedTaskDetail = string.Join("\n", nodes.Concat(configLines).Concat(["", "最近日志："]).Concat(logs));
     }
 
     [RelayCommand] private void RefreshSnapshot()
@@ -185,7 +216,10 @@ public partial class TasksViewModel : ObservableObject
         try
         {
             var s = _settings.Snapshot(); ValidateTaskSettings(s);
-            _repository.UpdatePendingTaskSettings(SelectedTask.Record.Id, new RenderSettingsSnapshot(s.SupersamplingMultiplier, s.Exposure, s.RamDiskWatchDirectory, s.VideoOutputDirectory, s.GameRootPath!, s.HideHudInCfg, ProjectConstants.FinalOutputFramerate, 140_000_000));
+            _repository.UpdatePendingTaskSettings(SelectedTask.Record.Id, new RenderSettingsSnapshot(
+                s.SupersamplingMultiplier, s.Exposure, s.RamDiskWatchDirectory, s.VideoOutputDirectory,
+                s.GameRootPath!, s.HideHudInCfg, ProjectConstants.FinalOutputFramerate,
+                s.IntermediateTargetBitrate, s.MotionBlurWeightMode, s.ShutterAngle, s.VideoProcessing?.Clone()));
             StatusText = "任务设置快照已刷新。"; ReloadTasks();
         }
         catch (Exception ex) { StatusText = ex.Message; }

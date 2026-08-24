@@ -80,9 +80,14 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
     public void RefreshModeSummary()
     {
         var s = _settings.Snapshot();
+        var blur = s.MotionBlurWeightMode == MotionBlurWeightMode.ShutterAngle
+            ? $"Shutter {s.ShutterAngle:0}°"
+            : $"Exposure {s.Exposure:0.##}";
+        var processing = VideoProcessingSummary.Build(s.VideoProcessing);
+        var davinci = s.EnableDaVinci4KWorkflowGuide ? " · 后续 4K AI" : string.Empty;
         ModeSummary = s.CaptureMode == CaptureMode.Tga
-            ? $"TGA · N={s.SupersamplingMultiplier} · {s.Exposure:0.##}"
-            : $"OBS · {s.ObsCaptureFramerate}fps · N={s.SupersamplingMultiplier}";
+            ? $"TGA · N={s.SupersamplingMultiplier} · {blur} · 60fps · {processing}{davinci}"
+            : $"OBS · {s.ObsCaptureFramerate}fps · N={s.SupersamplingMultiplier} · {blur} · {processing}{davinci}";
         OnPropertyChanged(nameof(IsTgaMode));
         OnPropertyChanged(nameof(IsObsMode));
         StartTgaCommand.NotifyCanExecuteChanged();
@@ -158,10 +163,11 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
         var output = string.IsNullOrWhiteSpace(_tga.OutputPath)
             ? "（尚未创建）"
             : Path.GetFileName(_tga.OutputPath);
+        var diag = string.IsNullOrWhiteSpace(_tga.SessionDiagnostics) ? string.Empty : $"\n{_tga.SessionDiagnostics}";
         return
             $"监视目录：{watch}\n" +
             $"已喂入 {_tga.FedCount} 帧，待处理 {_tga.PendingCount}\n" +
-            $"输出：{output}";
+            $"输出：{output}{diag}";
     }
 
     private static string BuildIdleTgaMetrics(UserSettings s)
@@ -199,7 +205,15 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
     [RelayCommand(CanExecute = nameof(CanStopTga))]
     private async Task StopTgaAsync()
     {
-        await _tga.StopAsync();
+        try
+        {
+            await _tga.StopAsync();
+            StatusText = _tga.Status;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"收尾失败：{ex.Message}";
+        }
         RefreshTgaUi();
         RefreshModeSummary();
     }

@@ -4,6 +4,7 @@ project(mmod_native LANGUAGES CXX)
 add_library(mmod_native SHARED
   src/session.cpp
   src/gpu_blend.cpp
+  src/frame_processing.cpp
 )
 
 target_include_directories(mmod_native
@@ -21,7 +22,7 @@ target_compile_definitions(mmod_native
 target_compile_features(mmod_native PUBLIC cxx_std_17)
 
 if(MSVC)
-  target_compile_options(mmod_native PRIVATE /W4 /permissive-)
+  target_compile_options(mmod_native PRIVATE /W4 /permissive- /utf-8)
 endif()
 
 set_target_properties(mmod_native PROPERTIES

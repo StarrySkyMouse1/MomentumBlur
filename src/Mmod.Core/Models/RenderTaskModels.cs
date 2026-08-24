@@ -23,6 +23,11 @@ public enum RenderNodeStatus
     Skipped,
 }
 
+/// <summary>
+/// Frozen task settings. New fields use default parameter values so old
+/// SettingsJson (which lacks them) still deserializes and behaves like the
+/// legacy pipeline: Legacy exposure + all quality modules off + auto bitrate.
+/// </summary>
 public sealed record RenderSettingsSnapshot(
     int SupersamplingMultiplier,
     double Exposure,
@@ -31,7 +36,10 @@ public sealed record RenderSettingsSnapshot(
     string GameRootPath,
     bool HideHud,
     int OutputFramerate,
-    int TargetBitrate);
+    int TargetBitrate,
+    MotionBlurWeightMode MotionBlurMode = MotionBlurWeightMode.LegacyGaussianExposure,
+    double ShutterAngle = 270,
+    VideoProcessingSettings? VideoProcessing = null);
 
 public sealed record NewRenderNode(
     string ReplayPath,
@@ -86,3 +94,42 @@ public sealed record TaskLogRecord(
     DateTimeOffset Timestamp,
     string Level,
     string Message);
+
+/// <summary>Persisted fine-grained attempt state (plan P1-01).</summary>
+public sealed record RenderAttemptRecord(
+    string Id,
+    string SessionId,
+    string TaskId,
+    string NodeId,
+    int AttemptNumber,
+    NodeExecutionStage Stage,
+    string SequencePrefix,
+    string? TempClipPath,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt,
+    DateTimeOffset? FinishedAt,
+    string? LastError,
+    RecordingFailureKind? FailureKind,
+    CaptureCleanupState CleanupState,
+    int? GameProcessId,
+    DateTime? GameProcessStartedUtc,
+    int? NetConPort,
+    string? ExpectedMap,
+    long FedCount,
+    long SubmittedFrameCount,
+    int? LastTgaIndex);
+
+/// <summary>Persisted runner session for crash recovery (plan P1-10 / §7).</summary>
+public sealed record RunnerSessionRecord(
+    int? ProcessId,
+    int? NetConPort,
+    string? NetConPassword,
+    string? TaskId,
+    string? NodeId,
+    string? ExePath,
+    DateTime? ProcessStartedAt,
+    string? GameSessionId,
+    string? CaptureSessionId,
+    string? SequencePrefix,
+    string? OwnershipToken,
+    string? WatchDirectory);
