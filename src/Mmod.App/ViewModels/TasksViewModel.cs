@@ -34,7 +34,10 @@ public partial class TasksViewModel : ObservableObject
         Catalog.Clear();
         var gameRoot = _settings.GameRootPath?.Trim() ?? string.Empty;
         var result = _catalog.Scan(gameRoot);
-        foreach (var mapGroup in result.Records.GroupBy(x => x.MapName, StringComparer.OrdinalIgnoreCase))
+        // Only current-version (compatible) replays are shown; legacy formats are
+        // counted and kept out of the tree so it stays clean and selectable-only.
+        var usable = result.Records.Where(x => x.IsCompatible).ToList();
+        foreach (var mapGroup in usable.GroupBy(x => x.MapName, StringComparer.OrdinalIgnoreCase))
         {
             var map = new ReplayTreeNode(mapGroup.Key);
             foreach (var playerGroup in mapGroup.GroupBy(x => x.PlayerName, StringComparer.CurrentCultureIgnoreCase))
@@ -48,10 +51,7 @@ public partial class TasksViewModel : ObservableObject
                         var label = staged ? $"{(trackGroup.Key == 1 ? "主赛道" : $"Bonus {trackGroup.Key - 1}")} · 阶段 {stageGroup.Key}" : (trackGroup.Key == 1 ? "完整地图" : $"Bonus {trackGroup.Key - 1}");
                         var stage = new ReplayTreeNode(label);
                         foreach (var record in stageGroup.OrderBy(x => x.RunTimeSeconds).ThenByDescending(x => x.RecordedAt))
-                        {
-                            var version = record.IsCompatible ? string.Empty : $" · 不兼容：MMTV v{record.FormatVersion}";
-                            stage.Children.Add(new ReplayTreeNode($"{FormatDuration(record.RunTimeSeconds)} · {record.RecordedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}{version}", record, stage));
-                        }
+                            stage.Children.Add(new ReplayTreeNode($"{FormatDuration(record.RunTimeSeconds)} · {record.RecordedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}", record, stage));
                         player.Children.Add(stage);
                     }
                 }
@@ -59,9 +59,8 @@ public partial class TasksViewModel : ObservableObject
             }
             Catalog.Add(map);
         }
-        var compatible = result.Records.Count(x => x.IsCompatible);
-        var incompatible = result.Records.Count - compatible;
-        StatusText = $"已解析 {result.Records.Count} 条回放；可执行 {compatible} 条；旧版不兼容 {incompatible} 条；无法解析 {result.Issues.Count} 条。";
+        var incompatible = result.Records.Count - usable.Count;
+        StatusText = $"已解析 {result.Records.Count} 条回放；可执行 {usable.Count} 条；旧版不兼容 {incompatible} 条（已隐藏）；无法解析 {result.Issues.Count} 条。";
     }
 
     [RelayCommand]
@@ -177,9 +176,17 @@ public partial class TasksViewModel : ObservableObject
 
     [RelayCommand] private void DeleteTask()
     {
-        if (SelectedTask is null) return;
+        if (SelectedTask is null) { StatusText = "请先在左侧列表选中要删除的任务。"; return; }
+        var title = SelectedTask.Title;
+        var status = SelectedTask.Record.Status;
+        if (status is RenderTaskStatus.Running or RenderTaskStatus.Starting or RenderTaskStatus.Merging)
+        {
+            StatusText = "任务正在执行中，无法删除。请先「当前节点后暂停」或「立即停止」。";
+            return;
+        }
         _repository.DeleteTaskRecord(SelectedTask.Record.Id);
         ReloadTasks();
+        StatusText = $"已删除任务：{title}";
     }
 
     partial void OnSelectedTaskChanged(TaskListItem? value)
