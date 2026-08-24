@@ -4,7 +4,14 @@ using System.Text.RegularExpressions;
 
 namespace Mmod.Core.Services;
 
-public sealed partial class TgaDirectoryWatcher : IDisposable
+/// <summary>
+/// Session-scoped TGA directory watcher. Only accepts files matching the exact
+/// session sequence prefix (<c>{prefix}{index}.tga</c>), so stale TGA from a
+/// previous attempt, other startmovie sessions, or manual recordings can never
+/// contaminate the current capture session. Exposes physical-write metrics for
+/// positive quiescence proof.
+/// </summary>
+public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
 {
     private const int MinTgaHeaderSize = 18;
     private const int ActiveFileStableIdleMs = 120;
@@ -13,6 +20,7 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
     private const int BackloggedFullScanIntervalMs = 2000;
 
     private readonly string _directory;
+    private readonly string _sequencePrefix;
     private readonly int _pollIntervalMs;
     private readonly ConcurrentDictionary<int, string> _pending = new();
     private readonly ConcurrentDictionary<int, CandidateFile> _candidates = new();
@@ -22,31 +30,68 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
     private DateTime _sessionStartedUtc;
     private DateTime _lastFullScanUtc = DateTime.MinValue;
     private bool _acceptPreSessionFiles;
+    private bool _frozen;
     private bool _disposed;
     private int _scanTickRunning;
 
-    [GeneratedRegex(@"(\d+)\.tga$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex FrameIndexRegex();
+    private DateTime _lastPhysicalWriteUtc = DateTime.MinValue;
+    private DateTime _lastStableFrameUtc = DateTime.MinValue;
+    private int? _lastAcceptedFrameIndex;
+    private int _maxObservedFrameIndex = -1;
+    private int _sessionFileCount;
 
-    public TgaDirectoryWatcher(string directory, int pollIntervalMs = 50)
+    public TgaDirectoryWatcher(string directory, string sequencePrefix, int pollIntervalMs = 50)
     {
         _directory = directory;
+        _sequencePrefix = string.IsNullOrWhiteSpace(sequencePrefix) ? string.Empty : sequencePrefix.Trim();
         _pollIntervalMs = Math.Max(20, pollIntervalMs);
     }
 
     public event Action? PendingChanged;
 
     public int PendingCount => _pending.Count;
+    public int CandidateCount => _candidates.Count;
+    public DateTime? LastPhysicalFileWriteUtc => _lastPhysicalWriteUtc == DateTime.MinValue ? null : _lastPhysicalWriteUtc;
+    public DateTime? LastStableFrameUtc => _lastStableFrameUtc == DateTime.MinValue ? null : _lastStableFrameUtc;
+    public int? LastAcceptedFrameIndex => _lastAcceptedFrameIndex;
+    public int MaxObservedFrameIndex => _maxObservedFrameIndex;
+    public int SessionFileCount => _sessionFileCount;
+    public bool HasUnstableFiles => !_candidates.IsEmpty;
+    public bool IsFrozen => _frozen;
+    public string SequencePrefix => _sequencePrefix;
 
-    public static bool TryParseFrameIndex(string filePath, out int frameIndex)
+    private Regex BuildPrefixRegex() => new(
+        "^" + Regex.Escape(_sequencePrefix) + @"(\d+)\.tga$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Parses {prefix}{index}.tga for the exact session prefix. When the prefix
+    /// is empty (legacy manual mode) any numeric-tail .tga is accepted.
+    /// </summary>
+    public static bool TryParseFrameIndex(string filePath, string sequencePrefix, out int frameIndex)
     {
         frameIndex = -1;
         var name = Path.GetFileName(filePath);
-        var match = FrameIndexRegex().Match(name);
+        if (string.IsNullOrWhiteSpace(sequencePrefix))
+        {
+            var legacy = FrameIndexLegacyRegex().Match(name);
+            if (!legacy.Success)
+                return false;
+            return int.TryParse(legacy.Groups[1].Value, out frameIndex);
+        }
+
+        var match = ExactPrefixRegex(sequencePrefix).Match(name);
         if (!match.Success)
             return false;
         return int.TryParse(match.Groups[1].Value, out frameIndex);
     }
+
+    [GeneratedRegex(@"(\d+)\.tga$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex FrameIndexLegacyRegex();
+
+    private static Regex ExactPrefixRegex(string prefix) => new(
+        "^" + Regex.Escape(prefix) + @"(\d+)\.tga$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     public static bool IsValidTgaFile(string path)
     {
@@ -127,6 +172,11 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
         }
     }
 
+    public void Freeze()
+    {
+        _frozen = true;
+    }
+
     public bool TryTake(int frameIndex, out string filePath)
     {
         if (_pending.TryRemove(frameIndex, out filePath!))
@@ -148,6 +198,44 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
         return true;
     }
 
+    public void ForceFullScan() => ScanDirectory();
+
+    public async Task WaitForQuiescenceAsync(TimeSpan quietWindow, TimeSpan hardTimeout, CancellationToken token)
+    {
+        var deadline = DateTime.UtcNow + hardTimeout;
+        while (true)
+        {
+            token.ThrowIfCancellationRequested();
+            if (DateTime.UtcNow >= deadline)
+            {
+                throw new TimeoutException(
+                    $"TGA 物理静默超时（{hardTimeout.TotalSeconds:0}s）：候选={CandidateCount} 待处理={PendingCount} " +
+                    $"最后物理写入={LastPhysicalFileWriteUtc?.ToString("O") ?? "无"} 未稳定文件={HasUnstableFiles}");
+            }
+
+            ForceFullScan();
+
+            var now = DateTime.UtcNow;
+            var quietEnough =
+                (LastPhysicalFileWriteUtc is null || now - LastPhysicalFileWriteUtc.Value >= quietWindow)
+                && CandidateCount == 0
+                && !HasUnstableFiles;
+
+            if (quietEnough)
+            {
+                // Final scan must stay quiet for a full quiet window to prove the writer stopped.
+                var afterScan = DateTime.UtcNow;
+                if (afterScan - now >= quietWindow
+                    || (LastPhysicalFileWriteUtc is null || afterScan - LastPhysicalFileWriteUtc.Value >= quietWindow))
+                {
+                    return;
+                }
+            }
+
+            await Task.Delay(100, token);
+        }
+    }
+
     public void ScanDirectory()
     {
         if (_disposed)
@@ -157,16 +245,40 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
             try
             {
                 _lastFullScanUtc = DateTime.UtcNow;
+                var sessionFiles = 0;
                 foreach (var path in Directory.EnumerateFiles(_directory, "*.tga"))
                 {
-                    if (TryParseFrameIndex(path, out var index))
+                    if (TryParseFrameIndex(path, _sequencePrefix, out var index))
+                    {
+                        sessionFiles++;
+                        if (index > _maxObservedFrameIndex)
+                            _maxObservedFrameIndex = index;
                         TrackCandidate(index, path);
+                    }
                 }
+                _sessionFileCount = sessionFiles;
             }
             catch
             {
-                // ignored
+                // ignored; retried next tick
             }
+        }
+    }
+
+    public void CleanupSessionFiles()
+    {
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(_directory, "*.tga"))
+            {
+                if (!TryParseFrameIndex(path, _sequencePrefix, out _))
+                    continue;
+                try { File.Delete(path); } catch { /* best effort */ }
+            }
+        }
+        catch
+        {
+            // ignored
         }
     }
 
@@ -195,9 +307,9 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
 
     private void OnFsEvent(object sender, FileSystemEventArgs e)
     {
-        if (_disposed)
+        if (_disposed || _frozen)
             return;
-        if (TryParseFrameIndex(e.FullPath, out var index))
+        if (TryParseFrameIndex(e.FullPath, _sequencePrefix, out var index))
             TrackCandidate(index, e.FullPath);
     }
 
@@ -226,6 +338,8 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
     {
         foreach (var (index, candidate) in _candidates)
         {
+            if (_frozen)
+                break;
             if (_pending.ContainsKey(index))
             {
                 _candidates.TryRemove(index, out _);
@@ -246,6 +360,9 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
                     _candidates.TryRemove(index, out _);
                     continue;
                 }
+
+                if (info.LastWriteTimeUtc > _lastPhysicalWriteUtc)
+                    _lastPhysicalWriteUtc = info.LastWriteTimeUtc;
 
                 if (info.Length < MinTgaHeaderSize)
                 {
@@ -271,6 +388,8 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
                 if (_pending.TryAdd(index, candidate.Path))
                 {
                     _candidates.TryRemove(index, out _);
+                    _lastAcceptedFrameIndex = index;
+                    _lastStableFrameUtc = DateTime.UtcNow;
                     PendingChanged?.Invoke();
                 }
             }
@@ -283,10 +402,22 @@ public sealed partial class TgaDirectoryWatcher : IDisposable
 
     private void TrackCandidate(int index, string path)
     {
+        if (_frozen)
+            return;
         if (_pending.ContainsKey(index))
             return;
         if (!ShouldTrackFile(path))
             return;
+        try
+        {
+            var writeTime = new FileInfo(path).LastWriteTimeUtc;
+            if (writeTime > _lastPhysicalWriteUtc)
+                _lastPhysicalWriteUtc = writeTime;
+        }
+        catch
+        {
+            // ignore
+        }
         _candidates.AddOrUpdate(
             index,
             _ => new CandidateFile(path),

@@ -3,18 +3,17 @@ using Mmod.Core.Models;
 namespace Mmod.Core.Services;
 
 /// <summary>
-/// Capture-first envelope: startmovie → CaptureReady → watch → ActivityAnchor → SafeEnd → endmovie.
-/// TGA wraps the entire replay (prefer idle head/tail over missing opening).
+/// Capture-first envelope driven by positive evidence: startmovie → CaptureReady
+/// → watch → PlaybackEvidence anchor → envelope end → strict endmovie → physical
+/// TGA quiescence → pipeline finalize. No fixed sleep is treated as proof; every
+/// boundary must be positively confirmed or the attempt fails. Cleanup on
+/// failure is the caller's responsibility (CaptureCleanupCoordinator).
 /// </summary>
 public static class CaptureEnvelopeRecorder
 {
     public const int CaptureReadyMinFrames = 3;
     public const double PreSafetySeconds = 2.0;
     public const double TailSafetySeconds = 2.5;
-    public static readonly TimeSpan CaptureReadyTimeout = TimeSpan.FromSeconds(20);
-    public static readonly TimeSpan ActivityTimeout = TimeSpan.FromSeconds(10);
-    public static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(15);
-    public static readonly TimeSpan TgaStopSettle = TimeSpan.FromMilliseconds(750);
 
     /// <summary>Frames after ActivityAnchor: RunTime + PreSafety + TailSafety at capture FPS.</summary>
     public static int ComputeEnvelopeFrameCount(double runTimeSeconds, int supersamplingMultiplier)
@@ -27,195 +26,229 @@ public static class CaptureEnvelopeRecorder
     public static int ComputeSafeEndFrame(int activityAnchorFrame, double runTimeSeconds, int supersamplingMultiplier) =>
         activityAnchorFrame + ComputeEnvelopeFrameCount(runTimeSeconds, supersamplingMultiplier);
 
-    public static async Task RecordAsync(
-        MomentumNetConClient netCon,
-        TgaPipelineOrchestrator pipeline,
+    /// <summary>
+    /// Full recording envelope for a node attempt. Throws on any unproven
+    /// boundary; cleanup is delegated to the caller. Returns the pipeline
+    /// finalize result (real counters) for downstream media validation.
+    /// </summary>
+    public static async Task<PipelineFinalizeResult> RecordAsync(
+        INetConClient netCon,
+        ICapturePipeline pipeline,
         UserSettings user,
         string gameRelativeReplayPath,
         double runTimeSeconds,
+        IGameSessionHealthMonitor? health,
         Action<string>? phase,
-        CancellationToken token)
+        Action<RecordingLogEntry>? structuredLog,
+        CancellationToken token,
+        RecordingTimeoutPolicy? timeouts = null,
+        Action<NodeExecutionStage>? onStage = null)
     {
-        async Task FailCleanupAsync(Exception ex)
+        timeouts ??= RecordingTimeoutPolicy.Default;
+        var startedAt = DateTime.UtcNow;
+
+        void Stage(NodeExecutionStage stage, string ev, string message, RecordingFailureKind? kind = null)
         {
-            phase?.Invoke($"StoppingCapture（失败清理）：{ex.Message}");
-            await TryEndMovieAsync(netCon);
+            onStage?.Invoke(stage);
+            var watcher = pipeline.Watcher;
+            structuredLog?.Invoke(new RecordingLogEntry(
+                TaskId: "?",
+                NodeId: null,
+                AttemptId: null,
+                CaptureSessionId: pipeline.CaptureSessionId,
+                Stage: stage,
+                Event: ev,
+                ElapsedMs: (long)(DateTime.UtcNow - startedAt).TotalMilliseconds,
+                FedCount: pipeline.FedCount,
+                CandidateCount: watcher.CandidateCount,
+                PendingCount: watcher.PendingCount,
+                LastPhysicalWriteUtc: watcher.LastPhysicalFileWriteUtc,
+                GamePid: null,
+                FailureKind: kind,
+                Message: message));
         }
 
         try
         {
-            phase?.Invoke("PreparingCapture");
-            await TryEndMovieAsync(netCon);
-            await Task.Delay(300, token);
+            // 1. Clean baseline: no active startmovie from a previous session.
+            Stage(NodeExecutionStage.PreparingCaptureBaseline, "Begin", "开始录制 Envelope");
+            var baselineStop = await MomentumReplaySession.ExecuteEndMovieAsync(netCon, timeouts, phase, token);
+            if (baselineStop is not StopMovieResult.CommandAcked and not StopMovieResult.KnownAlreadyStopped)
+            {
+                throw new CaptureStopUnconfirmedException($"准备阶段 endmovie 未确认（{baselineStop}）。");
+            }
 
-            phase?.Invoke("StartMovie");
-            var startmovie = WatchDirectoryHelper.BuildGameStartmovieCommand(user.MovieSequenceName);
-            phase?.Invoke($"StartMovie：{startmovie}");
-            await netCon.ExecuteAsync(startmovie, TimeSpan.FromSeconds(30), token);
+            // 2. Start movie with the unique session prefix (strict, failure patterns).
+            Stage(NodeExecutionStage.StartingMovie, "StartMovie", "开始 startmovie");
+            await MomentumReplaySession.ExecuteStartMovieAsync(netCon, user.MovieSequenceName, timeouts, phase, token);
 
-            phase?.Invoke("WaitingCaptureReady");
-            await pipeline.WaitUntilFedAsync(CaptureReadyMinFrames, CaptureReadyTimeout, token);
+            // 3. CaptureReady evidence: the current session is actually producing TGA.
+            Stage(NodeExecutionStage.WaitingCaptureReady, "WaitingCaptureReady", "等待 CaptureReady");
+            await pipeline.WaitUntilFedAsync(CaptureReadyMinFrames, timeouts.CaptureReadyTimeout, token);
             phase?.Invoke($"WaitingCaptureReady：已确认 {pipeline.FedCount} 帧 TGA");
             pipeline.ResetActivityTracking();
 
-            phase?.Invoke("StartingReplay");
-            await MomentumReplaySession.StartWatchAsync(netCon, gameRelativeReplayPath, phase, token);
+            // 4. Start replay watch (typed result).
+            Stage(NodeExecutionStage.StartingReplay, "StartingReplay", "发送 replay watch");
+            await MomentumReplaySession.StartWatchAsync(netCon, gameRelativeReplayPath, phase, token, timeouts);
 
-            phase?.Invoke("WaitingReplayActivity");
-            await pipeline.WaitUntilActivityAsync(ActivityTimeout, token);
+            // 5. Playback evidence (robust visual probe; no hash-only anchor).
+            Stage(NodeExecutionStage.WaitingPlaybackEvidence, "WaitingPlaybackEvidence", "等待播放证据");
+            await pipeline.WaitUntilActivityAsync(timeouts.PlaybackEvidenceTimeout, token);
             var anchor = pipeline.ActivityAnchorFrame
-                ?? throw new InvalidOperationException("ActivityAnchorFrame 未设置。");
-            phase?.Invoke($"WaitingReplayActivity：ActivityAnchorFrame={anchor}");
+                ?? throw new InvalidOperationException("PlaybackEvidence anchor 未建立。");
+            phase?.Invoke($"PlaybackEvidenceConfirmed @ Anchor={anchor}");
 
             var safeEnd = ComputeSafeEndFrame(anchor, runTimeSeconds, user.SupersamplingMultiplier);
             phase?.Invoke($"Recording：SafeEndFrame={safeEnd}（Anchor={anchor} + RunTime/Pre/Tail）");
+            Stage(NodeExecutionStage.Capturing, "Capturing", $"目标 SafeEnd={safeEnd}");
 
+            // 6. Capturing loop: race user cancellation / pipeline fault / game exit /
+            //    expected progress / stage timeout. A static frame only lowers
+            //    confidence — it is never treated as replay-finished.
             var lastFed = pipeline.FedCount;
             var lastFedAt = DateTime.UtcNow;
-            var lastVisualFrame = pipeline.LastVisualChangeFrame ?? anchor;
-            var lastVisualAt = DateTime.UtcNow;
-
             while (pipeline.FedCount < safeEnd)
             {
                 token.ThrowIfCancellationRequested();
+                ThrowIfFaulted(pipeline);
+
+                if (health is not null)
+                {
+                    if (health.GameExitedTask.IsCompleted)
+                        throw new GameExitedException("录制中游戏进程退出。");
+                    var free = health.WatchDriveFreeBytes;
+                    if (free is not null && free.Value < timeouts.DiskPressureMinFreeBytes)
+                        throw new DiskPressureException(
+                            $"磁盘可用空间不足：{free.Value / 1024d / 1024d / 1024d:0.0} GiB（安全下限 {timeouts.DiskPressureMinFreeBytes / 1024d / 1024d / 1024d:0.0} GiB）。");
+                }
 
                 if (pipeline.FedCount != lastFed)
                 {
                     lastFed = pipeline.FedCount;
                     lastFedAt = DateTime.UtcNow;
                 }
-                else if (DateTime.UtcNow - lastFedAt > TimeSpan.FromMinutes(2))
+                else if (DateTime.UtcNow - lastFedAt > timeouts.NoPhysicalTgaProgressTimeout)
                 {
-                    throw new TimeoutException("TGA 帧连续两分钟没有增长（Recording Stall）。");
-                }
-
-                var visual = pipeline.LastVisualChangeFrame;
-                if (visual is not null && visual.Value != lastVisualFrame)
-                {
-                    lastVisualFrame = visual.Value;
-                    lastVisualAt = DateTime.UtcNow;
-                }
-                else
-                {
-                    // Stall only when clearly early in the envelope; idle tail near SafeEnd is expected.
-                    var progress = pipeline.FedCount - anchor;
-                    var envelope = Math.Max(1, safeEnd - anchor);
-                    if (progress < envelope * 0.85
-                        && DateTime.UtcNow - lastVisualAt > StallTimeout)
-                    {
-                        throw new InvalidOperationException(
-                            $"PlaybackStalled：Activity 之后 {StallTimeout.TotalSeconds:0}s 画面无新变化（Fed={pipeline.FedCount}/{safeEnd}）。静止不等于播完。");
-                    }
+                    throw new TimeoutException("TGA 帧连续无增长（Recording Stall）。");
                 }
 
                 phase?.Invoke($"Recording：{pipeline.FedCount}/{safeEnd}");
-                await Task.Delay(250, token);
+                await Task.WhenAny(
+                    Task.Delay(timeouts.ProgressSampleInterval, token),
+                    pipeline.Completion,
+                    health?.GameExitedTask ?? Task.CompletedTask);
+                // Immediate exit when the pipeline faulted or the game exited
+                // while we were sampling — do not wait for the next tick.
+                ThrowIfFaulted(pipeline);
+                if (health?.GameExitedTask.IsCompleted == true)
+                    throw new GameExitedException("录制中游戏进程退出。");
             }
 
-            phase?.Invoke("StoppingCapture");
-            await TryEndMovieAsync(netCon);
-            await WaitTgaGrowthStopAsync(pipeline, token);
+            // 7. Strict endmovie: only CommandAcked / KnownAlreadyStopped proceed.
+            Stage(NodeExecutionStage.RequestingMovieStop, "EndMovie", "请求停止录制");
+            var stop = await MomentumReplaySession.ExecuteEndMovieAsync(netCon, timeouts, phase, token);
+            if (stop is not StopMovieResult.CommandAcked and not StopMovieResult.KnownAlreadyStopped)
+            {
+                if (stop == StopMovieResult.NetConLost)
+                    throw new CaptureStopUnconfirmedException("endmovie：NetCon 已断开，无法确认停止。");
+                throw new CaptureStopUnconfirmedException($"endmovie 未确认（{stop}）。");
+            }
 
-            phase?.Invoke("VerifyingCapture");
+            // 8. Physical TGA quiescence: proof the writer actually stopped.
+            Stage(NodeExecutionStage.WaitingCaptureQuiescence, "Quiescence", "等待 TGA 物理静默");
+            await pipeline.Watcher.WaitForQuiescenceAsync(
+                timeouts.TgaQuiescenceQuietWindow,
+                timeouts.TgaQuiescenceHardTimeout,
+                token);
+
+            // 9. Finalize: freeze → drain → native Finish; faults propagate.
+            Stage(NodeExecutionStage.FinalizingEncoder, "Finalize", "Native Finish");
+            var result = await pipeline.FinalizeAsync(timeouts, token);
+
+            // 10. Playback evidence must have survived end-to-end.
             if (pipeline.ActivityAnchorFrame is null || !pipeline.HasVisualChange)
-                throw new InvalidOperationException("成片校验失败：录制过程中未检测到 VisualActivity。");
+                throw new InvalidOperationException("成片校验失败：录制过程中未建立 PlaybackEvidence。");
+
+            Stage(NodeExecutionStage.Completed, "Completed",
+                $"Fed={result.SubmittedFrames} Out={result.ProducedFrames} 输出={result.OutputPath}");
+            return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            await FailCleanupAsync(ex);
-            throw;
-        }
-        catch (OperationCanceledException)
-        {
-            await TryEndMovieAsync(netCon);
+            Stage(NodeExecutionStage.CleaningUp, "Failure", ex.Message, RecordingFailureClassifier.Classify(ex));
             throw;
         }
     }
 
     /// <summary>
-    /// Mini envelope for「验证回放」: CaptureReady → watch → Activity → endmovie. Does not record full run.
+    /// Mini envelope for「验证回放」: CaptureReady → watch → evidence → strict stop
+    /// → quiescence. Does not record a full run.
     /// </summary>
     public static async Task VerifyActivityAsync(
-        MomentumNetConClient netCon,
-        TgaPipelineOrchestrator pipeline,
+        INetConClient netCon,
+        ICapturePipeline pipeline,
         UserSettings user,
         string gameRelativeReplayPath,
         Action<string>? phase,
-        CancellationToken token)
+        CancellationToken token,
+        RecordingTimeoutPolicy? timeouts = null,
+        Action<NodeExecutionStage>? onStage = null)
     {
+        timeouts ??= RecordingTimeoutPolicy.Default;
+        void Stage(NodeExecutionStage stage) => onStage?.Invoke(stage);
         try
         {
             phase?.Invoke("PreparingCapture");
-            await TryEndMovieAsync(netCon);
-            await Task.Delay(300, token);
+            Stage(NodeExecutionStage.PreparingCaptureBaseline);
+            var baselineStop = await MomentumReplaySession.ExecuteEndMovieAsync(netCon, timeouts, phase, token);
+            if (baselineStop is not StopMovieResult.CommandAcked and not StopMovieResult.KnownAlreadyStopped)
+                throw new CaptureStopUnconfirmedException($"准备阶段 endmovie 未确认（{baselineStop}）。");
 
-            phase?.Invoke("StartMovie");
-            var startmovie = WatchDirectoryHelper.BuildGameStartmovieCommand(user.MovieSequenceName);
-            phase?.Invoke($"StartMovie：{startmovie}");
-            await netCon.ExecuteAsync(startmovie, TimeSpan.FromSeconds(30), token);
+            Stage(NodeExecutionStage.StartingMovie);
+            await MomentumReplaySession.ExecuteStartMovieAsync(netCon, user.MovieSequenceName, timeouts, phase, token);
 
             phase?.Invoke("WaitingCaptureReady");
-            await pipeline.WaitUntilFedAsync(CaptureReadyMinFrames, CaptureReadyTimeout, token);
+            Stage(NodeExecutionStage.WaitingCaptureReady);
+            await pipeline.WaitUntilFedAsync(CaptureReadyMinFrames, timeouts.CaptureReadyTimeout, token);
             phase?.Invoke($"WaitingCaptureReady：已确认 {pipeline.FedCount} 帧");
             pipeline.ResetActivityTracking();
 
             phase?.Invoke("StartingReplay");
-            await MomentumReplaySession.StartWatchAsync(netCon, gameRelativeReplayPath, phase, token);
+            Stage(NodeExecutionStage.StartingReplay);
+            await MomentumReplaySession.StartWatchAsync(netCon, gameRelativeReplayPath, phase, token, timeouts);
 
             phase?.Invoke("WaitingReplayActivity");
-            await pipeline.WaitUntilActivityAsync(ActivityTimeout, token);
+            Stage(NodeExecutionStage.WaitingPlaybackEvidence);
+            await pipeline.WaitUntilActivityAsync(timeouts.PlaybackEvidenceTimeout, token);
             phase?.Invoke($"WaitingReplayActivity：ActivityAnchorFrame={pipeline.ActivityAnchorFrame}");
 
             phase?.Invoke("StoppingCapture");
-            await TryEndMovieAsync(netCon);
-            await WaitTgaGrowthStopAsync(pipeline, token);
-            phase?.Invoke("VerifyingCapture：回放可被自动拉起（已检测到 VisualActivity）");
+            Stage(NodeExecutionStage.RequestingMovieStop);
+            var stop = await MomentumReplaySession.ExecuteEndMovieAsync(netCon, timeouts, phase, token);
+            if (stop is not StopMovieResult.CommandAcked and not StopMovieResult.KnownAlreadyStopped)
+                throw new CaptureStopUnconfirmedException($"endmovie 未确认（{stop}）。");
+
+            Stage(NodeExecutionStage.WaitingCaptureQuiescence);
+            await pipeline.Watcher.WaitForQuiescenceAsync(
+                timeouts.TgaQuiescenceQuietWindow,
+                timeouts.TgaQuiescenceHardTimeout,
+                token);
+
+            Stage(NodeExecutionStage.FinalizingEncoder);
+            await pipeline.FinalizeAsync(timeouts, token);
+            phase?.Invoke("VerifyingCapture：回放可被自动拉起（已建立 PlaybackEvidence）");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             phase?.Invoke($"StoppingCapture（失败清理）：{ex.Message}");
-            await TryEndMovieAsync(netCon);
-            throw;
-        }
-        catch (OperationCanceledException)
-        {
-            await TryEndMovieAsync(netCon);
             throw;
         }
     }
 
-    /// <summary>Only stops movie capture. Does not reset host_framerate (needed across CaptureReady→Recording).</summary>
-    public static async Task TryEndMovieAsync(MomentumNetConClient netCon)
+    private static void ThrowIfFaulted(ICapturePipeline pipeline)
     {
-        try
-        {
-            await netCon.ExecuteAsync("endmovie", TimeSpan.FromSeconds(5), CancellationToken.None);
-        }
-        catch
-        {
-            // best-effort
-        }
-    }
-
-    private static async Task WaitTgaGrowthStopAsync(TgaPipelineOrchestrator pipeline, CancellationToken token)
-    {
-        var last = pipeline.FedCount;
-        var stableSince = DateTime.UtcNow;
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(8);
-        while (DateTime.UtcNow < deadline)
-        {
-            token.ThrowIfCancellationRequested();
-            if (pipeline.FedCount != last)
-            {
-                last = pipeline.FedCount;
-                stableSince = DateTime.UtcNow;
-            }
-            else if (DateTime.UtcNow - stableSince >= TgaStopSettle)
-            {
-                return;
-            }
-
-            await Task.Delay(100, token);
-        }
+        if (pipeline.IsFaulted)
+            throw new PipelineFaultException(pipeline.Fault?.Message ?? "pipeline fault", pipeline.Fault ?? new Exception("unknown"));
     }
 }

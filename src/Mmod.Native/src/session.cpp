@@ -1,5 +1,6 @@
 #include "mmod_native.h"
 #include "gpu_blend.h"
+#include "frame_processing.h"
 
 #include <algorithm>
 #include <cmath>
@@ -43,6 +44,15 @@ struct MmodSession {
   GpuBlendContext* gpu = nullptr;
   bool use_gpu = false;
 
+  // Quality processing (new).
+  std::vector<MmodEffectDescV1> effects;
+  int32_t target_bitrate = 0;  // >0 overrides auto estimation
+  int32_t motion_blur_mode = MmodMotionBlur_LegacyGaussianExposure;
+  float shutter_angle = 270.0f;
+  FrameProcessingState* cpu_processing = nullptr;  // CPU fallback processing
+  bool processing_effects_enabled = false;
+  bool processing_cpu_fallback = false;
+
   ComPtr<IMFSinkWriter> writer;
   DWORD writer_stream = 0;
   bool writer_ready = false;
@@ -69,6 +79,23 @@ static std::vector<float> BuildWeights(int blend_frames, float exposure) {
     for (float& w : weights) {
       w /= sum;
     }
+  }
+  return weights;
+}
+
+/* Physically simple centered box window: activeSamples ≈ N * angle / 360,
+   placed at the middle of the window, normalized to sum 1. */
+static std::vector<float> BuildShutterWeights(int blend_frames, float shutter_angle) {
+  const int n = std::max(1, blend_frames);
+  std::vector<float> weights(static_cast<size_t>(n), 0.0f);
+  const float angle = std::clamp(shutter_angle, 180.0f, 360.0f);
+  int active = static_cast<int>(std::lround(n * angle / 360.0f));
+  active = std::clamp(active, 1, n);
+
+  const int start = (n - active) / 2;  // centered
+  const float w = 1.0f / static_cast<float>(active);
+  for (int i = 0; i < active; ++i) {
+    weights[static_cast<size_t>(start + i)] = w;
   }
   return weights;
 }
@@ -118,6 +145,21 @@ static void PackOutputBgra(MmodSession* session) {
   }
 }
 
+/* Runs the quality pipeline on the accumulated window before packing.
+   With no enabled effects this is a no-op (old fast path). */
+static bool ProcessOutputFrame(MmodSession* session) {
+  if (!session->processing_effects_enabled) return true;
+  if (session->use_gpu && session->gpu) {
+    return GpuBlendProcess(session->gpu);
+  }
+  if (session->cpu_processing) {
+    return FrameProcessingApply(session->cpu_processing, session->accumulator.data(),
+                                session->effects.data(),
+                                static_cast<int32_t>(session->effects.size()));
+  }
+  return true;
+}
+
 static HRESULT ConfigureSinkWriter(MmodSession* session) {
   ComPtr<IMFAttributes> attrs;
   HRESULT hr = MFCreateAttributes(&attrs, 2);
@@ -143,9 +185,14 @@ static HRESULT ConfigureSinkWriter(MmodSession* session) {
   // About one bit per pixel at 60 fps: 1080p reaches the 120 Mbps ceiling
   // (roughly 900 MB/minute), while tiny diagnostic frames remain acceptable
   // to hardware encoders instead of requesting an impossible 120 Mbps profile.
-  const uint64_t scaled_bitrate = static_cast<uint64_t>(session->width) *
-      static_cast<uint64_t>(session->height) * static_cast<uint64_t>(session->output_fps);
-  const UINT32 bitrate = static_cast<UINT32>(std::clamp<uint64_t>(scaled_bitrate, 2'000'000, 120'000'000));
+  UINT32 bitrate = 0;
+  if (session->target_bitrate > 0) {
+    bitrate = static_cast<UINT32>(std::clamp<int64_t>(session->target_bitrate, 1'000'000, 120'000'000));
+  } else {
+    const uint64_t scaled_bitrate = static_cast<uint64_t>(session->width) *
+        static_cast<uint64_t>(session->height) * static_cast<uint64_t>(session->output_fps);
+    bitrate = static_cast<UINT32>(std::clamp<uint64_t>(scaled_bitrate, 2'000'000, 120'000'000));
+  }
   hr = out_type->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
   if (FAILED(hr)) return hr;
   hr = out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
@@ -198,6 +245,10 @@ static HRESULT WriteOutputFrame(MmodSession* session) {
     }
   }
 
+  if (!ProcessOutputFrame(session)) {
+    return MF_E_UNEXPECTED;
+  }
+
   PackOutputBgra(session);
 
   const DWORD buffer_size = static_cast<DWORD>(session->output_bgra.size());
@@ -243,8 +294,69 @@ extern "C" MMOD_API const char* mmod_error_string(int32_t error) {
     case MmodError_IoFailed: return "io failed";
     case MmodError_DecodeFailed: return "decode failed";
     case MmodError_ComFailed: return "com/media foundation failed";
+    case MmodError_ProcessingInitFailed: return "quality processing init failed";
+    case MmodError_ProcessingFailed: return "quality processing failed";
+    case MmodError_UnsupportedEffect: return "unsupported quality effect";
+    case MmodError_ProcessingFallbackCpu: return "quality processing fell back to cpu";
     default: return "unknown";
   }
+}
+
+/* Shared session setup from desc. Returns MmodError code; on success the GPU
+   path is configured with effects, or the session falls back to CPU. */
+static int32_t InitSessionFromDesc(MmodSession* session, const MmodSessionDesc* desc) {
+  session->width = desc->width;
+  session->height = desc->height;
+  session->blend_frames = std::max(1, desc->blend_frames);
+  session->exposure = desc->exposure;
+  session->output_fps = desc->output_fps > 0 ? desc->output_fps : 60;
+  session->encoder = desc->encoder;
+  session->output_path = desc->output_path;
+
+  session->target_bitrate = std::max(0, desc->target_bitrate);
+  session->motion_blur_mode = desc->motion_blur_mode;
+  session->shutter_angle = std::clamp(desc->shutter_angle, 180.0f, 360.0f);
+
+  if (desc->effects && desc->effect_count > 0) {
+    session->effects.assign(desc->effects, desc->effects + desc->effect_count);
+  }
+  session->processing_effects_enabled = std::any_of(
+      session->effects.begin(), session->effects.end(),
+      [](const MmodEffectDescV1& e) {
+        return e.enabled && e.effect_type != MmodEffect_None;
+      });
+
+  session->weights = session->motion_blur_mode == MmodMotionBlur_ShutterAngle
+      ? BuildShutterWeights(session->blend_frames, session->shutter_angle)
+      : BuildWeights(session->blend_frames, session->exposure);
+  session->accumulator.assign(static_cast<size_t>(session->width) * static_cast<size_t>(session->height) * 3u, 0.0f);
+
+  session->gpu = GpuBlendCreate(session->width, session->height, session->blend_frames);
+  session->use_gpu = session->gpu != nullptr;
+
+  if (session->processing_effects_enabled) {
+    char err[256] = {0};
+    bool gpu_ok = session->use_gpu &&
+        GpuBlendConfigureEffects(session->gpu, session->effects.data(),
+                                 static_cast<int32_t>(session->effects.size()),
+                                 err, sizeof(err));
+    if (gpu_ok && GpuBlendHasEnabledEffects(session->gpu)) {
+      return MmodError_Ok;
+    }
+    // GPU processing unavailable (no device or effect init failed): fall back
+    // to the CPU pipeline so enabled effects never silently disappear.
+    if (session->gpu) {
+      GpuBlendDestroy(session->gpu);
+      session->gpu = nullptr;
+      session->use_gpu = false;
+    }
+    session->cpu_processing = FrameProcessingCreate(session->width, session->height);
+    if (!session->cpu_processing) {
+      return MmodError_ProcessingInitFailed;
+    }
+    session->processing_cpu_fallback = true;
+  }
+  return MmodError_Ok;
 }
 
 extern "C" MMOD_API MmodSession* mmod_session_create(const MmodSessionDesc* desc, int32_t* out_error) {
@@ -271,17 +383,13 @@ extern "C" MMOD_API MmodSession* mmod_session_create(const MmodSessionDesc* desc
   }
 
   auto session = std::make_unique<MmodSession>();
-  session->width = desc->width;
-  session->height = desc->height;
-  session->blend_frames = std::max(1, desc->blend_frames);
-  session->exposure = desc->exposure;
-  session->output_fps = desc->output_fps > 0 ? desc->output_fps : 60;
-  session->encoder = desc->encoder;
-  session->output_path = desc->output_path;
-  session->weights = BuildWeights(session->blend_frames, session->exposure);
-  session->accumulator.assign(static_cast<size_t>(session->width) * static_cast<size_t>(session->height) * 3u, 0.0f);
-  session->gpu = GpuBlendCreate(session->width, session->height, session->blend_frames);
-  session->use_gpu = session->gpu != nullptr;
+  const int32_t init_error = InitSessionFromDesc(session.get(), desc);
+  if (init_error != MmodError_Ok) {
+    if (need_uninit) CoUninitialize();
+    MFShutdown();
+    if (out_error) *out_error = init_error;
+    return nullptr;
+  }
 
   (void)need_uninit;
   return session.release();
@@ -301,7 +409,7 @@ extern "C" MMOD_API int32_t mmod_session_submit_bgra(MmodSession* session, const
 
   if ((session->frames_submitted % session->blend_frames) == 0) {
     if (FAILED(WriteOutputFrame(session))) {
-      return MmodError_EncodeFailed;
+      return session->processing_effects_enabled ? MmodError_ProcessingFailed : MmodError_EncodeFailed;
     }
   }
 
@@ -334,8 +442,19 @@ extern "C" MMOD_API void mmod_session_destroy(MmodSession* session) {
     GpuBlendDestroy(session->gpu);
     session->gpu = nullptr;
   }
+  if (session->cpu_processing) {
+    FrameProcessingDestroy(session->cpu_processing);
+    session->cpu_processing = nullptr;
+  }
   delete session;
   MFShutdown();
+}
+
+extern "C" MMOD_API int32_t mmod_session_get_processing_status(MmodSession* session, int32_t* out_effects_enabled, int32_t* out_using_cpu_fallback) {
+  if (!session) return MmodError_InvalidArg;
+  if (out_effects_enabled) *out_effects_enabled = session->processing_effects_enabled ? 1 : 0;
+  if (out_using_cpu_fallback) *out_using_cpu_fallback = session->processing_cpu_fallback ? 1 : 0;
+  return MmodError_Ok;
 }
 
 extern "C" MMOD_API int32_t mmod_session_get_progress(MmodSession* session, int32_t* out_done, int32_t* out_total) {
@@ -526,17 +645,12 @@ extern "C" MMOD_API int32_t mmod_process_video_file(
   local.width = static_cast<int32_t>(width);
   local.height = static_cast<int32_t>(height);
   auto session = std::make_unique<MmodSession>();
-  session->width = local.width;
-  session->height = local.height;
-  session->blend_frames = std::max(1, local.blend_frames);
-  session->exposure = local.exposure;
-  session->output_fps = local.output_fps > 0 ? local.output_fps : 60;
-  session->encoder = local.encoder;
-  session->output_path = local.output_path;
-  session->weights = BuildWeights(session->blend_frames, session->exposure);
-  session->accumulator.assign(static_cast<size_t>(session->width) * static_cast<size_t>(session->height) * 3u, 0.0f);
-  session->gpu = GpuBlendCreate(session->width, session->height, session->blend_frames);
-  session->use_gpu = session->gpu != nullptr;
+  const int32_t init_error = InitSessionFromDesc(session.get(), &local);
+  if (init_error != MmodError_Ok) {
+    MFShutdown();
+    if (out_error) *out_error = init_error;
+    return init_error;
+  }
 
   // Estimate total output frames from duration if available.
   PROPVARIANT var{};

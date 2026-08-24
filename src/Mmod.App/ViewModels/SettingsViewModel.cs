@@ -2,6 +2,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Mmod.Core.Models;
 using Mmod.Core.Services;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 
@@ -39,12 +40,29 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string cfgCommandBlock = string.Empty;
     [ObservableProperty] private string cfgRestoreCommandBlock = string.Empty;
 
+    // ---- Quality pipeline ----
+    [ObservableProperty] private MotionBlurWeightMode motionBlurWeightMode;
+    [ObservableProperty] private double shutterAngle = 270;
+    [ObservableProperty] private int intermediateTargetBitrate;
+    [ObservableProperty] private bool enableDaVinci4KWorkflowGuide;
+    [ObservableProperty] private string selectedPresetId = VideoProcessingPresetIds.Off;
+    [ObservableProperty] private string processingSummary = string.Empty;
+    [ObservableProperty] private string davinciGuideText = string.Empty;
+
     public IReadOnlyList<CaptureMode> CaptureModeOptions { get; } = [CaptureMode.Tga, CaptureMode.Obs];
     public IReadOnlyList<int> ObsCaptureFramerateOptions { get; } =
         ProjectConstants.SupportedObsCaptureFramerates;
+    public IReadOnlyList<MotionBlurWeightMode> MotionBlurModeOptions { get; } =
+        [MotionBlurWeightMode.LegacyGaussianExposure, MotionBlurWeightMode.ShutterAngle];
+    public IReadOnlyList<VideoProcessingPresetDefinition> PresetOptions { get; } =
+        VideoProcessorCatalog.Presets;
+    public ObservableCollection<QualityModuleViewModel> QualityModules { get; } = [];
 
     public bool IsObsMode => CaptureMode == CaptureMode.Obs;
     public bool IsTgaMode => CaptureMode == CaptureMode.Tga;
+    public bool IsShutterMode => MotionBlurWeightMode == MotionBlurWeightMode.ShutterAngle;
+    public bool IsLegacyMode => MotionBlurWeightMode == MotionBlurWeightMode.LegacyGaussianExposure;
+    public bool IsDaVinciGuideEnabled => EnableDaVinci4KWorkflowGuide;
 
     partial void OnCaptureModeChanged(CaptureMode value)
     {
@@ -76,6 +94,46 @@ public partial class SettingsViewModel : ObservableObject
         Persist();
     }
 
+    partial void OnMotionBlurWeightModeChanged(MotionBlurWeightMode value)
+    {
+        OnPropertyChanged(nameof(IsShutterMode));
+        OnPropertyChanged(nameof(IsLegacyMode));
+        Persist();
+    }
+
+    partial void OnShutterAngleChanged(double value)
+    {
+        var clamped = Math.Clamp(value, 180.0, 360.0);
+        if (Math.Abs(clamped - value) > 0.0001)
+        {
+            ShutterAngle = clamped;
+            return;
+        }
+        Persist();
+    }
+
+    partial void OnIntermediateTargetBitrateChanged(int value)
+    {
+        IntermediateTargetBitrate = Math.Clamp(value, 0, 120_000_000);
+        Persist();
+    }
+
+    partial void OnEnableDaVinci4KWorkflowGuideChanged(bool value)
+    {
+        OnPropertyChanged(nameof(IsDaVinciGuideEnabled));
+        RefreshDaVinciGuide();
+        Persist();
+    }
+
+    partial void OnSelectedPresetIdChanged(string value)
+    {
+        if (_loading)
+            return;
+        if (string.Equals(value, VideoProcessingPresetIds.Custom, StringComparison.Ordinal))
+            return; // custom is derived, not applied
+        ApplyPreset(value);
+    }
+
     private void ApplyFrom(UserSettings s)
     {
         _loading = true;
@@ -93,13 +151,107 @@ public partial class SettingsViewModel : ObservableObject
             EndMovieHotkey = s.EndMovieHotkey;
             HideHudInCfg = s.HideHudInCfg;
             MaxParallelJobs = Math.Max(1, s.MaxParallelJobs);
+
+            MotionBlurWeightMode = s.MotionBlurWeightMode;
+            ShutterAngle = SettingsMigration.NormalizeShutterAngle(s.ShutterAngle);
+            IntermediateTargetBitrate = Math.Clamp(s.IntermediateTargetBitrate, 0, 120_000_000);
+            EnableDaVinci4KWorkflowGuide = s.EnableDaVinci4KWorkflowGuide;
         }
         finally
         {
             _loading = false;
         }
 
+        RebuildQualityModules(s.VideoProcessing);
+        RefreshDaVinciGuide();
         RefreshDerived();
+    }
+
+    private void RebuildQualityModules(VideoProcessingSettings? processing)
+    {
+        var normalized = VideoProcessorCatalog.Normalize(processing);
+        QualityModules.Clear();
+        foreach (var def in VideoProcessorCatalog.Modules)
+        {
+            var config = normalized.Modules.First(m => string.Equals(m.Id, def.Id, StringComparison.Ordinal));
+            QualityModules.Add(new QualityModuleViewModel(def, config, OnQualityModuleChanged));
+        }
+        RefreshQualityState(normalized);
+    }
+
+    private void OnQualityModuleChanged()
+    {
+        var snapshot = BuildProcessingSnapshot();
+        RefreshQualityState(snapshot);
+        Persist();
+    }
+
+    private VideoProcessingSettings BuildProcessingSnapshot()
+    {
+        var processing = VideoProcessorCatalog.Normalize(_settings.VideoProcessing);
+        foreach (var vm in QualityModules)
+        {
+            var config = processing.Modules.First(m => string.Equals(m.Id, vm.Definition.Id, StringComparison.Ordinal));
+            config.Enabled = vm.IsEnabled;
+            foreach (var pvm in vm.Parameters)
+                config.Parameters[pvm.Parameter.Key] = pvm.Value;
+        }
+        processing.PresetId = VideoProcessingPresetService.DetectPresetId(processing);
+        return processing;
+    }
+
+    private void RefreshQualityState(VideoProcessingSettings processing)
+    {
+        _loading = true;
+        try
+        {
+            SelectedPresetId = processing.PresetId;
+        }
+        finally
+        {
+            _loading = false;
+        }
+        ProcessingSummary = VideoProcessingSummary.Build(processing);
+        OnPropertyChanged(nameof(ProcessingSummary));
+    }
+
+    private void ApplyPreset(string presetId)
+    {
+        var processing = VideoProcessingPresetService.Apply(presetId);
+        RebuildQualityModules(processing);
+        _settings.VideoProcessing = processing;
+        _store.Save(_settings);
+        RefreshDerived();
+        StatusText = $"已应用画质处理预设：{VideoProcessingPresetService.DetectPresetId(processing)}";
+    }
+
+    [RelayCommand]
+    private void RestoreAllQualityDefaults()
+    {
+        foreach (var vm in QualityModules)
+            vm.RestoreDefaultsCommand.Execute(null);
+    }
+
+    [RelayCommand]
+    private void CopyDaVinciSteps()
+    {
+        System.Windows.Clipboard.SetText(DaVinciWorkflowGuideService.BuildGuideText(
+            ProjectConstants.FinalOutputFramerate, SupersamplingMultiplier));
+        StatusText = "已复制 DaVinci 4K 操作步骤";
+    }
+
+    [RelayCommand]
+    private void CopyBilibiliExport()
+    {
+        System.Windows.Clipboard.SetText(DaVinciWorkflowGuideService.BuildBilibiliExportSuggestions());
+        StatusText = "已复制 Bilibili 导出建议";
+    }
+
+    private void RefreshDaVinciGuide()
+    {
+        DavinciGuideText = EnableDaVinci4KWorkflowGuide
+            ? DaVinciWorkflowGuideService.BuildGuideText(ProjectConstants.FinalOutputFramerate, SupersamplingMultiplier)
+            : string.Empty;
     }
 
     public UserSettings Snapshot()
@@ -121,6 +273,11 @@ public partial class SettingsViewModel : ObservableObject
             RamDiskDriveLetter = _settings.RamDiskDriveLetter,
             StartmoviePathPrefix = _settings.StartmoviePathPrefix,
             PendingTgaWarningCount = _settings.PendingTgaWarningCount,
+            MotionBlurWeightMode = MotionBlurWeightMode,
+            ShutterAngle = SettingsMigration.NormalizeShutterAngle(ShutterAngle),
+            IntermediateTargetBitrate = Math.Clamp(IntermediateTargetBitrate, 0, 120_000_000),
+            EnableDaVinci4KWorkflowGuide = EnableDaVinci4KWorkflowGuide,
+            VideoProcessing = BuildProcessingSnapshot(),
         };
         WatchDirectoryHelper.EnsureDerivedPaths(s, s.GameRootPath);
         return s;

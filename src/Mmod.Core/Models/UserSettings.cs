@@ -20,4 +20,27 @@ public sealed class UserSettings
 
     public int MaxParallelJobs { get; set; } = 2;
     public int PendingTgaWarningCount { get; set; } = 30;
+
+    // ---- Quality pipeline (new in the Bilibili-quality plan) ----
+
+    /// <summary>
+    /// Complete quality-processing config. Null / missing in old settings.json
+    /// means all new modules off and legacy motion-blur behaviour.
+    /// </summary>
+    public VideoProcessingSettings? VideoProcessing { get; set; }
+
+    /// <summary>LegacyGaussianExposure keeps old Exposure semantics; ShutterAngle is the new recommended mode.</summary>
+    public MotionBlurWeightMode MotionBlurWeightMode { get; set; } = MotionBlurWeightMode.LegacyGaussianExposure;
+
+    /// <summary>Used only when MotionBlurWeightMode == ShutterAngle (180°~360°).</summary>
+    public double ShutterAngle { get; set; } = 270;
+
+    /// <summary>
+    /// Intermediate-master target bitrate for the Media Foundation H.264 writer.
+    /// 0 = auto (old width*height*fps estimate capped at 120 Mbps).
+    /// </summary>
+    public int IntermediateTargetBitrate { get; set; }
+
+    /// <summary>Show the DaVinci 4K AI post-processing guide section in Settings UI.</summary>
+    public bool EnableDaVinci4KWorkflowGuide { get; set; }
 }
