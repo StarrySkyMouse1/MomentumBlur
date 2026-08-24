@@ -456,7 +456,10 @@ public sealed class RenderTaskRepository
             CREATE TABLE IF NOT EXISTS runner_session (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1), process_id INTEGER NULL,
                 netcon_port INTEGER NULL, netcon_password TEXT NULL, task_id TEXT NULL,
-                node_id TEXT NULL, updated_at TEXT NOT NULL
+                node_id TEXT NULL, updated_at TEXT NOT NULL, exe_path TEXT NULL,
+                process_started_at TEXT NULL, game_session_id TEXT NULL,
+                capture_session_id TEXT NULL, sequence_prefix TEXT NULL,
+                ownership_token TEXT NULL, watch_directory TEXT NULL
             );
             CREATE TABLE IF NOT EXISTS render_attempts (
                 id TEXT PRIMARY KEY, session_id TEXT NOT NULL, task_id TEXT NOT NULL,
@@ -480,6 +483,7 @@ public sealed class RenderTaskRepository
         EnsureColumn(connection, "runner_session", "capture_session_id", "TEXT NULL");
         EnsureColumn(connection, "runner_session", "sequence_prefix", "TEXT NULL");
         EnsureColumn(connection, "runner_session", "ownership_token", "TEXT NULL");
+        EnsureColumn(connection, "runner_session", "watch_directory", "TEXT NULL");
         NormalizeInterruptedWork(connection);
     }
 

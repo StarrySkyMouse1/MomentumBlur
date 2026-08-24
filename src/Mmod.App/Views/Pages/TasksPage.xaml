@@ -15,36 +15,76 @@
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <StackPanel>
             <TextBlock Text="任务" FontSize="28" FontWeight="SemiBold"/>
-            <TextBlock Text="勾选一条回放后点「验证回放」：按 Capture Envelope 自动切图→临时 startmovie→watch→检测画面运动后 endmovie。下方显示阶段日志。" Margin="0,4,0,12" Foreground="Gray"/>
-            <StackPanel Orientation="Horizontal">
-                <Button Content="刷新回放" Command="{Binding RefreshCatalogCommand}" Margin="0,0,8,0"/>
-                <Button Content="创建任务" Command="{Binding CreateTasksCommand}" Margin="0,0,8,0"/>
-                <Button Content="刷新状态" Command="{Binding ReloadTasksCommand}"/>
-                <Button Content="验证回放" Command="{Binding VerifyReplayCommand}" Margin="16,0,8,0"
+            <TextBlock Text="勾选一条回放后点「验证回放」：按 Capture Envelope 自动切图→临时 startmovie→watch→检测画面运动后 endmovie。下方显示阶段日志。" Margin="0,4,0,12" Foreground="Gray" TextWrapping="Wrap"/>
+            <WrapPanel>
+                <Button Content="刷新回放" Command="{Binding RefreshCatalogCommand}" Margin="0,0,8,8"/>
+                <Button Content="创建任务" Command="{Binding CreateTasksCommand}" Margin="0,0,8,8"/>
+                <Button Content="刷新状态" Command="{Binding ReloadTasksCommand}" Margin="0,0,8,8"/>
+                <Button Content="验证回放" Command="{Binding VerifyReplayCommand}" Margin="16,0,8,8"
                         ToolTip="迷你 Capture Envelope：确认 TGA 可写且回放能产生 VisualActivity"/>
-                <Button Content="开始/继续" Command="{Binding StartQueueCommand}" Margin="0,0,8,0"/>
-                <Button Content="当前节点后暂停" Command="{Binding PauseAfterNodeCommand}" Margin="0,0,8,0"/>
-                <Button Content="立即停止" Command="{Binding StopNowCommand}"/>
-            </StackPanel>
+                <Button Content="开始/继续" Command="{Binding StartQueueCommand}" Margin="0,0,8,8"/>
+                <Button Content="当前节点后暂停" Command="{Binding PauseAfterNodeCommand}" Margin="0,0,8,8"/>
+                <Button Content="立即停止" Command="{Binding StopNowCommand}" Margin="0,0,0,8"/>
+            </WrapPanel>
         </StackPanel>
         <Grid Grid.Row="1" Margin="0,16,0,12">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="1.2*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-            <GroupBox Header="回放记录"><TreeView ItemsSource="{Binding Catalog}" Padding="8"/></GroupBox>
+            <Grid.RowDefinitions><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="1.1*" MinWidth="216"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*" MinWidth="300"/>
+            </Grid.ColumnDefinitions>
+            <GroupBox Grid.Column="0" Header="回放记录">
+                <TreeView ItemsSource="{Binding Catalog}" Padding="8"
+                          ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto"/>
+            </GroupBox>
+            <GridSplitter Grid.Column="1" Width="8" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                          ResizeBehavior="PreviousAndNext" Background="Transparent" ShowsPreview="True"/>
             <TabControl Grid.Column="2">
                 <TabItem Header="执行队列">
                     <DockPanel>
                         <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="8">
-                            <Button Content="上移" Command="{Binding MoveUpCommand}" Margin="0,0,8,0"/><Button Content="下移" Command="{Binding MoveDownCommand}" Margin="0,0,8,0"/><Button Content="刷新快照" Command="{Binding RefreshSnapshotCommand}" Margin="0,0,8,0"/><Button Content="删除记录" Command="{Binding DeleteTaskCommand}"/>
+                            <Button Content="上移" Command="{Binding MoveUpCommand}" Margin="0,0,8,0"/>
+                            <Button Content="下移" Command="{Binding MoveDownCommand}" Margin="0,0,8,0"/>
+                            <Button Content="刷新快照" Command="{Binding RefreshSnapshotCommand}" Margin="0,0,8,0"/>
+                            <Button Content="删除记录" Command="{Binding DeleteTaskCommand}"/>
                         </StackPanel>
                         <ListBox ItemsSource="{Binding Queue}" SelectedItem="{Binding SelectedTask}">
-                            <ListBox.ItemTemplate><DataTemplate><StackPanel Margin="4"><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Text="{Binding Detail}" Foreground="Gray"/></StackPanel></DataTemplate></ListBox.ItemTemplate>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="4">
+                                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding Detail}" Foreground="Gray"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
                         </ListBox>
                     </DockPanel>
                 </TabItem>
                 <TabItem Header="历史">
-                    <DockPanel><StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="8"><Button Content="打开输出" Command="{Binding OpenOutputCommand}" Margin="0,0,8,0"/><Button Content="删除输出" Command="{Binding DeleteOutputCommand}" Margin="0,0,8,0"/><Button Content="删除记录/日志" Command="{Binding DeleteTaskCommand}"/></StackPanel><ListBox ItemsSource="{Binding History}" SelectedItem="{Binding SelectedTask}"><ListBox.ItemTemplate><DataTemplate><StackPanel Margin="4"><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Text="{Binding Detail}" Foreground="Gray"/></StackPanel></DataTemplate></ListBox.ItemTemplate></ListBox></DockPanel>
+                    <DockPanel>
+                        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="8">
+                            <Button Content="打开输出" Command="{Binding OpenOutputCommand}" Margin="0,0,8,0"/>
+                            <Button Content="删除输出" Command="{Binding DeleteOutputCommand}" Margin="0,0,8,0"/>
+                            <Button Content="删除记录/日志" Command="{Binding DeleteTaskCommand}"/>
+                        </StackPanel>
+                        <ListBox ItemsSource="{Binding History}" SelectedItem="{Binding SelectedTask}">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="4">
+                                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding Detail}" Foreground="Gray"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </DockPanel>
                 </TabItem>
-                <TabItem Header="详情/日志"><ScrollViewer Padding="8"><TextBlock Text="{Binding SelectedTaskDetail}" TextWrapping="Wrap"/></ScrollViewer></TabItem>
+                <TabItem Header="详情 / 日志">
+                    <ScrollViewer Padding="8" VerticalScrollBarVisibility="Auto">
+                        <TextBlock Text="{Binding SelectedTaskDetail}" TextWrapping="Wrap"/>
+                    </ScrollViewer>
+                </TabItem>
             </TabControl>
         </Grid>
         <TextBlock Grid.Row="2" Text="{Binding StatusText}" TextWrapping="Wrap" MinHeight="72" MaxHeight="180"

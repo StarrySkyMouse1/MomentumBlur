@@ -212,6 +212,14 @@ public sealed class NodeExecutionCoordinator
         var user = RenderTaskRunner.ToUserSettingsForAttempt(ctx.Settings);
         var relative = MomentumReplaySession.BuildGameRelativeReplayPath(ctx.Settings.GameRootPath, ctx.Node.ReplayPath);
 
+        // Supersampling: the game must render at N×60 fps so N input frames span
+        // exactly 1/60s of game time per output frame. Without this the replay
+        // plays at its default rate, so the intended blend/temporal supersampling
+        // cannot be achieved (same step as the verify flow and the generated CFG).
+        var hostFps = Math.Max(1, user.SupersamplingMultiplier) * ProjectConstants.FinalOutputFramerate;
+        ctx.Log("Info", $"配置 host_framerate {hostFps}（超采样 {user.SupersamplingMultiplier}x → 成片 {ProjectConstants.FinalOutputFramerate}fps）");
+        await ctx.Game.NetCon.ExecuteAsync($"sv_cheats 1; host_framerate {hostFps}", TimeSpan.FromSeconds(30), token);
+
         var pipeline = new TgaPipelineOrchestrator(timeouts);
         pipeline.Changed += () => ctx.OnNodeStatusChanged?.Invoke(ctx.Node);
         var health = new GameSessionHealthMonitor(ctx.Game as MomentumProcessController ?? throw new InvalidOperationException("需要 MomentumProcessController 健康监控"), ctx.Settings.WatchDirectory);
