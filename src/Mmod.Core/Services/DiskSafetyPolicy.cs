@@ -23,7 +23,8 @@ public static class DiskSafetyPolicy
 
     /// <summary>
     /// Clamp a raw percentage to the closed range [0, 50]:
-    /// below 0 → 0 (protection on), above 50 → 50 (hard ceiling).
+    /// below 0 → 0; 0 means protection off (state Disabled);
+    /// above 50 → 50 (hard ceiling).
     /// </summary>
     public static int NormalizeSafetyPercent(int percent) => Math.Clamp(percent, 0, MaxSafetyPercent);
 

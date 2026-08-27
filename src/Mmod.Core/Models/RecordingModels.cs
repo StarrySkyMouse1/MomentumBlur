@@ -275,12 +275,20 @@ public sealed record DiskHealthSnapshot(
     DiskSafetyState State,
     DateTimeOffset SampledAt);
 
-/// <summary>Frame-quality processing backend reported by a performance preflight.</summary>
+/// <summary>
+/// Frame-quality processing backend reported by a performance preflight.
+/// Unknown: diagnosis not established or unconfirmable; Disabled: no quality
+/// module is enabled (not an error and not a fallback); Gpu: the enabled
+/// quality modules run on the GPU path; CpuFallback: quality processing is
+/// enabled but the GPU path is unavailable and execution explicitly falls back
+/// to CPU.
+/// </summary>
 public enum ProcessingBackend
 {
     Unknown = 0,
-    Native = 1,
-    CpuFallback = 2,
+    Disabled = 1,
+    Gpu = 2,
+    CpuFallback = 3,
 }
 
 /// <summary>Encoder backend reported by a performance preflight.</summary>
