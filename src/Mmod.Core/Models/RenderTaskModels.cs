@@ -27,6 +27,8 @@ public enum RenderNodeStatus
 /// Frozen task settings. New fields use default parameter values so old
 /// SettingsJson (which lacks them) still deserializes and behaves like the
 /// legacy pipeline: Legacy exposure + all quality modules off + auto bitrate.
+/// DiskSafetyFreePercent is a trailing defaulted parameter (10 when absent in
+/// old JSON) and is frozen into the snapshot at task creation; 0 = protection off.
 /// </summary>
 public sealed record RenderSettingsSnapshot(
     int SupersamplingMultiplier,
@@ -39,7 +41,8 @@ public sealed record RenderSettingsSnapshot(
     int TargetBitrate,
     MotionBlurWeightMode MotionBlurMode = MotionBlurWeightMode.LegacyGaussianExposure,
     double ShutterAngle = 270,
-    VideoProcessingSettings? VideoProcessing = null);
+    VideoProcessingSettings? VideoProcessing = null,
+    int DiskSafetyFreePercent = 10);
 
 public sealed record NewRenderNode(
     string ReplayPath,

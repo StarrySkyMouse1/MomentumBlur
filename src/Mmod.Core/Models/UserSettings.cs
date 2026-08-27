@@ -21,6 +21,16 @@ public sealed class UserSettings
     public int MaxParallelJobs { get; set; } = 2;
     public int PendingTgaWarningCount { get; set; } = 30;
 
+    // ---- Disk safety (percentage contract, S1) ----
+
+    /// <summary>
+    /// Watch-drive free-space safety floor as a percentage of total capacity.
+    /// 0 = disk-space protection off; 1..50 = safety line. Missing in old
+    /// settings.json defaults to 10. Frozen into RenderSettingsSnapshot at task
+    /// creation / snapshot refresh.
+    /// </summary>
+    public int DiskSafetyFreePercent { get; set; } = 10;
+
     // ---- Quality pipeline (new in the Bilibili-quality plan) ----
 
     /// <summary>
