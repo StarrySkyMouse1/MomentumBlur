@@ -226,6 +226,51 @@ if (args.Length >= 1 && args[0] == "settings")
         return 74;
     }
 
+    // ---- S1 Repair: quality-processing backend contract ----
+    // The four backend states carry the stable contract values.
+    if (Convert.ToInt32(ProcessingBackend.Unknown) != 0 ||
+        Convert.ToInt32(ProcessingBackend.Disabled) != 1 ||
+        Convert.ToInt32(ProcessingBackend.Gpu) != 2 ||
+        Convert.ToInt32(ProcessingBackend.CpuFallback) != 3)
+    {
+        Console.WriteLine("SETTINGS_FAIL: ProcessingBackend stable values broken");
+        return 75;
+    }
+    // Disabled, Gpu and CpuFallback are each independently expressible, all four distinct.
+    var backendValues = new[] { ProcessingBackend.Unknown, ProcessingBackend.Disabled, ProcessingBackend.Gpu, ProcessingBackend.CpuFallback };
+    if (backendValues.Distinct().Count() != 4)
+    {
+        Console.WriteLine("SETTINGS_FAIL: ProcessingBackend values not distinct");
+        return 76;
+    }
+    // PerformancePreflightResult carries each valid processing state.
+    var preflight = new PerformancePreflightResult(120, 60, 60, 1.0, 8, 4096, ProcessingBackend.Disabled, EncoderBackend.Hardware, PerformancePreflightRating.Pass, DateTimeOffset.UtcNow);
+    if (preflight.QualityBackend != ProcessingBackend.Disabled)
+    {
+        Console.WriteLine("SETTINGS_FAIL: preflight cannot carry Disabled");
+        return 77;
+    }
+    if ((preflight with { QualityBackend = ProcessingBackend.Gpu }).QualityBackend != ProcessingBackend.Gpu)
+    {
+        Console.WriteLine("SETTINGS_FAIL: preflight cannot carry Gpu");
+        return 78;
+    }
+    var gpuPreflight = preflight with { QualityBackend = ProcessingBackend.CpuFallback };
+    if (gpuPreflight.QualityBackend != ProcessingBackend.CpuFallback)
+    {
+        Console.WriteLine("SETTINGS_FAIL: preflight cannot carry CpuFallback");
+        return 79;
+    }
+    // JSON round trip must preserve QualityBackend.
+    var preflightRoundTrip = JsonSerializer.Deserialize<PerformancePreflightResult>(JsonSerializer.Serialize(gpuPreflight))!;
+    if (preflightRoundTrip.QualityBackend != ProcessingBackend.CpuFallback ||
+        Math.Abs(preflightRoundTrip.ConsumptionRatio - 1.0) > 1e-9 ||
+        preflightRoundTrip.Rating != PerformancePreflightRating.Pass)
+    {
+        Console.WriteLine("SETTINGS_FAIL: PerformancePreflightResult round trip broken");
+        return 80;
+    }
+
     Console.WriteLine("SETTINGS_OK");
     return 0;
 }
