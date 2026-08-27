@@ -92,7 +92,8 @@ public partial class TasksViewModel : ObservableObject
                     settings.IntermediateTargetBitrate,
                     settings.MotionBlurWeightMode,
                     settings.ShutterAngle,
-                    settings.VideoProcessing?.Clone());
+                    settings.VideoProcessing?.Clone(),
+                    DiskSafetyFreePercent: settings.DiskSafetyFreePercent);
                 _repository.CreateTask(new NewRenderTask(group.Key.MapName, group.Key.PlayerName, group.Key.TrackNumber, output, snapshot, nodes));
                 count++;
             }
@@ -226,7 +227,8 @@ public partial class TasksViewModel : ObservableObject
             _repository.UpdatePendingTaskSettings(SelectedTask.Record.Id, new RenderSettingsSnapshot(
                 s.SupersamplingMultiplier, s.Exposure, s.RamDiskWatchDirectory, s.VideoOutputDirectory,
                 s.GameRootPath!, s.HideHudInCfg, ProjectConstants.FinalOutputFramerate,
-                s.IntermediateTargetBitrate, s.MotionBlurWeightMode, s.ShutterAngle, s.VideoProcessing?.Clone()));
+                s.IntermediateTargetBitrate, s.MotionBlurWeightMode, s.ShutterAngle, s.VideoProcessing?.Clone(),
+                DiskSafetyFreePercent: s.DiskSafetyFreePercent));
             StatusText = "任务设置快照已刷新。"; ReloadTasks();
         }
         catch (Exception ex) { StatusText = ex.Message; }
