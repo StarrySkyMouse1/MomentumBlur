@@ -118,6 +118,114 @@ if (args.Length >= 1 && args[0] == "settings")
         return 18;
     }
 
+    // ---- S1: disk-safety percentage contract ----
+    // 1. Missing field in old JSON and fresh settings both default to 10.
+    if (old.DiskSafetyFreePercent != 10)
+    {
+        Console.WriteLine("SETTINGS_FAIL: old JSON must default DiskSafetyFreePercent to 10");
+        return 60;
+    }
+    if (new UserSettings().DiskSafetyFreePercent != 10)
+    {
+        Console.WriteLine("SETTINGS_FAIL: new UserSettings must default DiskSafetyFreePercent to 10");
+        return 61;
+    }
+    // 2. Below 0 normalizes to 0 (also through the UserSettings migration path).
+    if (DiskSafetyPolicy.NormalizeSafetyPercent(-1) != 0)
+    {
+        Console.WriteLine("SETTINGS_FAIL: -1 must normalize to 0");
+        return 62;
+    }
+    var migratedNegative = new UserSettings { DiskSafetyFreePercent = -1 };
+    SettingsMigration.Normalize(migratedNegative);
+    if (migratedNegative.DiskSafetyFreePercent != 0)
+    {
+        Console.WriteLine("SETTINGS_FAIL: UserSettings migration must normalize -1 to 0");
+        return 63;
+    }
+    // 3. 0 stays 0 and evaluates as Disabled.
+    if (DiskSafetyPolicy.NormalizeSafetyPercent(0) != 0 ||
+        DiskSafetyPolicy.Evaluate(8L * 1024 * 1024 * 1024, 1, 0).State != DiskSafetyState.Disabled)
+    {
+        Console.WriteLine("SETTINGS_FAIL: 0 must stay 0 and produce Disabled");
+        return 64;
+    }
+    // 4/5. 10 and 50 stay unchanged.
+    if (DiskSafetyPolicy.NormalizeSafetyPercent(10) != 10 || DiskSafetyPolicy.NormalizeSafetyPercent(50) != 50)
+    {
+        Console.WriteLine("SETTINGS_FAIL: 10 and 50 must stay unchanged");
+        return 65;
+    }
+    // 6. 51 normalizes to 50.
+    if (DiskSafetyPolicy.NormalizeSafetyPercent(51) != 50)
+    {
+        Console.WriteLine("SETTINGS_FAIL: 51 must normalize to 50");
+        return 66;
+    }
+    // 7/8. Warning lines: 10 -> 15, 50 -> 55.
+    if (DiskSafetyPolicy.CalculateWarningPercent(10) != 15 || DiskSafetyPolicy.CalculateWarningPercent(50) != 55)
+    {
+        Console.WriteLine("SETTINGS_FAIL: warning line must be safety + 5");
+        return 67;
+    }
+    // 9. 98 is first normalized to 50 (snapshot path), warning line 55.
+    var snapshot98 = SettingsMigration.NormalizeSnapshot(new RenderSettingsSnapshot(10, 0.5, "R:\\", "C:\\Videos", "C:\\Game", false, 60, 0, DiskSafetyFreePercent: 98));
+    if (snapshot98.DiskSafetyFreePercent != 50 ||
+        DiskSafetyPolicy.CalculateWarningPercent(snapshot98.DiskSafetyFreePercent) != 55)
+    {
+        Console.WriteLine("SETTINGS_FAIL: 98 must normalize to 50 with a 55% warning line");
+        return 68;
+    }
+    // 10-12. Byte thresholds: 10% of 8 / 16 / 32 GiB.
+    const long gib = 1024L * 1024 * 1024;
+    if (DiskSafetyPolicy.CalculateThresholdBytes(8 * gib, 10) != 858_993_459L ||
+        DiskSafetyPolicy.CalculateThresholdBytes(16 * gib, 10) != 1_717_986_918L ||
+        DiskSafetyPolicy.CalculateThresholdBytes(32 * gib, 10) != 3_435_973_836L)
+    {
+        Console.WriteLine("SETTINGS_FAIL: 10% byte threshold incorrect");
+        return 69;
+    }
+    // 13. Exactly at the safety line is Critical (inclusive <=).
+    if (DiskSafetyPolicy.Evaluate(1000, 100, 10).State != DiskSafetyState.Critical)
+    {
+        Console.WriteLine("SETTINGS_FAIL: exactly at safety line must be Critical");
+        return 70;
+    }
+    // 14. Exactly at the warning line is Warning (inclusive <=).
+    if (DiskSafetyPolicy.Evaluate(1000, 150, 10).State != DiskSafetyState.Warning)
+    {
+        Console.WriteLine("SETTINGS_FAIL: exactly at warning line must be Warning");
+        return 71;
+    }
+    // 15. Above the warning line is Normal.
+    if (DiskSafetyPolicy.Evaluate(1000, 151, 10).State != DiskSafetyState.Normal)
+    {
+        Console.WriteLine("SETTINGS_FAIL: above warning line must be Normal");
+        return 72;
+    }
+    // 16. Invalid total capacity / negative free bytes are Unavailable.
+    if (DiskSafetyPolicy.Evaluate(0, 100, 10).State != DiskSafetyState.Unavailable ||
+        DiskSafetyPolicy.Evaluate(-5, 100, 10).State != DiskSafetyState.Unavailable ||
+        DiskSafetyPolicy.Evaluate(1000, -1, 10).State != DiskSafetyState.Unavailable)
+    {
+        Console.WriteLine("SETTINGS_FAIL: invalid capacity must be Unavailable");
+        return 73;
+    }
+    // Full pure-data snapshot model computed from the same policy.
+    var health = DiskSafetyPolicy.EvaluateSnapshot("R:\\", 16 * gib, 1_717_986_918L, 10, DateTimeOffset.UtcNow);
+    if (health.State != DiskSafetyState.Critical ||
+        health.TotalBytes != 16 * gib ||
+        health.FreeBytes != 1_717_986_918L ||
+        health.UsedBytes != 15_461_882_266L ||
+        health.SafetyBytes != 1_717_986_918L ||
+        health.WarningBytes != 2_576_980_377L ||
+        health.WarningPercent != 15 ||
+        health.SampledAt == default)
+    {
+        Console.WriteLine("SETTINGS_FAIL: disk health snapshot model inconsistent");
+        return 74;
+    }
+
     Console.WriteLine("SETTINGS_OK");
     return 0;
 }
@@ -154,6 +262,11 @@ if (args.Length >= 1 && args[0] == "snapshot")
         Console.WriteLine("SNAPSHOT_FAIL: target bitrate not clamped to the native ceiling");
         return 22;
     }
+    if (normalized.DiskSafetyFreePercent != 10)
+    {
+        Console.WriteLine("SNAPSHOT_FAIL: old snapshot JSON must default DiskSafetyFreePercent to 10");
+        return 24;
+    }
 
     // round trip with new fields
     var full = normalized with
@@ -161,12 +274,14 @@ if (args.Length >= 1 && args[0] == "snapshot")
         MotionBlurMode = MotionBlurWeightMode.ShutterAngle,
         ShutterAngle = 330,
         VideoProcessing = VideoProcessingPresetService.Apply(VideoProcessingPresetIds.BilibiliLowBitrate),
+        DiskSafetyFreePercent = 25,
     };
     var round = JsonSerializer.Deserialize<RenderSettingsSnapshot>(JsonSerializer.Serialize(full))!;
     var roundNormalized = SettingsMigration.NormalizeSnapshot(round);
     if (roundNormalized.MotionBlurMode != MotionBlurWeightMode.ShutterAngle ||
         Math.Abs(roundNormalized.ShutterAngle - 330) > 1e-9 ||
-        !roundNormalized.VideoProcessing!.Modules.Any(m => m.Enabled))
+        !roundNormalized.VideoProcessing!.Modules.Any(m => m.Enabled) ||
+        roundNormalized.DiskSafetyFreePercent != 25)
     {
         Console.WriteLine("SNAPSHOT_FAIL: new snapshot round trip broken");
         return 23;

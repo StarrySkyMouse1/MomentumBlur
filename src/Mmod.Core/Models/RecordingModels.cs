@@ -231,3 +231,87 @@ public sealed record RecordingLogEntry(
     int? GamePid,
     RecordingFailureKind? FailureKind,
     string Message);
+
+// ---- Disk health & performance preflight contracts (S1: pure data only) ----
+
+/// <summary>
+/// Watch-drive free-space safety state derived purely from total/free bytes and
+/// the configured safety percent. Later runtime stages map this to drive
+/// sampling and election of a controlled stop; S1 defines the contract only.
+/// </summary>
+public enum DiskSafetyState
+{
+    Disabled = 0,
+    Normal = 1,
+    Warning = 2,
+    Critical = 3,
+    Unavailable = 4,
+}
+
+/// <summary>Pure disk-safety evaluation result returned by DiskSafetyPolicy.Evaluate.</summary>
+public sealed record DiskSafetyEvaluation(
+    DiskSafetyState State,
+    double FreePercent,
+    int SafetyPercent,
+    long SafetyBytes,
+    int WarningPercent,
+    long WarningBytes);
+
+/// <summary>
+/// Frozen watch-drive health snapshot (pure data). Building it (via
+/// DiskSafetyPolicy.EvaluateSnapshot) performs no drive I/O; sampled values are
+/// supplied by later runtime stages.
+/// </summary>
+public sealed record DiskHealthSnapshot(
+    string DriveRoot,
+    long TotalBytes,
+    long FreeBytes,
+    long UsedBytes,
+    double FreePercent,
+    int SafetyPercent,
+    long SafetyBytes,
+    int WarningPercent,
+    long WarningBytes,
+    DiskSafetyState State,
+    DateTimeOffset SampledAt);
+
+/// <summary>Frame-quality processing backend reported by a performance preflight.</summary>
+public enum ProcessingBackend
+{
+    Unknown = 0,
+    Native = 1,
+    CpuFallback = 2,
+}
+
+/// <summary>Encoder backend reported by a performance preflight.</summary>
+public enum EncoderBackend
+{
+    Unknown = 0,
+    Hardware = 1,
+    Software = 2,
+}
+
+/// <summary>Overall performance-preflight verdict.</summary>
+public enum PerformancePreflightRating
+{
+    Unknown = 0,
+    Pass = 1,
+    Marginal = 2,
+    Fail = 3,
+}
+
+/// <summary>
+/// Reusable performance-preflight result model (pure data). S1 defines the
+/// contract only; no preflight execution is wired into the runtime in this stage.
+/// </summary>
+public sealed record PerformancePreflightResult(
+    double ProducedFramesPerSecond,
+    double ConsumedFramesPerSecond,
+    double OutputFramesPerSecond,
+    double ConsumptionRatio,
+    long PeakPendingFrames,
+    long PeakPendingBytes,
+    ProcessingBackend QualityBackend,
+    EncoderBackend EncoderBackend,
+    PerformancePreflightRating Rating,
+    DateTimeOffset CreatedAt);
