@@ -273,6 +273,10 @@ public partial class SettingsViewModel : ObservableObject
             RamDiskDriveLetter = _settings.RamDiskDriveLetter,
             StartmoviePathPrefix = _settings.StartmoviePathPrefix,
             PendingTgaWarningCount = _settings.PendingTgaWarningCount,
+            // Disk safety percentage has no UI property yet (S7 scope); keep the
+            // loaded value normalized so Persist()/task creation freeze the real
+            // setting instead of falling back to the model default of 10.
+            DiskSafetyFreePercent = DiskSafetyPolicy.NormalizeSafetyPercent(_settings.DiskSafetyFreePercent),
             MotionBlurWeightMode = MotionBlurWeightMode,
             ShutterAngle = SettingsMigration.NormalizeShutterAngle(ShutterAngle),
             IntermediateTargetBitrate = Math.Clamp(IntermediateTargetBitrate, 0, 120_000_000),
