@@ -39,6 +39,11 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
     private int? _lastAcceptedFrameIndex;
     private int _maxObservedFrameIndex = -1;
     private int _sessionFileCount;
+    private long _pendingBytes;
+    private long _producedCount;
+    private long _peakPendingFrames;
+    private long _peakPendingBytes;
+    private bool _hasReadFailure;
 
     public TgaDirectoryWatcher(string directory, string sequencePrefix, int pollIntervalMs = 50)
     {
@@ -59,6 +64,26 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
     public bool HasUnstableFiles => !_candidates.IsEmpty;
     public bool IsFrozen => _frozen;
     public string SequencePrefix => _sequencePrefix;
+
+    /// <summary>Total bytes of the current-session pending files (long; file-length reads are best-effort).</summary>
+    public long PendingBytes => _pendingBytes;
+
+    /// <summary>
+    /// Number of stable frames accepted into pending for the current session.
+    /// A file system event for an index that is already pending is never
+    /// counted again, so duplicate events cannot inflate production.
+    /// </summary>
+    public long ProducedCount => _producedCount;
+
+    public long PeakPendingFrames => _peakPendingFrames;
+    public long PeakPendingBytes => _peakPendingBytes;
+
+    /// <summary>
+    /// True when a pending file disappeared or its length could not be read
+    /// while computing backlog bytes. Telemetry degrades gracefully; it never
+    /// throws into the capture path.
+    /// </summary>
+    public bool HasPendingReadFailure => _hasReadFailure;
 
     private Regex BuildPrefixRegex() => new(
         "^" + Regex.Escape(_sequencePrefix) + @"(\d+)\.tga$",
@@ -181,6 +206,7 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
     {
         if (_pending.TryRemove(frameIndex, out filePath!))
         {
+            OnPendingRemoved();
             PendingChanged?.Invoke();
             return true;
         }
@@ -297,12 +323,16 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
                 // treat as missing
             }
 
+            _hasReadFailure = true; // file vanished; telemetry degrades, capture path unaffected
             if (_pending.TryRemove(index, out _))
                 removed = true;
         }
 
         if (removed)
+        {
+            OnPendingRemoved();
             PendingChanged?.Invoke();
+        }
     }
 
     private void OnFsEvent(object sender, FileSystemEventArgs e)
@@ -390,6 +420,8 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
                     _candidates.TryRemove(index, out _);
                     _lastAcceptedFrameIndex = index;
                     _lastStableFrameUtc = DateTime.UtcNow;
+                    _producedCount++;
+                    OnPendingAdded(candidate.Path);
                     PendingChanged?.Invoke();
                 }
             }
@@ -398,6 +430,60 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
                 // retry next tick
             }
         }
+    }
+
+    /// <summary>Best-effort length of one pending file; never throws.</summary>
+    private static long TryGetFileLength(string path)
+    {
+        try
+        {
+            return new FileInfo(path).Length;
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    private void OnPendingAdded(string path)
+    {
+        var length = TryGetFileLength(path);
+        if (length < 0)
+        {
+            _hasReadFailure = true; // telemetry-only; never breaks the capture path
+            length = 0;
+        }
+
+        _pendingBytes += length;
+        if (_pendingBytes > _peakPendingBytes)
+            _peakPendingBytes = _pendingBytes;
+        var frames = (long)_pending.Count;
+        if (frames > _peakPendingFrames)
+            _peakPendingFrames = frames;
+    }
+
+    /// <summary>Recomputes pending bytes from live file lengths (file-level, long).</summary>
+    private void OnPendingRemoved()
+    {
+        long total = 0;
+        foreach (var path in _pending.Values)
+        {
+            var length = TryGetFileLength(path);
+            if (length < 0)
+            {
+                _hasReadFailure = true;
+                length = 0;
+            }
+
+            total += length;
+        }
+
+        _pendingBytes = total;
+        if (_pendingBytes > _peakPendingBytes)
+            _peakPendingBytes = _pendingBytes;
+        var frames = (long)_pending.Count;
+        if (frames > _peakPendingFrames)
+            _peakPendingFrames = frames;
     }
 
     private void TrackCandidate(int index, string path)

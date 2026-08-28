@@ -591,6 +591,23 @@ if (args.Length >= 1 && args[0] == "native-effects")
         return 50;
     }
 
+    // M3: the versioned backend ABI must report the actual processing path
+    // (Gpu when the GPU pipeline is live, CpuFallback otherwise — never
+    // Unknown/Disabled for enabled effects) and Software encoding, since the
+    // live capture path disables hardware MFTs.
+    var (processing, encoder) = neSession.GetBackends();
+    Console.WriteLine($"BACKENDS processing={processing} encoder={encoder}");
+    if (processing is not ProcessingBackend.Gpu and not ProcessingBackend.CpuFallback)
+    {
+        Console.WriteLine($"NATIVE_EFFECTS_FAIL: unexpected processing backend {processing}");
+        return 53;
+    }
+    if (encoder != EncoderBackend.Software)
+    {
+        Console.WriteLine($"NATIVE_EFFECTS_FAIL: expected Software encoder (hardware MFT disabled), got {encoder}");
+        return 54;
+    }
+
     var neFrame = new byte[neW * neH * 4];
     for (var of = 0; of < neOutputFrames * neBlend; of++)
     {

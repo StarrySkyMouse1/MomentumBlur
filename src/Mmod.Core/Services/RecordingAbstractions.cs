@@ -77,6 +77,12 @@ public interface ICapturePipeline : IAsyncDisposable
     string? CaptureSessionId { get; }
     ITgaCaptureWatcher Watcher { get; }
 
+    /// <summary>
+    /// Immutable runtime capture-performance snapshot (M3). All rates come
+    /// from real counters; never NaN/Infinity.
+    /// </summary>
+    PerformanceSnapshot Performance { get; }
+
     /// <summary>Task that completes when the processing loop exits (faulted on error).</summary>
     Task Completion { get; }
 

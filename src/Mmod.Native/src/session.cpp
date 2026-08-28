@@ -457,6 +457,28 @@ extern "C" MMOD_API int32_t mmod_session_get_processing_status(MmodSession* sess
   return MmodError_Ok;
 }
 
+extern "C" MMOD_API int32_t mmod_session_get_backends(MmodSession* session, int32_t* out_abi_version, int32_t* out_processing, int32_t* out_encoder) {
+  if (!session) return MmodError_InvalidArg;
+  if (out_abi_version) *out_abi_version = MMOD_BACKENDS_ABI_VERSION;
+  if (out_processing) {
+    if (!session->processing_effects_enabled) {
+      *out_processing = MmodProcessing_Disabled;
+    } else if (session->processing_cpu_fallback) {
+      *out_processing = MmodProcessing_CpuFallback;
+    } else if (session->use_gpu && session->gpu) {
+      *out_processing = MmodProcessing_Gpu;
+    } else {
+      *out_processing = MmodProcessing_Unknown;
+    }
+  }
+  if (out_encoder) {
+    /* The live capture path disables hardware MFTs (see ConfigureSinkWriter),
+       so the actual encoding path is the system software H.264 encoder. */
+    *out_encoder = MmodEncoderBackend_Software;
+  }
+  return MmodError_Ok;
+}
+
 extern "C" MMOD_API int32_t mmod_session_get_progress(MmodSession* session, int32_t* out_done, int32_t* out_total) {
   if (!session) return MmodError_InvalidArg;
   if (out_done) *out_done = session->frames_output;
