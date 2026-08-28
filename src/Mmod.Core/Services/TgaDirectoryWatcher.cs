@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text.RegularExpressions;
+using Mmod.Core.Models;
 
 namespace Mmod.Core.Services;
 
@@ -26,6 +27,7 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
     private readonly ConcurrentDictionary<int, CandidateFile> _candidates = new();
     private readonly HashSet<int> _acceptedIndices = [];
     private readonly object _acceptedLock = new();
+    private readonly object _backlogLock = new();
     private readonly object _scanLock = new();
     private FileSystemWatcher? _watcher;
     private Timer? _pollTimer;
@@ -56,7 +58,7 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
 
     public event Action? PendingChanged;
 
-    public int PendingCount => _pending.Count;
+    public int PendingCount => checked((int)GetBacklogSnapshot().PendingFrames);
     public int CandidateCount => _candidates.Count;
     public DateTime? LastPhysicalFileWriteUtc => _lastPhysicalWriteUtc == DateTime.MinValue ? null : _lastPhysicalWriteUtc;
     public DateTime? LastStableFrameUtc => _lastStableFrameUtc == DateTime.MinValue ? null : _lastStableFrameUtc;
@@ -68,7 +70,7 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
     public string SequencePrefix => _sequencePrefix;
 
     /// <summary>Total bytes of the current-session pending files (long; file-length reads are best-effort).</summary>
-    public long PendingBytes => _pendingBytes;
+    public long PendingBytes => GetBacklogSnapshot().PendingBytes;
 
     /// <summary>
     /// Number of stable frames accepted into pending for the current session.
@@ -77,15 +79,25 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
     /// </summary>
     public long ProducedCount => _producedCount;
 
-    public long PeakPendingFrames => _peakPendingFrames;
-    public long PeakPendingBytes => _peakPendingBytes;
+    public long PeakPendingFrames => GetBacklogSnapshot().PeakPendingFrames;
+    public long PeakPendingBytes => GetBacklogSnapshot().PeakPendingBytes;
 
     /// <summary>
     /// True when a pending file disappeared or its length could not be read
     /// while computing backlog bytes. Telemetry degrades gracefully; it never
     /// throws into the capture path.
     /// </summary>
-    public bool HasPendingReadFailure => _hasReadFailure;
+    public bool HasPendingReadFailure => GetBacklogSnapshot().HasReadFailure;
+
+    public WatcherBacklogSnapshot GetBacklogSnapshot()
+    {
+        lock (_backlogLock)
+        {
+            return new WatcherBacklogSnapshot(
+                _pending.Count, _pendingBytes, _peakPendingFrames,
+                _peakPendingBytes, _hasReadFailure);
+        }
+    }
 
     private Regex BuildPrefixRegex() => new(
         "^" + Regex.Escape(_sequencePrefix) + @"(\d+)\.tga$",
@@ -206,9 +218,18 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
 
     public bool TryTake(int frameIndex, out string filePath)
     {
-        if (_pending.TryRemove(frameIndex, out filePath!))
+        var removed = false;
+        lock (_backlogLock)
         {
-            OnPendingRemoved();
+            if (_pending.TryRemove(frameIndex, out filePath!))
+            {
+                OnPendingRemoved();
+                removed = true;
+            }
+        }
+
+        if (removed)
+        {
             PendingChanged?.Invoke();
             return true;
         }
@@ -325,14 +346,19 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
                 // treat as missing
             }
 
-            _hasReadFailure = true; // file vanished; telemetry degrades, capture path unaffected
-            if (_pending.TryRemove(index, out _))
-                removed = true;
+            lock (_backlogLock)
+            {
+                _hasReadFailure = true; // telemetry only
+                if (_pending.TryRemove(index, out _))
+                {
+                    OnPendingRemoved();
+                    removed = true;
+                }
+            }
         }
 
         if (removed)
         {
-            OnPendingRemoved();
             PendingChanged?.Invoke();
         }
     }
@@ -423,13 +449,21 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
                 // Changed / scan event arrives again.
                 if (!TryMarkAccepted(index))
                     continue;
-                if (_pending.TryAdd(index, candidate.Path))
+                var accepted = false;
+                lock (_backlogLock)
+                {
+                    if (_pending.TryAdd(index, candidate.Path))
+                    {
+                        _lastAcceptedFrameIndex = index;
+                        _lastStableFrameUtc = DateTime.UtcNow;
+                        _producedCount++;
+                        OnPendingAdded(candidate.Path);
+                        accepted = true;
+                    }
+                }
+                if (accepted)
                 {
                     _candidates.TryRemove(index, out _);
-                    _lastAcceptedFrameIndex = index;
-                    _lastStableFrameUtc = DateTime.UtcNow;
-                    _producedCount++;
-                    OnPendingAdded(candidate.Path);
                     PendingChanged?.Invoke();
                 }
                 else

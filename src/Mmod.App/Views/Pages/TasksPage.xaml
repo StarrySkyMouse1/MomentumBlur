@@ -22,6 +22,8 @@
                 <Button Content="刷新状态" Command="{Binding ReloadTasksCommand}" Margin="0,0,8,8"/>
                 <Button Content="验证回放" Command="{Binding VerifyReplayCommand}" Margin="16,0,8,8"
                         ToolTip="迷你 Capture Envelope：确认 TGA 可写且回放能产生 VisualActivity"/>
+                <Button Content="性能预检" Command="{Binding RunPerformancePreflightCommand}" Margin="0,0,8,8"
+                        ToolTip="使用选中待执行任务的冻结配置、真实回放和真实处理后端采集 10 秒吞吐窗口"/>
                 <Button Content="开始/继续" Command="{Binding StartQueueCommand}" Margin="0,0,8,8"/>
                 <Button Content="当前节点后暂停" Command="{Binding PauseAfterNodeCommand}" Margin="0,0,8,8"/>
                 <Button Content="立即停止" Command="{Binding StopNowCommand}" Margin="0,0,0,8"/>
@@ -87,7 +89,21 @@
                 </TabItem>
             </TabControl>
         </Grid>
-        <TextBlock Grid.Row="2" Text="{Binding StatusText}" TextWrapping="Wrap" MinHeight="72" MaxHeight="180"
-                   VerticalAlignment="Top"/>
+        <StackPanel Grid.Row="2">
+            <Border BorderBrush="#33000000" BorderThickness="1" CornerRadius="6" Padding="8" Margin="0,0,0,6">
+                <StackPanel>
+                    <TextBlock Text="性能预检" FontWeight="SemiBold"/>
+                    <TextBlock Text="{Binding PreflightText}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                </StackPanel>
+            </Border>
+            <Border BorderBrush="#33000000" BorderThickness="1" CornerRadius="6" Padding="8" Margin="0,0,0,6">
+                <StackPanel>
+                    <TextBlock Text="当前运行状态" FontWeight="SemiBold"/>
+                    <TextBlock Text="{Binding RuntimeText}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                </StackPanel>
+            </Border>
+            <TextBlock Text="{Binding StatusText}" TextWrapping="Wrap" MinHeight="48" MaxHeight="180"
+                       VerticalAlignment="Top"/>
+        </StackPanel>
     </Grid>
 </Page>

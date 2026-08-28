@@ -18,7 +18,8 @@ public sealed record NodeExecutionContext(
     RecordingTimeoutPolicy Timeouts,
     Action<string, string?> Log,
     Action<string>? Phase,
-    Action<RenderNodeRecord>? OnNodeStatusChanged);
+    Action<RenderNodeRecord>? OnNodeStatusChanged,
+    Action<DiskHealthSnapshot?, PerformanceSnapshot>? Telemetry = null);
 
 /// <summary>Node execution failed after retry policy exhaustion.</summary>
 public sealed class NodeExecutionFailedException : Exception
@@ -261,7 +262,8 @@ public sealed class NodeExecutionCoordinator
                 entry => WriteStructuredLog(ctx, entry),
                 token,
                 timeouts,
-                setStage);
+                setStage,
+                ctx.Telemetry);
             _activePipeline = null;
 
             // Media validation: real counters vs output file.
@@ -372,19 +374,25 @@ public sealed class NodeExecutionCoordinator
         }
         catch
         {
-            // In-process failure after the Pending write: clear the Pending
-            // metadata and delete the partial candidate so no dirty terminal
-            // record survives. Failure to clear is logged, never swallowed.
-            try
+            // Preserve the DB pointer until deletion is positively confirmed.
+            // If deletion fails, recovery can still locate and retry this
+            // Pending candidate; never create an untracked orphan partial.
+            var candidateRemoved = TryDeleteConfirmed(partialClip);
+            if (candidateRemoved)
             {
-                ctx.Repository.ClearAttemptPartial(attempt.Id);
+                try
+                {
+                    ctx.Repository.ClearAttemptPartial(attempt.Id);
+                }
+                catch (Exception clearEx)
+                {
+                    ctx.Log("Warning", $"DiskPressure partial Pending 清理失败：{clearEx.Message}");
+                }
             }
-            catch (Exception clearEx)
+            else
             {
-                ctx.Log("Warning", $"DiskPressure partial Pending 清理失败：{clearEx.Message}");
+                ctx.Log("Warning", $"DiskPressure partial 删除未确认，保留 Pending 元数据供崩溃恢复重试：{partialClip}");
             }
-
-            TryDelete(partialClip);
             throw;
         }
     }
@@ -446,6 +454,20 @@ public sealed class NodeExecutionCoordinator
     private static void TryDelete(string path)
     {
         try { if (File.Exists(path)) File.Delete(path); } catch { }
+    }
+
+    private static bool TryDeleteConfirmed(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+            return !File.Exists(path);
+        }
+        catch
+        {
+            return false;
+        }
     }
 }
 

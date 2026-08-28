@@ -23,14 +23,16 @@ public sealed class RenderTaskRunner : IAsyncDisposable
     private MomentumProcessController? _verifyGame;
     public bool IsRunning { get; private set; }
     public bool IsVerifying { get; private set; }
+    public bool IsPreflighting { get; private set; }
     public string Status { get; private set; } = "空闲";
+    public CaptureRuntimeSnapshot RuntimeSnapshot { get; private set; } = CaptureRuntimeSnapshot.Empty;
     public event Action? Changed;
 
     public RenderTaskRunner(RenderTaskRepository repository) { _repository = repository; }
 
     public Task StartAsync()
     {
-        if (IsRunning || IsVerifying) return Task.CompletedTask;
+        if (IsRunning || IsVerifying || IsPreflighting) return Task.CompletedTask;
         _pauseAfterNode = false;
         _cts = new CancellationTokenSource();
         IsRunning = true;
@@ -44,7 +46,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
     /// </summary>
     public async Task VerifyReplayAsync(UserSettings settings, string mapName, string replayFilePath)
     {
-        if (IsRunning || IsVerifying)
+        if (IsRunning || IsVerifying || IsPreflighting)
             throw new InvalidOperationException("已有任务或验证在进行中，请先点「立即停止」。");
 
         _cts = new CancellationTokenSource();
@@ -53,7 +55,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
         Changed?.Invoke();
         try
         {
-            await RunVerifyAsync(settings, mapName, replayFilePath, _cts.Token);
+            await RunDiagnosticCaptureAsync(settings, mapName, replayFilePath, TimeSpan.Zero, _cts.Token);
         }
         finally
         {
@@ -64,10 +66,56 @@ public sealed class RenderTaskRunner : IAsyncDisposable
         }
     }
 
+    public async Task<PerformancePreflightResult> RunPerformancePreflightAsync(string taskId)
+    {
+        if (IsRunning || IsVerifying || IsPreflighting)
+            throw new InvalidOperationException("已有任务、验证或性能预检正在进行。");
+
+        var task = _repository.GetTasks().SingleOrDefault(x => x.Id == taskId)
+            ?? throw new InvalidOperationException("任务不存在。");
+        if (task.Status != RenderTaskStatus.Pending)
+            throw new InvalidOperationException("只有待执行任务可以进行性能预检。");
+        var node = _repository.GetNodes(task.Id)
+            .Where(x => x.Status == RenderNodeStatus.Pending)
+            .OrderBy(x => x.Sequence)
+            .FirstOrDefault() ?? throw new InvalidOperationException("任务没有可预检的待执行节点。");
+        var snapshot = Deserialize(task);
+        Validate(snapshot);
+
+        _cts = new CancellationTokenSource();
+        IsPreflighting = true;
+        Status = "正在进行真实性能预检…";
+        Changed?.Invoke();
+        try
+        {
+            var user = ToUserSettingsForAttempt(snapshot);
+            var diagnostic = await RunDiagnosticCaptureAsync(
+                user, task.MapName, node.ReplayPath, TimeSpan.FromSeconds(10), _cts.Token);
+            var result = PerformancePreflightEvaluator.Evaluate(
+                diagnostic.Performance,
+                hasSufficientWindow: true,
+                diagnostic.HasPendingReadFailure);
+            Status = $"性能预检完成：{result.Rating}，消费比 {result.ConsumptionRatio:P1}";
+            return result;
+        }
+        finally
+        {
+            IsPreflighting = false;
+            _cts?.Dispose();
+            _cts = null;
+            Changed?.Invoke();
+        }
+    }
+
     public void PauseAfterCurrentNode() { _pauseAfterNode = true; Status = "将在当前节点完成后暂停"; Changed?.Invoke(); }
     public void StopImmediately() { Status = "正在立即停止"; _cts?.Cancel(); Changed?.Invoke(); }
 
-    private async Task RunVerifyAsync(UserSettings settings, string mapName, string replayFilePath, CancellationToken token)
+    private async Task<(PerformanceSnapshot Performance, bool HasPendingReadFailure)> RunDiagnosticCaptureAsync(
+        UserSettings settings,
+        string mapName,
+        string replayFilePath,
+        TimeSpan observationWindow,
+        CancellationToken token)
     {
         var logLines = new List<string>();
         void Log(string line)
@@ -135,16 +183,18 @@ public sealed class RenderTaskRunner : IAsyncDisposable
             var session = CaptureSessionInfo.Create("verify", 0, 0);
             await pipeline.StartAsync(verifySettings, tempClip, session, acceptPreSessionFiles: false);
 
-            await CaptureEnvelopeRecorder.VerifyActivityAsync(
+            var performance = await CaptureEnvelopeRecorder.VerifyActivityAsync(
                 _verifyGame.NetCon,
                 pipeline,
                 verifySettings,
                 relative,
                 Log,
-                token);
+                token,
+                observationWindow: observationWindow);
 
             Log("验证成功：回放可被自动拉起（已建立 PlaybackEvidence）。");
             Status = string.Join("\n", logLines.TakeLast(40));
+            return (performance, pipeline.Watcher.GetBacklogSnapshot().HasReadFailure);
         }
         catch (OperationCanceledException)
         {
@@ -289,6 +339,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
         {
             if (game is not null) await game.DisposeAsync();
             IsRunning = false;
+            RuntimeSnapshot = CaptureRuntimeSnapshot.Empty;
             _cts?.Dispose();
             _cts = null;
             Changed?.Invoke();
@@ -409,7 +460,13 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                 }
                 Changed?.Invoke();
             },
-            OnNodeStatusChanged: updated => _repository.UpdateNode(updated));
+            OnNodeStatusChanged: updated => _repository.UpdateNode(updated),
+            Telemetry: (disk, performance) =>
+            {
+                RuntimeSnapshot = new CaptureRuntimeSnapshot(
+                    task.Id, node.Id, disk, performance, DateTimeOffset.UtcNow);
+                Changed?.Invoke();
+            });
 
         try
         {
@@ -595,6 +652,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
         ShutterAngle = settings.ShutterAngle,
         IntermediateTargetBitrate = settings.IntermediateTargetBitrate,
         VideoProcessing = settings.VideoProcessing?.Clone(),
+        DiskSafetyFreePercent = DiskSafetyPolicy.NormalizeSafetyPercent(settings.DiskSafetyFreePercent),
     };
 
     private static RenderSettingsSnapshot Deserialize(RenderTaskRecord task) =>
@@ -644,10 +702,10 @@ public sealed class RenderTaskRunner : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (IsRunning || IsVerifying)
+        if (IsRunning || IsVerifying || IsPreflighting)
         {
             StopImmediately();
-            while (IsRunning || IsVerifying) await Task.Delay(50);
+            while (IsRunning || IsVerifying || IsPreflighting) await Task.Delay(50);
         }
 
         await ShutdownVerifyGameAsync();

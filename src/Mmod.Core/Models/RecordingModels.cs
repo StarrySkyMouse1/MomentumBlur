@@ -388,6 +388,26 @@ public sealed record BacklogSnapshot(
     long PeakPendingFrames,
     long PeakPendingBytes);
 
+/// <summary>One atomic watcher observation; frame and byte counts cannot tear.</summary>
+public sealed record WatcherBacklogSnapshot(
+    long PendingFrames,
+    long PendingBytes,
+    long PeakPendingFrames,
+    long PeakPendingBytes,
+    bool HasReadFailure);
+
+/// <summary>Immutable status projected from the active capture into the UI.</summary>
+public sealed record CaptureRuntimeSnapshot(
+    string? TaskId,
+    string? NodeId,
+    DiskHealthSnapshot? DiskHealth,
+    PerformanceSnapshot Performance,
+    DateTimeOffset SampledAt)
+{
+    public static CaptureRuntimeSnapshot Empty { get; } = new(
+        null, null, null, PerformanceSnapshot.Empty, DateTimeOffset.MinValue);
+}
+
 /// <summary>
 /// Immutable runtime capture-performance snapshot (M3). Every rate comes from
 /// a real counter (stable TGA produced, native submits, native frames_output);

@@ -42,7 +42,8 @@ public static class CaptureEnvelopeRecorder
         Action<RecordingLogEntry>? structuredLog,
         CancellationToken token,
         RecordingTimeoutPolicy? timeouts = null,
-        Action<NodeExecutionStage>? onStage = null)
+        Action<NodeExecutionStage>? onStage = null,
+        Action<DiskHealthSnapshot?, PerformanceSnapshot>? telemetry = null)
     {
         timeouts ??= RecordingTimeoutPolicy.Default;
         var startedAt = DateTime.UtcNow;
@@ -114,6 +115,7 @@ public static class CaptureEnvelopeRecorder
             var consecutiveUnavailableSamples = 0;
             var lastDiskState = (DiskSafetyState?)null;
             DiskHealthSnapshot? pressureSnapshot = null;
+            DiskHealthSnapshot? latestDiskSnapshot = null;
             while (pipeline.FedCount < safeEnd)
             {
                 token.ThrowIfCancellationRequested();
@@ -127,6 +129,7 @@ public static class CaptureEnvelopeRecorder
                     {
                         lastDiskSampleAt = DateTime.UtcNow;
                         var snapshot = health.GetWatchDiskHealth(user.DiskSafetyFreePercent);
+                        latestDiskSnapshot = snapshot;
                         switch (snapshot.State)
                         {
                             case DiskSafetyState.Disabled:
@@ -178,6 +181,7 @@ public static class CaptureEnvelopeRecorder
                 }
 
                 phase?.Invoke($"Recording：{pipeline.FedCount}/{safeEnd}");
+                telemetry?.Invoke(latestDiskSnapshot, pipeline.Performance);
                 await Task.WhenAny(
                     Task.Delay(timeouts.ProgressSampleInterval, token),
                     pipeline.Completion,
@@ -276,7 +280,7 @@ public static class CaptureEnvelopeRecorder
     /// Mini envelope for「验证回放」: CaptureReady → watch → evidence → strict stop
     /// → quiescence. Does not record a full run.
     /// </summary>
-    public static async Task VerifyActivityAsync(
+    public static async Task<PerformanceSnapshot> VerifyActivityAsync(
         INetConClient netCon,
         ICapturePipeline pipeline,
         UserSettings user,
@@ -284,7 +288,8 @@ public static class CaptureEnvelopeRecorder
         Action<string>? phase,
         CancellationToken token,
         RecordingTimeoutPolicy? timeouts = null,
-        Action<NodeExecutionStage>? onStage = null)
+        Action<NodeExecutionStage>? onStage = null,
+        TimeSpan? observationWindow = null)
     {
         timeouts ??= RecordingTimeoutPolicy.Default;
         void Stage(NodeExecutionStage stage) => onStage?.Invoke(stage);
@@ -314,6 +319,20 @@ public static class CaptureEnvelopeRecorder
             await pipeline.WaitUntilActivityAsync(timeouts.PlaybackEvidenceTimeout, token);
             phase?.Invoke($"WaitingReplayActivity：ActivityAnchorFrame={pipeline.ActivityAnchorFrame}");
 
+            var observe = observationWindow.GetValueOrDefault();
+            if (observe > TimeSpan.Zero)
+            {
+                var deadline = DateTime.UtcNow + observe;
+                phase?.Invoke($"PerformancePreflight：采集 {observe.TotalSeconds:0} 秒真实吞吐窗口");
+                while (DateTime.UtcNow < deadline)
+                {
+                    token.ThrowIfCancellationRequested();
+                    ThrowIfFaulted(pipeline);
+                    await Task.WhenAny(Task.Delay(TimeSpan.FromMilliseconds(200), token), pipeline.Completion);
+                    ThrowIfFaulted(pipeline);
+                }
+            }
+
             phase?.Invoke("StoppingCapture");
             Stage(NodeExecutionStage.RequestingMovieStop);
             var stop = await MomentumReplaySession.ExecuteEndMovieAsync(netCon, timeouts, phase, token);
@@ -329,6 +348,7 @@ public static class CaptureEnvelopeRecorder
             Stage(NodeExecutionStage.FinalizingEncoder);
             await pipeline.FinalizeAsync(timeouts, token);
             phase?.Invoke("VerifyingCapture：回放可被自动拉起（已建立 PlaybackEvidence）");
+            return pipeline.Performance;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

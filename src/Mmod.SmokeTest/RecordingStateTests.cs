@@ -29,11 +29,37 @@ public sealed class RecordingStateTests
         await PolicyTests(failures);
         MediaProbeTests(failures);
         TelemetryTests(failures);
+        PreflightTests(failures);
         WatcherTelemetryTests(failures);
         WatcherDedupTests(failures);
         await DiskPressureControlledStopTests(failures);
         await PartialPersistenceTests(failures);
         await PartialCrashRecoveryTests(failures);
+    }
+
+    private static void PreflightTests(List<string> failures)
+    {
+        static PerformanceSnapshot Snapshot(double ratio, BacklogTrend trend,
+            ProcessingBackend quality = ProcessingBackend.Gpu,
+            EncoderBackend encoder = EncoderBackend.Software) => new(
+                100, 100 * ratio, 10, ratio,
+                new BacklogSnapshot(2, 2048, 8, 8192), trend, null,
+                quality, encoder, DateTimeOffset.UtcNow);
+
+        if (PerformancePreflightEvaluator.Evaluate(Snapshot(0.98, BacklogTrend.Stable), true).Rating != PerformancePreflightRating.Pass)
+            failures.Add("M5 preflight ratio == 0.98 must Pass when backlog is stable");
+        if (PerformancePreflightEvaluator.Evaluate(Snapshot(0.90, BacklogTrend.Stable), true).Rating != PerformancePreflightRating.Marginal)
+            failures.Add("M5 preflight ratio == 0.90 must be Marginal");
+        if (PerformancePreflightEvaluator.Evaluate(Snapshot(0.899, BacklogTrend.Stable), true).Rating != PerformancePreflightRating.Fail)
+            failures.Add("M5 preflight ratio below 0.90 must Fail");
+        if (PerformancePreflightEvaluator.Evaluate(Snapshot(1.0, BacklogTrend.Growing), true).Rating != PerformancePreflightRating.Fail)
+            failures.Add("M5 preflight growing backlog must Fail");
+        if (PerformancePreflightEvaluator.Evaluate(Snapshot(1.0, BacklogTrend.Stable), false).Rating != PerformancePreflightRating.Unknown)
+            failures.Add("M5 preflight insufficient window must be Unknown");
+        if (PerformancePreflightEvaluator.Evaluate(Snapshot(1.0, BacklogTrend.Stable, ProcessingBackend.Unknown), true).Rating != PerformancePreflightRating.Unknown)
+            failures.Add("M5 preflight unknown backend must be Unknown");
+        if (PerformancePreflightEvaluator.Evaluate(Snapshot(1.0, BacklogTrend.Stable), true, hasPendingReadFailure: true).Rating != PerformancePreflightRating.Unknown)
+            failures.Add("M5 preflight pending read failure must be Unknown");
     }
 
     // ---- 17.5 / 17.6 / 17.7: visual playback evidence probe ----
@@ -1213,6 +1239,9 @@ public sealed class RecordingStateTests
             watcher.TryTake(2, out _);
             if (watcher.PendingCount != 0 || watcher.PendingBytes != 0)
                 failures.Add($"M3 pending must be empty with 0 bytes after drain, got {watcher.PendingBytes}");
+            var atomic = watcher.GetBacklogSnapshot();
+            if (atomic.PendingFrames != 0 || atomic.PendingBytes != 0 || atomic.PeakPendingFrames < 2 || atomic.PeakPendingBytes <= 0)
+                failures.Add("M5 atomic watcher backlog snapshot did not preserve current/peak facts");
             watcher.Dispose();
 
             // File disappears while pending → read failure flagged, no
@@ -1616,6 +1645,8 @@ internal sealed class FakeWatcher : ITgaCaptureWatcher
     public long ProducedCount { get; set; }
     public long PeakPendingFrames { get; set; }
     public long PeakPendingBytes { get; set; }
+    public WatcherBacklogSnapshot GetBacklogSnapshot() => new(
+        PendingCount, PendingBytes, PeakPendingFrames, PeakPendingBytes, false);
     public bool HasPendingReadFailure { get; set; }
     public bool HasUnstableFiles { get; set; }
     public bool IsFrozen { get; set; }

@@ -30,6 +30,7 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
     private Exception? _fault;
     private PipelineState _state = PipelineState.Created;
     private string? _sessionDiagnostics;
+    private bool _finishSucceeded;
 
     public TgaPipelineOrchestrator(RecordingTimeoutPolicy? timeouts = null)
     {
@@ -59,11 +60,17 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
     /// watcher's stable-frame counter, Consumed from successful native
     /// submits, Output from the native frames_output counter.
     /// </summary>
-    public PerformanceSnapshot Performance => _performanceTracker.BuildSnapshot(
-        _processingBackend,
-        _encoderBackend,
-        _watcher?.PendingCount ?? 0,
-        _watcher?.PendingBytes ?? 0);
+    public PerformanceSnapshot Performance
+    {
+        get
+        {
+            var backlog = _watcher?.GetBacklogSnapshot()
+                ?? new WatcherBacklogSnapshot(0, 0, 0, 0, false);
+            return _performanceTracker.BuildSnapshot(
+                _processingBackend, _encoderBackend,
+                backlog.PendingFrames, backlog.PendingBytes);
+        }
+    }
 
     public ITgaCaptureWatcher Watcher => _watcher ?? throw new InvalidOperationException("Watcher 尚未启动。");
     public string? CaptureSessionId { get; private set; }
@@ -123,6 +130,7 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
         _outputFrames = 0;
         _processingBackend = ProcessingBackend.Unknown;
         _encoderBackend = EncoderBackend.Unknown;
+        _finishSucceeded = false;
         _performanceTracker.Reset();
         HasVisualChange = false;
         ActivityAnchorFrame = null;
@@ -259,6 +267,7 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
         _state = PipelineState.Finalizing;
         var progress = _session.GetProgress();
         _session.Finish(); // P0-06: Finish fault must propagate
+        _finishSucceeded = true;
 
         _outputFrames = progress.Done; // real native frames_output, never submitted/N
         SamplePerformance();
@@ -392,12 +401,14 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
     /// </summary>
     private void SamplePerformance()
     {
+        var backlog = _watcher?.GetBacklogSnapshot()
+            ?? new WatcherBacklogSnapshot(0, 0, 0, 0, false);
         _performanceTracker.AddSample(new CapturePerformanceTracker.Sample(
             Produced: _watcher?.ProducedCount ?? 0,
             Consumed: _submittedInputFrames,
             Output: _outputFrames,
-            PendingFrames: _watcher?.PendingCount ?? 0,
-            PendingBytes: _watcher?.PendingBytes ?? 0));
+            PendingFrames: backlog.PendingFrames,
+            PendingBytes: backlog.PendingBytes));
     }
 
     private void TrackPlaybackEvidence(ReadOnlySpan<byte> bgra, int width, int height)
@@ -430,7 +441,8 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
 
         try
         {
-            _session?.Finish();
+            if (!_finishSucceeded)
+                _session?.Finish();
         }
         catch
         {
