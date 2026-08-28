@@ -105,9 +105,14 @@ public static class CaptureEnvelopeRecorder
 
             // 6. Capturing loop: race user cancellation / pipeline fault / game exit /
             //    expected progress / stage timeout. A static frame only lowers
-            //    confidence — it is never treated as replay-finished.
+            //    confidence — it is never treated as replay-finished. Disk health
+            //    is sampled once immediately, then at most once per
+            //    DiskHealthSampleInterval (time-throttled, never per frame).
             var lastFed = pipeline.FedCount;
             var lastFedAt = DateTime.UtcNow;
+            var lastDiskSampleAt = DateTime.MinValue;
+            var consecutiveUnavailableSamples = 0;
+            var lastDiskState = (DiskSafetyState?)null;
             while (pipeline.FedCount < safeEnd)
             {
                 token.ThrowIfCancellationRequested();
@@ -117,10 +122,42 @@ public static class CaptureEnvelopeRecorder
                 {
                     if (health.GameExitedTask.IsCompleted)
                         throw new GameExitedException("录制中游戏进程退出。");
-                    var free = health.WatchDriveFreeBytes;
-                    if (free is not null && free.Value < timeouts.DiskPressureMinFreeBytes)
-                        throw new DiskPressureException(
-                            $"磁盘可用空间不足：{free.Value / 1024d / 1024d / 1024d:0.0} GiB（安全下限 {timeouts.DiskPressureMinFreeBytes / 1024d / 1024d / 1024d:0.0} GiB）。");
+                    if (DateTime.UtcNow - lastDiskSampleAt >= timeouts.DiskHealthSampleInterval)
+                    {
+                        lastDiskSampleAt = DateTime.UtcNow;
+                        var snapshot = health.GetWatchDiskHealth(user.DiskSafetyFreePercent);
+                        switch (snapshot.State)
+                        {
+                            case DiskSafetyState.Disabled:
+                                consecutiveUnavailableSamples = 0;
+                                lastDiskState = null;
+                                break;
+                            case DiskSafetyState.Normal:
+                            case DiskSafetyState.Warning:
+                                if (lastDiskState != snapshot.State)
+                                {
+                                    lastDiskState = snapshot.State;
+                                    if (snapshot.State == DiskSafetyState.Warning)
+                                        phase?.Invoke($"磁盘警告：监视盘 {FormatDriveRoot(snapshot.DriveRoot)} 剩余 {snapshot.FreePercent:0.0}%（警告线 {snapshot.WarningPercent}%）");
+                                }
+                                consecutiveUnavailableSamples = 0;
+                                break;
+                            case DiskSafetyState.Critical:
+                                throw new DiskPressureException(
+                                    $"监视盘 {FormatDriveRoot(snapshot.DriveRoot)} 剩余 {snapshot.FreePercent:0.0}% / {ToGiB(snapshot.FreeBytes):0.0} GiB，已达到安全下限 {snapshot.SafetyPercent}% / {ToGiB(snapshot.SafetyBytes):0.0} GiB。",
+                                    snapshot);
+                            case DiskSafetyState.Unavailable:
+                                consecutiveUnavailableSamples++;
+                                if (consecutiveUnavailableSamples >= timeouts.DiskHealthUnavailableMaxConsecutiveSamples)
+                                {
+                                    throw new DiskHealthUnavailableException(
+                                        $"监视盘 {FormatDriveRoot(snapshot.DriveRoot)} 健康采样连续 {consecutiveUnavailableSamples} 次不可用，无法确认磁盘空间安全。",
+                                        snapshot);
+                                }
+                                phase?.Invoke($"磁盘采样不可用（{consecutiveUnavailableSamples}/{timeouts.DiskHealthUnavailableMaxConsecutiveSamples}）：{FormatDriveRoot(snapshot.DriveRoot)}");
+                                break;
+                        }
+                    }
                 }
 
                 if (pipeline.FedCount != lastFed)
@@ -251,4 +288,9 @@ public static class CaptureEnvelopeRecorder
         if (pipeline.IsFaulted)
             throw new PipelineFaultException(pipeline.Fault?.Message ?? "pipeline fault", pipeline.Fault ?? new Exception("unknown"));
     }
+
+    private static double ToGiB(long bytes) => bytes / 1024d / 1024d / 1024d;
+
+    private static string FormatDriveRoot(string driveRoot) =>
+        string.IsNullOrWhiteSpace(driveRoot) ? "(未知)" : driveRoot;
 }
