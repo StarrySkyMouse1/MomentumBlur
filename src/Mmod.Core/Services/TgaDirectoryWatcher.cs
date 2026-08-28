@@ -24,6 +24,8 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
     private readonly int _pollIntervalMs;
     private readonly ConcurrentDictionary<int, string> _pending = new();
     private readonly ConcurrentDictionary<int, CandidateFile> _candidates = new();
+    private readonly HashSet<int> _acceptedIndices = [];
+    private readonly object _acceptedLock = new();
     private readonly object _scanLock = new();
     private FileSystemWatcher? _watcher;
     private Timer? _pollTimer;
@@ -370,7 +372,7 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
         {
             if (_frozen)
                 break;
-            if (_pending.ContainsKey(index))
+            if (_pending.ContainsKey(index) || WasAccepted(index))
             {
                 _candidates.TryRemove(index, out _);
                 continue;
@@ -415,6 +417,12 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
                     continue;
                 if (!IsValidTgaFile(candidate.Path))
                     continue;
+                // Permanent session-level dedup: an index accepted once as a
+                // stable frame can never be re-accepted or re-counted, even if
+                // its file was taken, still exists briefly, or a Created /
+                // Changed / scan event arrives again.
+                if (!TryMarkAccepted(index))
+                    continue;
                 if (_pending.TryAdd(index, candidate.Path))
                 {
                     _candidates.TryRemove(index, out _);
@@ -424,11 +432,38 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
                     OnPendingAdded(candidate.Path);
                     PendingChanged?.Invoke();
                 }
+                else
+                {
+                    // _pending won the race (e.g. the same index arrived from
+                    // another path); the index stays permanently accepted.
+                    _candidates.TryRemove(index, out _);
+                }
             }
             catch
             {
                 // retry next tick
             }
+        }
+    }
+
+    /// <summary>True when the frame index was already accepted this session.</summary>
+    private bool WasAccepted(int index)
+    {
+        lock (_acceptedLock)
+        {
+            return _acceptedIndices.Contains(index);
+        }
+    }
+
+    /// <summary>
+    /// Atomically marks the index as accepted. Returns false when another
+    /// thread already accepted it (permanent dedup).
+    /// </summary>
+    private bool TryMarkAccepted(int index)
+    {
+        lock (_acceptedLock)
+        {
+            return _acceptedIndices.Add(index);
         }
     }
 
@@ -490,7 +525,7 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
     {
         if (_frozen)
             return;
-        if (_pending.ContainsKey(index))
+        if (_pending.ContainsKey(index) || WasAccepted(index))
             return;
         if (!ShouldTrackFile(path))
             return;

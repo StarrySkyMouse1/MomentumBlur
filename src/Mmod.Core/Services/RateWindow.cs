@@ -9,9 +9,14 @@ namespace Mmod.Core.Services;
 /// an empty window (no rate yet), a zero elapsed interval (no rate), and
 /// counter resets (a later sample with a smaller counter than the earliest
 /// kept sample — rate falls back to 0 instead of going negative).
+///
+/// Thread safety: every public member is guarded by an internal lock; the
+/// lock is only ever held for in-memory list/field operations, never for
+/// disk, native, UI, database or any long-running work.
 /// </summary>
 public sealed class RateWindow
 {
+    private readonly object _gate = new();
     private readonly long _windowTicks;
     private readonly double _ticksPerSecond;
     private readonly List<(long Ticks, double Value)> _samples = [];
@@ -25,20 +30,29 @@ public sealed class RateWindow
     }
 
     /// <summary>Records a cumulative counter observation at the current time.</summary>
-    public void AddSample(double cumulativeValue)
+    public void AddSample(double cumulativeValue) => AddSample(Stopwatch.GetTimestamp(), cumulativeValue);
+
+    /// <summary>
+    /// Records a cumulative counter observation with an explicit monotonic
+    /// timestamp (same unit as <see cref="Stopwatch.GetTimestamp"/>). Test
+    /// code can drive the window deterministically without sleeping; the
+    /// default overload keeps using Stopwatch for production callers.
+    /// </summary>
+    public void AddSample(long monotonicTicks, double cumulativeValue)
     {
-        var now = Stopwatch.GetTimestamp();
+        lock (_gate)
+        {
+            // Counter reset (e.g. new session): drop everything older than the
+            // reset so the rate never goes negative.
+            if (_samples.Count > 0 && _samples[^1].Value > cumulativeValue)
+                _samples.Clear();
 
-        // Counter reset (e.g. new session): drop everything older than the
-        // reset so the rate never goes negative.
-        if (_samples.Count > 0 && _samples[^1].Value > cumulativeValue)
-            _samples.Clear();
+            _samples.Add((monotonicTicks, cumulativeValue));
 
-        _samples.Add((now, cumulativeValue));
-
-        // Expire samples older than the window (keep at least the newest).
-        while (_samples.Count > 1 && now - _samples[0].Ticks > _windowTicks)
-            _samples.RemoveAt(0);
+            // Expire samples older than the window (keep at least the newest).
+            while (_samples.Count > 1 && monotonicTicks - _samples[0].Ticks > _windowTicks)
+                _samples.RemoveAt(0);
+        }
     }
 
     /// <summary>
@@ -49,31 +63,46 @@ public sealed class RateWindow
     /// </summary>
     public double? GetRatePerSecond()
     {
-        if (_samples.Count == 0)
-            return null;
+        lock (_gate)
+        {
+            if (_samples.Count == 0)
+                return null;
 
-        var first = _samples[0];
-        var last = _samples[^1];
-        var elapsedTicks = last.Ticks - first.Ticks;
-        if (elapsedTicks <= 0)
-            return null;
+            var first = _samples[0];
+            var last = _samples[^1];
+            var elapsedTicks = last.Ticks - first.Ticks;
+            if (elapsedTicks <= 0)
+                return null;
 
-        var delta = last.Value - first.Value;
-        if (delta < 0)
-            return null;
-        if (delta == 0)
-            return 0;
+            var delta = last.Value - first.Value;
+            if (delta < 0)
+                return null;
+            if (delta == 0)
+                return 0;
 
-        var rate = delta * _ticksPerSecond / elapsedTicks;
-        return double.IsFinite(rate) ? rate : null;
+            var rate = delta * _ticksPerSecond / elapsedTicks;
+            return double.IsFinite(rate) ? rate : null;
+        }
     }
 
     /// <summary>Number of observations currently in the window.</summary>
-    public int SampleCount => _samples.Count;
+    public int SampleCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _samples.Count;
+            }
+        }
+    }
 
     /// <summary>Resets all state (new session).</summary>
     public void Reset()
     {
-        _samples.Clear();
+        lock (_gate)
+        {
+            _samples.Clear();
+        }
     }
 }
