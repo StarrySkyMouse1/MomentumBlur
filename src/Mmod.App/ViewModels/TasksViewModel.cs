@@ -4,6 +4,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Mmod.Core.Models;
 using Mmod.Core.Services;
+using System.Windows.Threading;
 
 namespace Mmod.App.ViewModels;
 
@@ -13,6 +14,9 @@ public partial class TasksViewModel : ObservableObject
     private readonly ReplayCatalogService _catalog = new();
     private readonly RenderTaskRepository _repository = new();
     private readonly RenderTaskRunner _runner;
+    private readonly DispatcherTimer _runnerUiTimer;
+    private readonly Dictionary<string, PerformancePreflightResult> _preflightByTask = [];
+    private int _runnerUiTicks;
 
     public ObservableCollection<ReplayTreeNode> Catalog { get; } = [];
     public ObservableCollection<TaskListItem> Queue { get; } = [];
@@ -20,11 +24,19 @@ public partial class TasksViewModel : ObservableObject
     [ObservableProperty] private string statusText = "请刷新回放记录并勾选需要执行的记录。";
     [ObservableProperty] private TaskListItem? selectedTask;
     [ObservableProperty] private string selectedTaskDetail = "选择任务后查看节点和日志。";
+    [ObservableProperty] private string preflightText = "尚未对任务执行性能预检。";
+    [ObservableProperty] private string runtimeText = "当前没有正在录制的节点。";
 
     public TasksViewModel(SettingsViewModel settings)
     {
         _settings = settings; _runner = new RenderTaskRunner(_repository);
-        _runner.Changed += () => System.Windows.Application.Current.Dispatcher.BeginInvoke(() => { StatusText = _runner.Status; ReloadTasks(); });
+        _runnerUiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        _runnerUiTimer.Tick += (_, _) => UpdateRunnerProjection();
+        _runner.Changed += () => System.Windows.Application.Current.Dispatcher.BeginInvoke(() =>
+        {
+            if (!_runnerUiTimer.IsEnabled)
+                _runnerUiTimer.Start();
+        });
         ReloadTasks();
     }
 
@@ -105,15 +117,60 @@ public partial class TasksViewModel : ObservableObject
 
     [RelayCommand] private void ReloadTasks()
     {
+        var selectedId = SelectedTask?.Record.Id;
         Queue.Clear(); History.Clear();
         foreach (var task in _repository.GetTasks())
         {
             var item = new TaskListItem(task, _repository.GetNodes(task.Id).Count);
             if (task.Status is RenderTaskStatus.Completed or RenderTaskStatus.Canceled or RenderTaskStatus.ClipsReadyNeedsManualMerge) History.Add(item); else Queue.Add(item);
         }
+        if (selectedId is not null)
+            SelectedTask = Queue.Concat(History).FirstOrDefault(x => x.Record.Id == selectedId);
     }
 
-    [RelayCommand] private async Task StartQueue() { await _runner.StartAsync(); StatusText = _runner.Status; }
+    [RelayCommand]
+    private async Task StartQueue()
+    {
+        var first = Queue.FirstOrDefault(x => x.Record.Status is RenderTaskStatus.Pending or RenderTaskStatus.Paused or RenderTaskStatus.FailedNeedsAttention);
+        if (first is not null && (!_preflightByTask.TryGetValue(first.Record.Id, out var preflight)
+            || preflight.Rating is PerformancePreflightRating.Unknown or PerformancePreflightRating.Fail or PerformancePreflightRating.Marginal))
+        {
+            var state = preflight?.Rating.ToString() ?? "未预检";
+            var answer = System.Windows.MessageBox.Show(
+                $"首个任务的性能预检状态为「{state}」。\n继续执行不会自动降低 N、画质处理或码率，可能产生持续积压。\n\n仍要开始队列吗？",
+                "性能预检确认",
+                System.Windows.MessageBoxButton.YesNo,
+                System.Windows.MessageBoxImage.Warning);
+            if (answer != System.Windows.MessageBoxResult.Yes)
+            {
+                StatusText = "已取消启动；可以先选中任务并执行性能预检。";
+                return;
+            }
+        }
+        await _runner.StartAsync();
+        StatusText = _runner.Status;
+    }
+
+    [RelayCommand]
+    private async Task RunPerformancePreflight()
+    {
+        try
+        {
+            if (SelectedTask?.Record.Status != RenderTaskStatus.Pending)
+                throw new InvalidOperationException("请先选择一个待执行任务。");
+            var taskId = SelectedTask.Record.Id;
+            PreflightText = "正在用任务冻结配置执行真实性能预检…";
+            var result = await _runner.RunPerformancePreflightAsync(taskId);
+            _preflightByTask[taskId] = result;
+            PreflightText = FormatPreflight(result);
+            StatusText = $"性能预检完成：{result.Rating}";
+        }
+        catch (Exception ex)
+        {
+            PreflightText = "性能预检未完成：" + ex.Message;
+            StatusText = ex.Message;
+        }
+    }
     [RelayCommand] private void PauseAfterNode() => _runner.PauseAfterCurrentNode();
     [RelayCommand] private void StopNow() => _runner.StopImmediately();
 
@@ -122,7 +179,7 @@ public partial class TasksViewModel : ObservableObject
     {
         try
         {
-            if (_runner.IsRunning || _runner.IsVerifying)
+            if (_runner.IsRunning || _runner.IsVerifying || _runner.IsPreflighting)
             {
                 StatusText = "已有任务或验证在进行中，请先点「立即停止」。";
                 return;
@@ -192,7 +249,10 @@ public partial class TasksViewModel : ObservableObject
 
     partial void OnSelectedTaskChanged(TaskListItem? value)
     {
-        if (value is null) { SelectedTaskDetail = "选择任务后查看节点和日志。"; return; }
+        if (value is null) { SelectedTaskDetail = "选择任务后查看节点和日志。"; PreflightText = "尚未对任务执行性能预检。"; return; }
+        PreflightText = _preflightByTask.TryGetValue(value.Record.Id, out var preflight)
+            ? FormatPreflight(preflight)
+            : "尚未对这个任务执行性能预检。";
         var nodes = _repository.GetNodes(value.Record.Id).Select(x => $"节点 {x.Sequence + 1} / 阶段 {x.StageNumber}：{x.Status}，重试 {x.RetryCount}/2\n{x.ReplayPath}");
         var logs = _repository.GetLogs(value.Record.Id).TakeLast(30).Select(x => $"{x.Timestamp.LocalDateTime:MM-dd HH:mm:ss} [{x.Level}] {x.Message}");
 
@@ -258,6 +318,38 @@ public partial class TasksViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(s.RamDiskWatchDirectory) || !Directory.Exists(s.RamDiskWatchDirectory)) throw new InvalidOperationException("TGA 监视目录未配置或不存在。");
         if (string.IsNullOrWhiteSpace(s.VideoOutputDirectory)) throw new InvalidOperationException("请配置成片输出目录。");
         Directory.CreateDirectory(s.VideoOutputDirectory);
+    }
+
+    private void UpdateRunnerProjection()
+    {
+        StatusText = _runner.Status;
+        RuntimeText = FormatRuntime(_runner.RuntimeSnapshot);
+        if (++_runnerUiTicks % 4 == 0 && !_runner.IsRunning)
+            ReloadTasks();
+        if (!_runner.IsRunning && !_runner.IsVerifying && !_runner.IsPreflighting)
+        {
+            ReloadTasks();
+            _runnerUiTimer.Stop();
+        }
+    }
+
+    private static string FormatPreflight(PerformancePreflightResult r) =>
+        $"结论：{r.Rating}\n" +
+        $"生产 {r.ProducedFramesPerSecond:0.0} fps · 消费 {r.ConsumedFramesPerSecond:0.0} fps · 输出 {r.OutputFramesPerSecond:0.0} fps · 消费比 {r.ConsumptionRatio:P1}\n" +
+        $"峰值积压 {r.PeakPendingFrames} 帧 / {r.PeakPendingBytes / 1024d / 1024d:0.0} MiB · 画质后端 {r.QualityBackend} · 编码后端 {r.EncoderBackend}\n" +
+        "预检只诊断真实性能，不会自动降低 N、画质处理或码率。";
+
+    private static string FormatRuntime(CaptureRuntimeSnapshot snapshot)
+    {
+        if (snapshot.SampledAt == DateTimeOffset.MinValue)
+            return "当前没有正在录制的节点。";
+        var p = snapshot.Performance;
+        var disk = snapshot.DiskHealth;
+        var diskText = disk is null
+            ? "监视盘：等待采样"
+            : $"监视盘 {disk.DriveRoot}：{disk.FreePercent:0.0}% / {disk.FreeBytes / 1024d / 1024d / 1024d:0.0} GiB（安全线 {disk.SafetyPercent}% · 预警线 {disk.WarningPercent}% · {disk.State}）";
+        var catchUp = p.CatchUpSeconds is { } seconds ? $"{TimeSpan.FromSeconds(seconds):hh\\:mm\\:ss}" : "不可计算";
+        return $"{diskText}\n积压 {p.Backlog.PendingFrames} 帧 / {p.Backlog.PendingBytes / 1024d / 1024d:0.0} MiB · 趋势 {p.BacklogTrend} · 追赶时间 {catchUp}（不是整项任务 ETA）\n画质后端 {p.QualityBackend} · 编码后端 {p.EncoderBackend}";
     }
 }
 

@@ -100,3 +100,18 @@ dotnet SmokeTest settings/snapshot/weights/processing/repository/recording   →
 dotnet SmokeTest（默认 + native-effects）                                    → OK（Native GPU 管线含画质效果正常）
 mmod_record_next.exe 启动冒烟（8s 无崩溃）                                   → OK
 ```
+
+## 9. 磁盘百分比安全与性能诊断（M3–M5）
+
+- `DiskSafetyFreePercent` 已由设置保存、任务快照冻结并用于运行时监视盘判断；0 关闭保护，
+  1–50 为安全下限，预警线为安全线 +5%。
+- Critical 走严格受控停止并以独立 partial 生命周期保存已证明输出；Pending 文件意图先于原子移动，
+  删除未确认时保留数据库指针供崩溃恢复继续处理。
+- TGA watcher、Native submit 和 Native frames_output 提供真实 Produced/Consumed/Output 计数；积压
+  帧数和字节数以同一锁内不可变快照读取。
+- 性能预检使用 Pending 任务的冻结配置和真实回放运行独立诊断 CaptureSession，建立播放证据后采集
+  10 秒滚动窗口，输出 Pass/Marginal/Fail/Unknown；不创建正式 Attempt，也不自动降级配置。
+- 设置页提供 0–50% 磁盘安全配置；任务页提供性能预检与运行遥测。UI 合并到最高 4 Hz，任务列表
+  最多每秒刷新一次，避免高频事件反向影响捕获管线。
+- Fake/SmokeTest 覆盖百分比边界、预检 0.90/0.98 边界、吞吐窗口、并发与去重、受控 partial、
+  崩溃恢复和既有 recording/repository 回归。真实 Momentum 预检、长任务 soak 和故障注入仍需实机执行。

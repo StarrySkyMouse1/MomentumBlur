@@ -43,6 +43,7 @@ public interface ITgaCaptureWatcher : IDisposable
     bool HasUnstableFiles { get; }
     bool IsFrozen { get; }
     string SequencePrefix { get; }
+    WatcherBacklogSnapshot GetBacklogSnapshot();
 
     /// <summary>Full directory scan for the current prefix.</summary>
     void ForceFullScan();

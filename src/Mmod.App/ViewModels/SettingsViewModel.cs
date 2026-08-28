@@ -39,6 +39,8 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string junctionState = string.Empty;
     [ObservableProperty] private string cfgCommandBlock = string.Empty;
     [ObservableProperty] private string cfgRestoreCommandBlock = string.Empty;
+    [ObservableProperty] private int diskSafetyFreePercent = 10;
+    [ObservableProperty] private string diskSafetySummary = string.Empty;
 
     // ---- Quality pipeline ----
     [ObservableProperty] private MotionBlurWeightMode motionBlurWeightMode;
@@ -81,6 +83,18 @@ public partial class SettingsViewModel : ObservableObject
     partial void OnEndMovieHotkeyChanged(string value) => Persist();
     partial void OnHideHudInCfgChanged(bool value) => Persist();
     partial void OnMaxParallelJobsChanged(int value) => Persist();
+
+    partial void OnDiskSafetyFreePercentChanged(int value)
+    {
+        var normalized = DiskSafetyPolicy.NormalizeSafetyPercent(value);
+        if (normalized != value)
+        {
+            DiskSafetyFreePercent = normalized;
+            return;
+        }
+        RefreshDiskSafetySummary();
+        Persist();
+    }
 
     partial void OnExposureChanged(double value)
     {
@@ -151,6 +165,7 @@ public partial class SettingsViewModel : ObservableObject
             EndMovieHotkey = s.EndMovieHotkey;
             HideHudInCfg = s.HideHudInCfg;
             MaxParallelJobs = Math.Max(1, s.MaxParallelJobs);
+            DiskSafetyFreePercent = DiskSafetyPolicy.NormalizeSafetyPercent(s.DiskSafetyFreePercent);
 
             MotionBlurWeightMode = s.MotionBlurWeightMode;
             ShutterAngle = SettingsMigration.NormalizeShutterAngle(s.ShutterAngle);
@@ -164,6 +179,7 @@ public partial class SettingsViewModel : ObservableObject
 
         RebuildQualityModules(s.VideoProcessing);
         RefreshDaVinciGuide();
+        RefreshDiskSafetySummary();
         RefreshDerived();
     }
 
@@ -273,10 +289,7 @@ public partial class SettingsViewModel : ObservableObject
             RamDiskDriveLetter = _settings.RamDiskDriveLetter,
             StartmoviePathPrefix = _settings.StartmoviePathPrefix,
             PendingTgaWarningCount = _settings.PendingTgaWarningCount,
-            // Disk safety percentage has no UI property yet (S7 scope); keep the
-            // loaded value normalized so Persist()/task creation freeze the real
-            // setting instead of falling back to the model default of 10.
-            DiskSafetyFreePercent = DiskSafetyPolicy.NormalizeSafetyPercent(_settings.DiskSafetyFreePercent),
+            DiskSafetyFreePercent = DiskSafetyPolicy.NormalizeSafetyPercent(DiskSafetyFreePercent),
             MotionBlurWeightMode = MotionBlurWeightMode,
             ShutterAngle = SettingsMigration.NormalizeShutterAngle(ShutterAngle),
             IntermediateTargetBitrate = Math.Clamp(IntermediateTargetBitrate, 0, 120_000_000),
@@ -295,6 +308,14 @@ public partial class SettingsViewModel : ObservableObject
         _settings = Snapshot();
         _store.Save(_settings);
         RefreshDerived();
+    }
+
+    private void RefreshDiskSafetySummary()
+    {
+        var safety = DiskSafetyPolicy.NormalizeSafetyPercent(DiskSafetyFreePercent);
+        DiskSafetySummary = safety == 0
+            ? "磁盘空间保护已关闭（不推荐用于无人值守任务）。"
+            : $"安全下限 {safety}%；预警线 {DiskSafetyPolicy.CalculateWarningPercent(safety)}%。达到安全下限时受控停止并保留已验证 partial。";
     }
 
     public void RefreshDerived()

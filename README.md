@@ -32,6 +32,8 @@ dotnet run --project src\Mmod.App\Mmod.App.csproj -c Release
 | 画质处理 | Motion-Adaptive Detail / Micro Detail Low-Pass / Deband (No Dither) / Temporal Shimmer，全部可独立勾选 |
 | Motion Blur | Legacy Gaussian Exposure（默认，保持旧行为）+ Shutter Angle 180°~360°（推荐） |
 | 中间母版码率 | 可设置 TargetBitrate 真正传给 MF 编码器（0 = 自动） |
+| 磁盘安全 | 监视盘安全下限按 0–50% 配置；预警线为安全线 +5%；Critical 受控收尾并保留已验证 partial |
+| 性能预检 | 对待执行任务使用冻结配置和真实回放采集 10 秒吞吐窗口，显示消费比、积压与真实后端 |
 | DaVinci 指引 | 设置页可勾选并一键复制 DaVinci 4K AI 后处理步骤 |
 
 冒烟：`dotnet run --project src\Mmod.SmokeTest\Mmod.SmokeTest.csproj -c Release`
@@ -120,6 +122,10 @@ AB 对比重点：高速 ramp 边缘、高频贴图 / 远处细线 shimmer、HUD
   应用启动时先身份校验（防 PID reuse）再停止遗留进程、按前缀清理 TGA、丢弃 partial clip、节点回 Pending。
 - **健康监控**：录制循环竞争 用户取消 / pipeline fault / 游戏进程退出 / 进度超时；游戏退出秒级失败；
   磁盘空间低于安全下限进入受控停止（DiskPressure）。
+- **运行诊断**：任务页以最高 4 Hz 显示监视盘百分比/GiB、安全线/预警线、吞吐、积压趋势、
+  追赶时间和真实处理/编码后端；追赶时间仅表示清空当前积压所需时间，不是整项任务 ETA。
+- **真实性能预检**：选中 Pending 任务后，以该任务持久化快照和首个 Pending 节点启动独立诊断
+  CaptureSession；诊断输出不会进入 Attempt、ClipPath、partial 或合并输入，也不会自动降低配置。
 
 自动化测试（无需真实游戏）：`dotnet run --project src\Mmod.SmokeTest\Mmod.SmokeTest.csproj -c Release recording`
 覆盖 happy path、HUD-only 不触发、场景运动连续触发、单帧噪点不触发、pipeline fault、finish fault、

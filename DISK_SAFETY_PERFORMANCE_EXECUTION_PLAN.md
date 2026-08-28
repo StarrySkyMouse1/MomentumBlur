@@ -141,7 +141,7 @@ Capturing
   -> freeze and drain
   -> Native Finish
   -> media validation
-  -> PartialValidated
+  -> ControlledStopFinalized
   -> node FailedNeedsAttention / Paused
 ```
 
@@ -314,15 +314,14 @@ Unverified，不得以 Fake 代替实机结论。
 
 ## 9. 当前授权入口与 Closeout Ledger
 
-当前下一动作是执行 **M5-A：Core 预检与可靠性收口**，引用本计划 §6.2；M5-B、Final Closeout
-尚未授权。M5-A 通过或安全携带非阻塞 Ledger 后执行 M5-B；M5-B 后直接进入一次集中 Final
-Closeout/独立验收，不再预设 Repair 轮。
+M5-A、M5-B 与 Final Closeout 已由 Codex 直接连续实施。当前进入最终独立验证；实机 Momentum、
+RAM 盘长任务 soak 与故障注入若当前环境不可用，必须保留为明确的 Unverified 实机验收项。
 
 当前 Ledger：
 
 | ID | 分类 | 影响 | 精确范围 | 负责阶段 | 验收 | 升级条件 |
 |---|---|---|---|---|---|---|
-| M3-CF-001 | Carry-forward | 帧/字节积压快照可能瞬时不一致 | `RecordingAbstractions.cs`, `TgaDirectoryWatcher.cs`, `TgaPipelineOrchestrator.cs`, tests | M5-A | 单锁原子快照且 pipeline 只消费该快照 | 若用于文件、持久化或停止决定则 Blocking |
-| M4-B-004 | Carry-forward | 极窄异常窗口可能留下失去 DB 指针的 orphan partial | `NodeExecutionCoordinator.cs`, tests | M5-A | 删除确认前 Pending 指针不清除 | 若修法需要 schema/第二状态机则 Blocking |
-| M4-CF-001 | Closeout-only | 已 Finish session 在 Dispose 时可能二次 Finish | `TgaPipelineOrchestrator.cs`, tests | M5-A | 成功 Finish 后 Dispose 不再调用 Finish | 若发现 Native Finish 非幂等或文件损坏则 Blocking |
-| M4-FR-001 | Resolved | 枚举语义重命名的单行编译涟漪 | 无待改文件 | M5-A 行政关闭 | Diff 说明保留且无旧枚举残留 | 若出现第二套 stage 语义则 Blocking |
+| M3-CF-001 | Resolved | 帧/字节积压快照改为同锁不可变观察 | `RecordingAbstractions.cs`, `TgaDirectoryWatcher.cs`, `TgaPipelineOrchestrator.cs`, tests | M5-A | pipeline 只消费原子快照 | 无 |
+| M4-B-004 | Resolved | 删除确认前保留 Pending 指针 | `NodeExecutionCoordinator.cs`, tests | M5-A | 不存在 None + orphan 文件顺序 | 无 |
+| M4-CF-001 | Resolved | 成功 Finish 后 Dispose 不再二次 Finish | `TgaPipelineOrchestrator.cs`, tests | M5-A | 一个 session 只成功 Finish 一次 | 无 |
+| M4-FR-001 | Resolved | 枚举语义重命名的单行编译涟漪 | 无待改文件 | M5-A | 无旧枚举残留 | 无 |
