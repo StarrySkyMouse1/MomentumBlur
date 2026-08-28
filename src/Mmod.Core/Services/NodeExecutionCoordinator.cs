@@ -314,11 +314,14 @@ public sealed class NodeExecutionCoordinator
     }
 
     /// <summary>
-    /// M4: media-validate the controlled-stop output, atomically commit it to
-    /// the independent partial path, then persist the Validated state. Every
-    /// step must prove itself; the attempt is only persisted as Validated with
-    /// path, validation time, real output frame count and the trigger reason.
-    /// The node's formal ClipPath stays null and the node is never Completed.
+    /// M4: four-step partial persistence protocol (M4-B-001):
+    ///   1. media-validate the temp output (real facts, never file-exists-only);
+    ///   2. persist PartialState.Pending with the target path + reason;
+    ///   3. atomically move temp → deterministic partial path (never ClipPath);
+    ///   4. transition Pending → Validated with the real media facts.
+    /// Any failure before step 4 leaves the attempt recoverable: the in-process
+    /// caller clears the Pending metadata and deletes the partial candidate, so
+    /// no terminal Failed + Pending dirty record survives a normal error path.
     /// </summary>
     private void PersistValidatedPartial(
         NodeExecutionContext ctx,
@@ -327,12 +330,11 @@ public sealed class NodeExecutionCoordinator
         string partialClip,
         ControlledStopResult controlled)
     {
+        var reason = $"DiskPressure Critical（{controlled.Snapshot.DriveRoot} 剩余 {controlled.Snapshot.FreePercent:0.0}%）";
         if (!File.Exists(tempClip))
             throw new FileNotFoundException("DiskPressure 受控收尾输出不存在，无法验证 partial。", tempClip);
 
-        // 1. Media validation with real facts (never file-exists/length-only).
-        //    The attempt stage already advanced to PartialValidated during the
-        //    controlled stop; validation + commit are actions inside it.
+        // 1. Media validation with real facts.
         var probe = ctx.MediaProbe.Probe(tempClip, expectedFps: ProjectConstants.FinalOutputFramerate);
         if (!probe.IsValid)
             throw new RecordingStageException(RecordingFailureKind.MediaValidationFault, $"partial 媒体校验失败：{probe.Error}");
@@ -350,17 +352,41 @@ public sealed class NodeExecutionCoordinator
                 $"partial 时长不符：clip={probe.DurationSeconds:0.###}s 期望≈{expectedDuration:0.###}s（输出帧 {controlled.OutputFrames}）");
         }
 
-        // 2. Atomic commit: temp → deterministic partial path (never ClipPath).
-        AtomicFileCommitter.Commit(tempClip, partialClip);
+        try
+        {
+            // 2. Pending intent BEFORE the move (crash between here and the
+            //    move leaves a recoverable Pending row).
+            ctx.Repository.MarkAttemptPartialPending(attempt.Id, partialClip, reason);
 
-        // 3. Persist Validated with real media facts + trigger reason.
-        ctx.Repository.UpdateAttemptPartial(
-            attempt.Id,
-            partialClip,
-            DateTimeOffset.UtcNow,
-            probe.FrameCount,
-            $"DiskPressure Critical（{controlled.Snapshot.DriveRoot} 剩余 {controlled.Snapshot.FreePercent:0.0}%）");
-        ctx.Log("Warning", $"DiskPressure partial 已校验并持久化：{partialClip}（帧 {probe.FrameCount}）");
+            // 3. Atomic commit: temp → deterministic partial path.
+            AtomicFileCommitter.Commit(tempClip, partialClip);
+
+            // 4. Pending → Validated (optimistic guard; throws on 0/2+ rows).
+            ctx.Repository.UpdateAttemptPartial(
+                attempt.Id,
+                partialClip,
+                DateTimeOffset.UtcNow,
+                probe.FrameCount,
+                reason);
+            ctx.Log("Warning", $"DiskPressure partial 已校验并持久化：{partialClip}（帧 {probe.FrameCount}）");
+        }
+        catch
+        {
+            // In-process failure after the Pending write: clear the Pending
+            // metadata and delete the partial candidate so no dirty terminal
+            // record survives. Failure to clear is logged, never swallowed.
+            try
+            {
+                ctx.Repository.ClearAttemptPartial(attempt.Id);
+            }
+            catch (Exception clearEx)
+            {
+                ctx.Log("Warning", $"DiskPressure partial Pending 清理失败：{clearEx.Message}");
+            }
+
+            TryDelete(partialClip);
+            throw;
+        }
     }
 
     private async Task CleanupAndRecordFailureAsync(

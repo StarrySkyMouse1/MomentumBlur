@@ -228,7 +228,7 @@ public static class CaptureEnvelopeRecorder
                     SubmittedFrames: finalize.SubmittedFrames,
                     OutputFrames: finalize.ProducedFrames,
                     StoppedAtUtc: DateTimeOffset.UtcNow);
-                Stage(NodeExecutionStage.PartialValidated, "DiskPressurePartial", "受控收尾完成，等待媒体校验与持久化");
+                Stage(NodeExecutionStage.ControlledStopFinalized, "DiskPressureControlledStopFinalized", "受控收尾与 Native finalize 完成，等待 partial 校验与提交");
                 throw new DiskPressureException(
                     $"监视盘 {FormatDriveRoot(pressureSnapshot.DriveRoot)} 剩余 {pressureSnapshot.FreePercent:0.0}% / {ToGiB(pressureSnapshot.FreeBytes):0.0} GiB，" +
                     $"已达到安全下限 {pressureSnapshot.SafetyPercent}% / {ToGiB(pressureSnapshot.SafetyBytes):0.0} GiB。已受控收尾（帧 {finalize.SubmittedFrames}，输出 {finalize.ProducedFrames}）。",

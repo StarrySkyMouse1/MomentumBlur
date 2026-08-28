@@ -297,6 +297,10 @@ public sealed class RenderTaskRepository
     /// M4: persists a media-validated partial clip on the attempt. The
     /// node's formal ClipPath is never touched here; merge input can only
     /// read Completed nodes, so partials can never be merged.
+    /// Optimistically guarded: the transition None → Validated is illegal,
+    /// so this only succeeds from Pending and must affect exactly one row;
+    /// otherwise a persistence exception is thrown and nothing is logged as
+    /// "persisted".
     /// </summary>
     public void UpdateAttemptPartial(
         string attemptId,
@@ -311,7 +315,7 @@ public sealed class RenderTaskRepository
             UPDATE render_attempts SET partial_state=$state, partial_path=$path,
                 partial_validated_at=$at, partial_output_frames=$frames, partial_reason=$reason,
                 updated_at=$now
-            WHERE id=$id;
+            WHERE id=$id AND partial_state=$pending;
             """;
         command.Parameters.AddWithValue("$state", (int)PartialState.Validated);
         command.Parameters.AddWithValue("$path", partialPath);
@@ -320,7 +324,81 @@ public sealed class RenderTaskRepository
         command.Parameters.AddWithValue("$reason", (object?)reason ?? DBNull.Value);
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
         command.Parameters.AddWithValue("$id", attemptId);
-        command.ExecuteNonQuery();
+        command.Parameters.AddWithValue("$pending", (int)PartialState.Pending);
+        var affected = command.ExecuteNonQuery();
+        if (affected != 1)
+            throw new InvalidOperationException(
+                $"partial Validated 持久化失败：期望影响 1 行，实际 {affected}（attempt={attemptId}，状态守卫 Pending 未满足）。");
+    }
+
+    /// <summary>
+    /// M4: writes the partial Pending intent (target path + reason) BEFORE the
+    /// atomic temp → partial move, so a crash between the DB write and the move
+    /// is recoverable. Must affect exactly one row from None.
+    /// </summary>
+    public void MarkAttemptPartialPending(string attemptId, string partialPath, string reason)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE render_attempts SET partial_state=$pending, partial_path=$path,
+                partial_validated_at=NULL, partial_output_frames=NULL, partial_reason=$reason,
+                updated_at=$now
+            WHERE id=$id AND partial_state=$none;
+            """;
+        command.Parameters.AddWithValue("$pending", (int)PartialState.Pending);
+        command.Parameters.AddWithValue("$path", partialPath);
+        command.Parameters.AddWithValue("$reason", (object?)reason ?? DBNull.Value);
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$id", attemptId);
+        command.Parameters.AddWithValue("$none", (int)PartialState.None);
+        var affected = command.ExecuteNonQuery();
+        if (affected != 1)
+            throw new InvalidOperationException(
+                $"partial Pending 意图写入失败：期望影响 1 行，实际 {affected}（attempt={attemptId}，状态守卫 None 未满足）。");
+    }
+
+    /// <summary>
+    /// M4: clears a Pending partial (recovery / in-process failure path). Only
+    /// affects Pending rows, so a row that concurrently became Validated is
+    /// never cleared. Must affect exactly one row.
+    /// </summary>
+    public void ClearAttemptPartial(string attemptId)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE render_attempts SET partial_state=$none, partial_path=NULL,
+                partial_validated_at=NULL, partial_output_frames=NULL, partial_reason=NULL,
+                updated_at=$now
+            WHERE id=$id AND partial_state=$pending;
+            """;
+        command.Parameters.AddWithValue("$none", (int)PartialState.None);
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$id", attemptId);
+        command.Parameters.AddWithValue("$pending", (int)PartialState.Pending);
+        var affected = command.ExecuteNonQuery();
+        if (affected != 1)
+            throw new InvalidOperationException(
+                $"partial Pending 清除失败：期望影响 1 行，实际 {affected}（attempt={attemptId}，仅允许清除 Pending 状态）。");
+    }
+
+    /// <summary>
+    /// M4: every attempt carrying a Pending partial — including terminal
+    /// attempts (a crash can leave stage=Failed with partial_state=Pending).
+    /// Crash recovery must not limit itself to active attempts.
+    /// </summary>
+    public IReadOnlyList<RenderAttemptRecord> GetAttemptsWithPendingPartial()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT * FROM render_attempts WHERE partial_state=$pending;";
+        command.Parameters.AddWithValue("$pending", (int)PartialState.Pending);
+        using var reader = command.ExecuteReader();
+        var result = new List<RenderAttemptRecord>();
+        while (reader.Read())
+            result.Add(ReadAttempt(reader));
+        return result;
     }
 
     public IReadOnlyList<RenderAttemptRecord> GetAttemptsForNode(string taskId, string nodeId)

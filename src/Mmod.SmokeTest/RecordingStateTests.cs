@@ -539,9 +539,52 @@ public sealed class RecordingStateTests
             if (fresh.PartialState != PartialState.None || fresh.PartialPath is not null || fresh.PartialOutputFrames is not null)
                 failures.Add("M4 fresh attempt must read as no partial");
 
-            // Persist a validated partial.
+            // ---- M4-B-002: illegal transitions are rejected ----
+            // None → Validated directly must throw (no guard bypass).
+            try
+            {
+                repo.UpdateAttemptPartial(attemptId, @"C:\work\attempt_1.partial.mp4", DateTimeOffset.UtcNow, 800, "DiskPressure Critical");
+                failures.Add("M4-B-002 None → Validated must be rejected");
+            }
+            catch (InvalidOperationException) { }
+
+            // Wrong attempt ID must throw (0 rows).
+            try
+            {
+                repo.MarkAttemptPartialPending("no-such-attempt", @"C:\work\x.partial.mp4", "DiskPressure Critical");
+                failures.Add("M4-B-002 unknown attempt must throw");
+            }
+            catch (InvalidOperationException) { }
+
+            // Pending → Clear resets all metadata to zero.
+            repo.MarkAttemptPartialPending(attemptId, @"C:\work\attempt_1.partial.mp4", "DiskPressure Critical");
+            var pending = repo.GetAttemptsForNode(taskId, nodeId).Single();
+            if (pending.PartialState != PartialState.Pending || pending.PartialPath != @"C:\work\attempt_1.partial.mp4")
+                failures.Add("M4-B-002 Pending intent must persist path");
+            repo.ClearAttemptPartial(attemptId);
+            var cleared = repo.GetAttemptsForNode(taskId, nodeId).Single();
+            if (cleared.PartialState != PartialState.None || cleared.PartialPath is not null ||
+                cleared.PartialValidatedAt is not null || cleared.PartialOutputFrames is not null || cleared.PartialReason is not null)
+                failures.Add("M4-B-002 Pending → Clear must zero all partial metadata");
+
+            // Validated → Clear must be rejected (Clear only touches Pending).
+            repo.MarkAttemptPartialPending(attemptId, @"C:\work\attempt_1.partial.mp4", "DiskPressure Critical");
             var validatedAt = DateTimeOffset.UtcNow;
             repo.UpdateAttemptPartial(attemptId, @"C:\work\attempt_1.partial.mp4", validatedAt, 800, "DiskPressure Critical");
+            try
+            {
+                repo.ClearAttemptPartial(attemptId);
+                failures.Add("M4-B-002 Validated → Clear must be rejected");
+            }
+            catch (InvalidOperationException) { }
+
+            // Repeated Validated (Validated → Validated) must throw.
+            try
+            {
+                repo.UpdateAttemptPartial(attemptId, @"C:\work\attempt_1.partial.mp4", DateTimeOffset.UtcNow, 800, "DiskPressure Critical");
+                failures.Add("M4-B-002 repeated Validated must be rejected");
+            }
+            catch (InvalidOperationException) { }
 
             var stored = repo.GetAttemptsForNode(taskId, nodeId).Single();
             if (stored.PartialState != PartialState.Validated)
@@ -579,7 +622,7 @@ public sealed class RecordingStateTests
         }
     }
 
-    // ---- M4: crash recovery keeps validated partials, cleans unvalidated temp ----
+    // ---- M4: crash matrix — pending cleanup, validated keep, no false deletes ----
 
     private async Task PartialCrashRecoveryTests(List<string> failures)
     {
@@ -587,6 +630,18 @@ public sealed class RecordingStateTests
         Directory.CreateDirectory(workDir);
         var db = Path.Combine(Path.GetTempPath(), "mmod_m4crash_" + Guid.NewGuid().ToString("N") + ".db");
         var repo = new RenderTaskRepository(db);
+
+        RenderAttemptRecord MakeAttempt(string taskId, string nodeId, int attemptNumber, NodeExecutionStage stage, string? temp)
+        {
+            var session = CaptureSessionInfo.Create(taskId, 0, attemptNumber);
+            return new RenderAttemptRecord(
+                Guid.NewGuid().ToString("N"), session.CaptureSessionId, taskId, nodeId, attemptNumber,
+                stage, session.SequencePrefix, temp,
+                DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null,
+                null, null, CaptureCleanupState.NotRequired,
+                null, null, null, "map", 0, 0, null);
+        }
+
         try
         {
             var settings = new RenderSettingsSnapshot(10, 0.5, @"R:\", @"C:\Videos", @"C:\Game", false, 60, 0);
@@ -594,34 +649,40 @@ public sealed class RecordingStateTests
                 [new NewRenderNode(@"C:\record.mtv", 1, 0, 12.3, 738)]));
             var nodeId = repo.GetNodes(taskId).Single().Id;
 
-            // Validated partial: file exists and must be kept.
-            var validatedDir = Path.Combine(workDir, "node_001");
-            Directory.CreateDirectory(validatedDir);
-            var validatedFile = Path.Combine(validatedDir, "attempt_1_abc123.partial.mp4");
-            File.WriteAllText(validatedFile, "validated-partial-bytes");
-            var vSession = CaptureSessionInfo.Create(taskId, 0, 1);
-            var vAttemptId = repo.CreateAttempt(new RenderAttemptRecord(
-                Guid.NewGuid().ToString("N"), vSession.CaptureSessionId, taskId, nodeId, 1,
-                NodeExecutionStage.Failed, vSession.SequencePrefix, null,
-                DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
-                "DiskPressure", RecordingFailureKind.DiskPressure, CaptureCleanupState.Clean,
-                null, null, null, "map", 100, 100, 99));
-            repo.UpdateAttemptPartial(vAttemptId, validatedFile, DateTimeOffset.UtcNow, 800, "DiskPressure Critical");
+            // Case 1: Pending + temp (Pending written, move not yet done).
+            var case1Temp = Path.Combine(workDir, "c1.encoding.mp4");
+            File.WriteAllText(case1Temp, "c1-temp");
+            var c1 = MakeAttempt(taskId, nodeId, 1, NodeExecutionStage.Failed, case1Temp);
+            repo.CreateAttempt(c1);
+            repo.MarkAttemptPartialPending(c1.Id, Path.Combine(workDir, "c1.partial.mp4"), "DiskPressure Critical");
 
-            // Unvalidated attempt with a temp file: must be deleted.
-            var tempDir = Path.Combine(workDir, "node_002");
-            Directory.CreateDirectory(tempDir);
-            var tempFile = Path.Combine(tempDir, "attempt_2_def456.encoding.mp4");
-            File.WriteAllText(tempFile, "unvalidated-temp-bytes");
-            var uSession = CaptureSessionInfo.Create(taskId, 1, 2);
-            repo.CreateAttempt(new RenderAttemptRecord(
-                Guid.NewGuid().ToString("N"), uSession.CaptureSessionId, taskId, nodeId, 2,
-                NodeExecutionStage.Capturing, uSession.SequencePrefix, tempFile,
-                DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null,
-                null, null, CaptureCleanupState.NotRequired,
-                null, null, null, "map", 10, 10, 9));
+            // Case 2: Pending + partial (move done, Validated not yet written).
+            var case2Partial = Path.Combine(workDir, "c2.partial.mp4");
+            File.WriteAllText(case2Partial, "c2-partial");
+            var c2 = MakeAttempt(taskId, nodeId, 2, NodeExecutionStage.ControlledStopFinalized, null);
+            repo.CreateAttempt(c2);
+            repo.MarkAttemptPartialPending(c2.Id, case2Partial, "DiskPressure Critical");
 
-            // Runner session pointing at the task → recovery runs.
+            // Case 3: Failed attempt + Pending + partial (terminal dirty record).
+            var case3Partial = Path.Combine(workDir, "c3.partial.mp4");
+            File.WriteAllText(case3Partial, "c3-partial");
+            var c3 = MakeAttempt(taskId, nodeId, 3, NodeExecutionStage.Failed, null);
+            repo.CreateAttempt(c3);
+            repo.MarkAttemptPartialPending(c3.Id, case3Partial, "DiskPressure Critical");
+            repo.UpdateAttemptFailure(c3.Id, RecordingFailureKind.DiskPressure, "DiskPressure", CaptureCleanupState.Clean);
+
+            // Case 4: Validated + partial (must be kept).
+            var case4Partial = Path.Combine(workDir, "c4.partial.mp4");
+            File.WriteAllText(case4Partial, "c4-partial");
+            var c4 = MakeAttempt(taskId, nodeId, 4, NodeExecutionStage.Failed, null);
+            repo.CreateAttempt(c4);
+            repo.MarkAttemptPartialPending(c4.Id, case4Partial, "DiskPressure Critical");
+            repo.UpdateAttemptPartial(c4.Id, case4Partial, DateTimeOffset.UtcNow, 800, "DiskPressure Critical");
+
+            // Case 5: unrelated user file in the work dir (must not be deleted).
+            var unrelated = Path.Combine(workDir, "user-notes.txt");
+            File.WriteAllText(unrelated, "user file");
+
             repo.SaveRunnerSession(new RunnerSessionRecord(
                 ProcessId: null, NetConPort: null, NetConPassword: null, TaskId: taskId, NodeId: nodeId,
                 ExePath: null, ProcessStartedAt: null, GameSessionId: null,
@@ -631,13 +692,31 @@ public sealed class RecordingStateTests
             var runner = new RenderTaskRunner(repo);
             await runner.RecoverFromCrashAsync(CancellationToken.None);
 
-            // Validated partial file kept.
-            if (!File.Exists(validatedFile))
-                failures.Add("M4 crash recovery must keep the validated partial file");
-            // Unvalidated temp deleted.
-            if (File.Exists(tempFile))
-                failures.Add("M4 crash recovery must delete the unvalidated temp");
-            // Node back to re-recordable state.
+            // Cases 1-3: temp/partial deleted, Pending reset to None.
+            if (File.Exists(case1Temp)) failures.Add("M4 crash: case1 temp must be deleted");
+            if (File.Exists(case2Partial)) failures.Add("M4 crash: case2 partial must be deleted");
+            if (File.Exists(case3Partial)) failures.Add("M4 crash: case3 partial must be deleted");
+            var c1After = repo.GetAttemptsForNode(taskId, nodeId).Single(a => a.Id == c1.Id);
+            var c2After = repo.GetAttemptsForNode(taskId, nodeId).Single(a => a.Id == c2.Id);
+            var c3After = repo.GetAttemptsForNode(taskId, nodeId).Single(a => a.Id == c3.Id);
+            foreach (var (label, attempt) in new[] { ("c1", c1After), ("c2", c2After), ("c3", c3After) })
+            {
+                if (attempt.PartialState != PartialState.None || attempt.PartialPath is not null ||
+                    attempt.PartialValidatedAt is not null || attempt.PartialOutputFrames is not null ||
+                    attempt.PartialReason is not null)
+                    failures.Add($"M4 crash: {label} Pending must be reset to None with zero metadata");
+            }
+
+            // Case 4: validated partial kept, metadata intact.
+            if (!File.Exists(case4Partial)) failures.Add("M4 crash: validated partial must be kept");
+            var c4After = repo.GetAttemptsForNode(taskId, nodeId).Single(a => a.Id == c4.Id);
+            if (c4After.PartialState != PartialState.Validated || c4After.PartialPath != case4Partial)
+                failures.Add("M4 crash: validated metadata must survive recovery");
+
+            // Case 5: unrelated user file untouched.
+            if (!File.Exists(unrelated)) failures.Add("M4 crash: unrelated user file must not be deleted");
+
+            // Node back to re-recordable state, ClipPath stays null.
             var node = repo.GetNodes(taskId).Single();
             if (node.Status != RenderNodeStatus.Pending)
                 failures.Add($"M4 crash recovery must leave the node Pending, got {node.Status}");

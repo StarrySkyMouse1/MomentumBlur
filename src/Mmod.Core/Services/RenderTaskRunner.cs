@@ -526,15 +526,39 @@ public sealed class RenderTaskRunner : IAsyncDisposable
             catch { /* ignore */ }
         }
 
-        // 3. Partial-clip crash recovery (M4): keep persisted Validated
-        //    partials; conservatively delete unvalidated/unmatched attempt
-        //    temp outputs; never adopt a crash-window file as a formal Clip.
-        //    Nodes are reset to Pending by NormalizeInterruptedWork, so the
-        //    next run starts a new Attempt from the head of the node.
+        // 3. Partial-clip crash recovery (M4-B-001): every attempt carrying a
+        //    Pending partial — including terminal ones (a crash can leave
+        //    stage=Failed with partial_state=Pending) — is reset: its partial
+        //    target file and its attempt temp are deleted and the Pending
+        //    metadata returns to None. Persisted Validated partials are kept.
+        //    Never adopt a crash-window file as a formal Clip; never delete
+        //    other attempts' files, formal Clips or user files. Nodes are
+        //    reset to Pending by NormalizeInterruptedWork, so the next run
+        //    starts a new Attempt from the head of the node.
         foreach (var attempt in _repository.GetActiveAttempts())
         {
             if (!string.IsNullOrWhiteSpace(attempt.TempClipPath))
                 TryDelete(attempt.TempClipPath);
+        }
+        foreach (var attempt in _repository.GetAttemptsWithPendingPartial())
+        {
+            // Pending semantics: the partial was never validated. Delete both
+            // the target candidate (may exist if the move happened) and the
+            // attempt temp (may still exist if the move did not), then reset
+            // the metadata. Clear failure is logged, never fatal for recovery.
+            if (!string.IsNullOrWhiteSpace(attempt.PartialPath))
+                TryDelete(attempt.PartialPath);
+            if (!string.IsNullOrWhiteSpace(attempt.TempClipPath))
+                TryDelete(attempt.TempClipPath);
+            try
+            {
+                _repository.ClearAttemptPartial(attempt.Id);
+            }
+            catch (Exception clearEx)
+            {
+                _repository.AddLog(attempt.TaskId, attempt.NodeId, "Error",
+                    $"崩溃恢复清除 Pending partial 失败：{clearEx.Message}");
+            }
         }
         foreach (var attempt in _repository.GetAttemptsWithValidatedPartial())
         {
