@@ -165,19 +165,113 @@ Capturing
 
 入口要求 M3 的真实遥测和 M4 的输出安全均已成立。使用任务的完整冻结配置执行短时性能预检，并在设置页/任务页显示可解释结果和运行状态。
 
-### 6.2 预计范围
+M5 根据当前执行 AI 的首轮缺陷分布拆成两个自然边界。M5-A 先冻结可信 Core
+行为和可靠性收口；Codex 审查后，M5-B 只消费已经证明的 Core 契约完成 UI。
+不得再为单个局部缺陷建立独立 Repair 轮；有唯一修法且不破坏下一阶段的发现进入
+Ledger 并由下一阶段一并关闭。
 
-本阶段开始前由 Codex 按当前 HEAD 冻结最终文件。预计涉及：
+### 6.2 M5-A：Core 预检与可靠性收口
 
-- Core 性能预检服务与现有 `PerformancePreflightResult`
-- `SettingsViewModel.cs`
-- `TasksViewModel.cs`
-- 对应 Settings/Tasks XAML
-- 必要的任务运行状态投影
-- `Mmod.SmokeTest/Program.cs`
-- `Mmod.SmokeTest/RecordingStateTests.cs`
+#### 6.2.1 精确范围
 
-### 6.3 行为契约
+生产文件可修改：
+
+- `src/Mmod.Core/Models/RecordingModels.cs`
+- `src/Mmod.Core/Services/RecordingAbstractions.cs`
+- `src/Mmod.Core/Services/CapturePerformanceTracker.cs`
+- `src/Mmod.Core/Services/TgaDirectoryWatcher.cs`
+- `src/Mmod.Core/Services/TgaPipelineOrchestrator.cs`
+- `src/Mmod.Core/Services/CaptureEnvelopeRecorder.cs`
+- `src/Mmod.Core/Services/NodeExecutionCoordinator.cs`
+- `src/Mmod.Core/Services/RenderTaskRunner.cs`
+
+仅可新增：
+
+- `src/Mmod.Core/Services/PerformancePreflightEvaluator.cs`
+
+测试文件可修改：
+
+- `src/Mmod.SmokeTest/Program.cs`
+- `src/Mmod.SmokeTest/RecordingStateTests.cs`
+
+不得修改 WPF、数据库 schema/repository、Native ABI、设置持久化或文档；不得删除、
+重命名、移动文件。
+
+#### 6.2.2 预检执行契约
+
+- 预检入口绑定一个已创建且仍为 Pending 的任务，读取该任务持久化的
+  `RenderSettingsSnapshot` 和第一个 Pending 节点；不得改用当前全局设置。
+- 预检复用真实 Momentum 地图、真实回放、真实 TGA watcher、真实 Native 处理和真实编码后端。
+  禁止用低 N、关闭画质处理、降低码率、虚构计数或纯 CPU 小样本冒充任务预检。
+- 预检在独立诊断 CaptureSession、独立 TGA prefix 和独立临时输出中运行；不得创建正式
+  Attempt，不得改变任务/节点状态、RetryCount、ClipPath 或 partial 元数据。
+- 建立 PlaybackEvidence 后采集一个完整 10 秒滚动窗口；窗口不足、后端未知、pipeline fault、
+  采样不可用或用户取消均形成 `Unknown` 或明确失败，不得伪造 Pass。
+- 预检结束必须走现有严格 `endmovie → quiescence → freeze/drain → Native Finish` 和统一
+  Cleanup Barrier；诊断 MP4 与当前 prefix TGA 只在完成诊断后删除，不得进入正式合并输入。
+- `PerformancePreflightEvaluator` 是确定性纯策略：输入最终 `PerformanceSnapshot` 和采样充分性，
+  输出 `PerformancePreflightResult`。最低判定基线：充分样本且后端已知时，消费比 `>= 0.98`
+  且积压不增长为 Pass；`0.90–0.98` 或边界稳定性不足为 Marginal；消费比 `< 0.90` 或持续
+  Growing 为 Fail；证据不足为 Unknown。阈值集中定义并覆盖等于边界。
+- 预检结论只诊断，不修改冻结配置、不自动降 N、不关闭画质处理、不切换编码器。
+
+#### 6.2.3 本阶段同时关闭的 Ledger
+
+- `M3-CF-001`：watcher 在一个锁内返回当前 `PendingFrames + PendingBytes` 的不可变原子快照；
+  pipeline 的 `Performance` 和采样只消费该快照，禁止分别读取两个瞬时属性形成撕裂组合。
+- `M4-B-004`：异常清理必须先确认 partial candidate 已删除，再清除 Pending 元数据；删除失败时
+  保留 Pending 路径供崩溃恢复重试，禁止出现“数据库 None、文件仍存在”的可达顺序。
+- `M4-CF-001`：pipeline 记录 Native Finish 已成功完成的事实；`DisposeAsync` 对已完成 Finish 的
+  session 不再二次 Finish，未完成 session 仍保留 best-effort 清理。
+- `M4-FR-001`：枚举重命名的编译必需涟漪行政关闭，无额外代码工作。
+
+### 6.3 M5-B：UI 与产品集成
+
+#### 6.3.1 精确范围
+
+Core 生产文件可修改：
+
+- `src/Mmod.Core/Models/RecordingModels.cs`
+- `src/Mmod.Core/Services/CaptureEnvelopeRecorder.cs`
+- `src/Mmod.Core/Services/NodeExecutionCoordinator.cs`
+- `src/Mmod.Core/Services/RenderTaskRunner.cs`
+
+WPF 生产文件可修改：
+
+- `src/Mmod.App/ViewModels/SettingsViewModel.cs`
+- `src/Mmod.App/ViewModels/TasksViewModel.cs`
+- `src/Mmod.App/Views/Pages/SettingsPage.xaml`
+- `src/Mmod.App/Views/Pages/TasksPage.xaml`
+
+测试文件可修改：
+
+- `src/Mmod.SmokeTest/Program.cs`
+- `src/Mmod.SmokeTest/RecordingStateTests.cs`
+
+不得新增、删除、重命名或移动文件；不得修改数据库、Native ABI、回放目录解析、正式 Clip/partial
+状态机或任务树选择规则。
+
+#### 6.3.2 产品契约
+
+- Tasks 页为选中的 Pending 任务提供“性能预检”；按钮只在没有执行/验证/预检会话时可用。
+  预检显示冻结配置摘要和 Produced/Consumed/Output FPS、消费比、峰值积压帧/字节、真实画质处理
+  后端、真实编码后端、Pass/Marginal/Fail/Unknown 及明确中文解释。
+- 尚未预检、Fail 或 Unknown 时开始队列必须弹出确认；用户拒绝则不启动。Marginal 明确警告但允许
+  用户继续；Pass 直接继续。任何结论都不得隐式刷新任务快照或修改设置。
+- 运行时由 Core 暴露一个不可变状态投影，至少包含最新 `DiskHealthSnapshot`、
+  `PerformanceSnapshot`、任务/节点身份和采样时间。WPF 只投影，不重新计算策略或直接轮询 Native。
+- Tasks 页运行时显示监视盘剩余百分比/GiB、安全线/预警线、当前积压、趋势、追赶时间和真实后端；
+  文案明确“追赶时间不是整项任务 ETA”。Unavailable、Warning、Critical 使用不同中文状态。
+- Settings 页增加 `DiskSafetyFreePercent` 的 0–50 数值设置和语义说明：0=关闭保护，Warning=
+  safety+5（最高 100）；同时显示当前配置对应的安全线/预警线。不得恢复旧 2 GiB 设置入口。
+- UI 状态刷新最高 4 Hz；高频 pipeline 事件先在 Core/VM 合并节流，不能每帧 ReloadTasks、查询数据库
+  或触发整页 PropertyChanged。
+- 任务创建和刷新仍冻结百分比及完整画质配置；只有 TGA 模式、游戏根目录与监视目录均有效时允许
+  创建、预检或启动。旧 JSON 默认值和 Pending-only 刷新守卫保持不变。
+
+### 6.4 M5 共享行为与验收
+
+#### 6.4.1 共享行为契约
 
 - 预检使用将要执行任务的分辨率、N、画质处理、码率和真实后端，不使用低配替代测试冒充结果。
 - 结论为 Pass / Marginal / Fail / Unknown；显示生产、消费、输出 FPS、消费比、峰值积压和真实后端。
@@ -187,12 +281,17 @@ Capturing
 - 只有 TGA 模式、监视目录已配置且存在时才允许创建/启动相关任务，保持既有产品规则。
 - UI 更新必须节流，不能让高频 PropertyChanged 反过来拖慢管线。
 
-### 6.4 验收
+#### 6.4.2 共享验收
 
 - 无 GPU、GPU 处理、CPU fallback、处理关闭、软件编码均能显示真实且不误导的状态。
 - 设置保存、任务快照冻结、Pending 刷新规则和旧 JSON 兼容继续成立。
 - 低磁盘 Warning/Critical、预检 Fail/Unknown 和正常执行具有明确中文提示。
 - Core/App/SmokeTest 构建与相关路由通过，并完成人工 UI 检查清单。
+
+M5-A 额外要求：预检纯策略边界、真实配置传递、诊断会话不写正式状态、原子 backlog、partial
+清理顺序和单次 Finish 均有 Fake 或确定性验证。M5-B 额外要求：人工启动应用检查设置页与任务页
+布局、按钮门禁、确认框、中文状态和 4 Hz 节流；没有真实 Momentum 环境时实机预检必须标记
+Unverified，不得以 Fake 代替实机结论。
 
 ## 7. Final Closeout
 
@@ -213,6 +312,17 @@ Capturing
 - 审查结论仅使用 Pass、Advance with closeout、Fail。
 - 只有 Foundation Blocking 才返工当前阶段；其余问题写入 Ledger 并随下一宏阶段或 Final Closeout 处理。
 
-## 9. 当前授权入口
+## 9. 当前授权入口与 Closeout Ledger
 
-当前下一动作是执行 **M3：真实吞吐遥测与 Native 后端诊断**。具体任务包引用本计划第 4 节，不授权第 5、6、7 节。
+当前下一动作是执行 **M5-A：Core 预检与可靠性收口**，引用本计划 §6.2；M5-B、Final Closeout
+尚未授权。M5-A 通过或安全携带非阻塞 Ledger 后执行 M5-B；M5-B 后直接进入一次集中 Final
+Closeout/独立验收，不再预设 Repair 轮。
+
+当前 Ledger：
+
+| ID | 分类 | 影响 | 精确范围 | 负责阶段 | 验收 | 升级条件 |
+|---|---|---|---|---|---|---|
+| M3-CF-001 | Carry-forward | 帧/字节积压快照可能瞬时不一致 | `RecordingAbstractions.cs`, `TgaDirectoryWatcher.cs`, `TgaPipelineOrchestrator.cs`, tests | M5-A | 单锁原子快照且 pipeline 只消费该快照 | 若用于文件、持久化或停止决定则 Blocking |
+| M4-B-004 | Carry-forward | 极窄异常窗口可能留下失去 DB 指针的 orphan partial | `NodeExecutionCoordinator.cs`, tests | M5-A | 删除确认前 Pending 指针不清除 | 若修法需要 schema/第二状态机则 Blocking |
+| M4-CF-001 | Closeout-only | 已 Finish session 在 Dispose 时可能二次 Finish | `TgaPipelineOrchestrator.cs`, tests | M5-A | 成功 Finish 后 Dispose 不再调用 Finish | 若发现 Native Finish 非幂等或文件损坏则 Blocking |
+| M4-FR-001 | Resolved | 枚举语义重命名的单行编译涟漪 | 无待改文件 | M5-A 行政关闭 | Diff 说明保留且无旧枚举残留 | 若出现第二套 stage 语义则 Blocking |
