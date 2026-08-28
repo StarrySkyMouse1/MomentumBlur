@@ -55,8 +55,13 @@ public enum NodeExecutionStage
     // ---- M4: DiskPressure controlled-stop path (append-only) ----
     /// <summary>DiskPressure Critical hit; endmovie requested but not yet proven.</summary>
     DiskPressureRequested = 24,
-    /// <summary>The controlled stop produced a validated, persisted partial clip.</summary>
-    PartialValidated = 25,
+    /// <summary>
+    /// Controlled stop and Native finalize completed; the partial is waiting
+    /// for media validation + atomic commit + persistence. This stage never
+    /// claims the partial is validated — the only Validated fact is
+    /// PartialState.Validated and its persisted fields.
+    /// </summary>
+    ControlledStopFinalized = 25,
 }
 
 /// <summary>Stable failure classification driving retry/recovery policy.</summary>

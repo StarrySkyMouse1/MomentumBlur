@@ -751,9 +751,19 @@ if (args.Length >= 1 && args[0] == "repository")
         return 7;
     }
 
-    // 2. Validated partial round-trips through reopen (idempotent migration).
+    // 2. Four-step protocol: None → Pending → Validated; None → Validated
+    //    directly must be rejected; round-trip through reopen (idempotent
+    //    migration).
+    try
+    {
+        reopened.UpdateAttemptPartial(attemptId, @"C:\work\attempt_1.partial.mp4", DateTimeOffset.UtcNow, 800, "DiskPressure Critical");
+        Console.WriteLine("REPOSITORY_FAIL: None → Validated must be rejected");
+        return 10;
+    }
+    catch (InvalidOperationException) { }
+    reopened.MarkAttemptPartialPending(attemptId, @"C:\work\attempt_1.partial.mp4", "DiskPressure Critical");
     reopened.UpdateAttemptPartial(attemptId, @"C:\work\attempt_1.partial.mp4", DateTimeOffset.UtcNow, 800, "DiskPressure Critical");
-    var withPartial = new RenderTaskRepository(db).GetAttemptsForNode(id, node.Id).Single();
+    var withPartial = new RenderTaskRepository(db).GetAttemptsForNode(id, m4Node.Id).Single();
     if (withPartial.PartialState != PartialState.Validated ||
         withPartial.PartialPath != @"C:\work\attempt_1.partial.mp4" ||
         withPartial.PartialOutputFrames != 800 ||
