@@ -120,7 +120,13 @@ public sealed record RenderAttemptRecord(
     string? ExpectedMap,
     long FedCount,
     long SubmittedFrameCount,
-    int? LastTgaIndex);
+    int? LastTgaIndex,
+    // ---- M4: partial-clip lifecycle (trailing defaulted fields; old DBs read as None) ----
+    PartialState PartialState = PartialState.None,
+    string? PartialPath = null,
+    DateTimeOffset? PartialValidatedAt = null,
+    long? PartialOutputFrames = null,
+    string? PartialReason = null);
 
 /// <summary>Persisted runner session for crash recovery (plan P1-10 / §7).</summary>
 public sealed record RunnerSessionRecord(

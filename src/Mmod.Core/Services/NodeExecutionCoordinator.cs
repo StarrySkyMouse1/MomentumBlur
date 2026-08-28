@@ -59,6 +59,9 @@ public sealed class NodeExecutionCoordinator
             var captureSession = CaptureSessionInfo.Create(taskId, ctx.Node.Sequence, attemptNumber);
             var attemptId = Guid.NewGuid().ToString("N");
             var tempClip = Path.Combine(nodeDir, $"attempt_{attemptNumber}_{captureSession.CaptureSessionId[..6]}.encoding.mp4");
+            // M4: deterministic partial path inside the node work directory;
+            // independent from the formal ClipPath and never overwrites it.
+            var partialClip = Path.Combine(nodeDir, $"attempt_{attemptNumber}_{captureSession.CaptureSessionId[..6]}.partial.mp4");
 
             var attempt = new RenderAttemptRecord(
                 Id: attemptId,
@@ -128,6 +131,23 @@ public sealed class NodeExecutionCoordinator
             {
                 lastKind = RecordingFailureClassifier.Classify(ex);
                 lastError = ex.Message;
+
+                // M4: DiskPressure with a proven controlled stop → validate the
+                // partial, commit it atomically to the independent partial path,
+                // and persist it as Validated. Any failure in this chain leaves
+                // the attempt with no validated partial (conservative cleanup).
+                if (ex is DiskPressureException { ControlledStop: { } controlled } && !string.IsNullOrWhiteSpace(partialClip))
+                {
+                    try
+                    {
+                        PersistValidatedPartial(ctx, attempt, tempClip, partialClip, controlled);
+                    }
+                    catch (Exception partialEx)
+                    {
+                        ctx.Log("Warning", $"DiskPressure partial 保存失败（不产生 Validated）：{partialEx.Message}");
+                        TryDelete(partialClip);
+                    }
+                }
 
                 using var cleanupCts = new CancellationTokenSource(ctx.Timeouts.CleanupHardLimit);
                 var cleanup = await ctx.CleanupCoordinator.CleanupAsync(
@@ -291,6 +311,56 @@ public sealed class NodeExecutionCoordinator
         ctx.Log("Info",
             $"[{entry.Stage}] {entry.Event} Fed={entry.FedCount} Candidate={entry.CandidateCount} Pending={entry.PendingCount} " +
             $"LastWrite={entry.LastPhysicalWriteUtc?.ToString("HH:mm:ss.fff") ?? "-"} {entry.Message}");
+    }
+
+    /// <summary>
+    /// M4: media-validate the controlled-stop output, atomically commit it to
+    /// the independent partial path, then persist the Validated state. Every
+    /// step must prove itself; the attempt is only persisted as Validated with
+    /// path, validation time, real output frame count and the trigger reason.
+    /// The node's formal ClipPath stays null and the node is never Completed.
+    /// </summary>
+    private void PersistValidatedPartial(
+        NodeExecutionContext ctx,
+        RenderAttemptRecord attempt,
+        string tempClip,
+        string partialClip,
+        ControlledStopResult controlled)
+    {
+        if (!File.Exists(tempClip))
+            throw new FileNotFoundException("DiskPressure 受控收尾输出不存在，无法验证 partial。", tempClip);
+
+        // 1. Media validation with real facts (never file-exists/length-only).
+        //    The attempt stage already advanced to PartialValidated during the
+        //    controlled stop; validation + commit are actions inside it.
+        var probe = ctx.MediaProbe.Probe(tempClip, expectedFps: ProjectConstants.FinalOutputFramerate);
+        if (!probe.IsValid)
+            throw new RecordingStageException(RecordingFailureKind.MediaValidationFault, $"partial 媒体校验失败：{probe.Error}");
+        if (controlled.Finalize.FirstFrameWidth > 0 && probe.Width > 0 &&
+            (probe.Width != controlled.Finalize.FirstFrameWidth || probe.Height != controlled.Finalize.FirstFrameHeight))
+        {
+            throw new RecordingStageException(RecordingFailureKind.MediaValidationFault,
+                $"partial 分辨率不一致：clip={probe.Width}x{probe.Height} 源TGA={controlled.Finalize.FirstFrameWidth}x{controlled.Finalize.FirstFrameHeight}");
+        }
+        var expectedDuration = controlled.OutputFrames / (double)ProjectConstants.FinalOutputFramerate;
+        var tolerance = Math.Max(1.5, expectedDuration * 0.05);
+        if (Math.Abs(probe.DurationSeconds - expectedDuration) > tolerance)
+        {
+            throw new RecordingStageException(RecordingFailureKind.MediaValidationFault,
+                $"partial 时长不符：clip={probe.DurationSeconds:0.###}s 期望≈{expectedDuration:0.###}s（输出帧 {controlled.OutputFrames}）");
+        }
+
+        // 2. Atomic commit: temp → deterministic partial path (never ClipPath).
+        AtomicFileCommitter.Commit(tempClip, partialClip);
+
+        // 3. Persist Validated with real media facts + trigger reason.
+        ctx.Repository.UpdateAttemptPartial(
+            attempt.Id,
+            partialClip,
+            DateTimeOffset.UtcNow,
+            probe.FrameCount,
+            $"DiskPressure Critical（{controlled.Snapshot.DriveRoot} 剩余 {controlled.Snapshot.FreePercent:0.0}%）");
+        ctx.Log("Warning", $"DiskPressure partial 已校验并持久化：{partialClip}（帧 {probe.FrameCount}）");
     }
 
     private async Task CleanupAndRecordFailureAsync(

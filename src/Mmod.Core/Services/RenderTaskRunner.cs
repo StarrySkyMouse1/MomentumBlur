@@ -526,11 +526,22 @@ public sealed class RenderTaskRunner : IAsyncDisposable
             catch { /* ignore */ }
         }
 
-        // 3. Discard partial attempt temp clips (no persisted validation → conservative re-record).
+        // 3. Partial-clip crash recovery (M4): keep persisted Validated
+        //    partials; conservatively delete unvalidated/unmatched attempt
+        //    temp outputs; never adopt a crash-window file as a formal Clip.
+        //    Nodes are reset to Pending by NormalizeInterruptedWork, so the
+        //    next run starts a new Attempt from the head of the node.
         foreach (var attempt in _repository.GetActiveAttempts())
         {
             if (!string.IsNullOrWhiteSpace(attempt.TempClipPath))
                 TryDelete(attempt.TempClipPath);
+        }
+        foreach (var attempt in _repository.GetAttemptsWithValidatedPartial())
+        {
+            if (string.IsNullOrWhiteSpace(attempt.PartialPath) || !File.Exists(attempt.PartialPath))
+                continue;
+            _repository.AddLog(attempt.TaskId, attempt.NodeId, "Info",
+                $"崩溃恢复保留已验证 partial：{attempt.PartialPath}（输出帧 {attempt.PartialOutputFrames ?? 0}，{attempt.PartialValidatedAt:O}）");
         }
 
         _repository.ClearRunnerSession();

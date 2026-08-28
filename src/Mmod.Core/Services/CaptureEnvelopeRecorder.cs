@@ -113,6 +113,7 @@ public static class CaptureEnvelopeRecorder
             var lastDiskSampleAt = DateTime.MinValue;
             var consecutiveUnavailableSamples = 0;
             var lastDiskState = (DiskSafetyState?)null;
+            DiskHealthSnapshot? pressureSnapshot = null;
             while (pipeline.FedCount < safeEnd)
             {
                 token.ThrowIfCancellationRequested();
@@ -143,9 +144,12 @@ public static class CaptureEnvelopeRecorder
                                 consecutiveUnavailableSamples = 0;
                                 break;
                             case DiskSafetyState.Critical:
-                                throw new DiskPressureException(
-                                    $"监视盘 {FormatDriveRoot(snapshot.DriveRoot)} 剩余 {snapshot.FreePercent:0.0}% / {ToGiB(snapshot.FreeBytes):0.0} GiB，已达到安全下限 {snapshot.SafetyPercent}% / {ToGiB(snapshot.SafetyBytes):0.0} GiB。",
-                                    snapshot);
+                                // M4: keep the triggering snapshot, stop waiting
+                                // for SafeEnd, and run the controlled stop
+                                // (endmovie → quiescence → drain → Finish).
+                                pressureSnapshot = snapshot;
+                                phase?.Invoke($"磁盘压力 Critical：监视盘 {FormatDriveRoot(snapshot.DriveRoot)} 剩余 {snapshot.FreePercent:0.0}%，进入受控收尾。");
+                                break;
                             case DiskSafetyState.Unavailable:
                                 consecutiveUnavailableSamples++;
                                 if (consecutiveUnavailableSamples >= timeouts.DiskHealthUnavailableMaxConsecutiveSamples)
@@ -159,6 +163,9 @@ public static class CaptureEnvelopeRecorder
                         }
                     }
                 }
+
+                if (pressureSnapshot is not null)
+                    break; // controlled stop; do not keep waiting for SafeEnd
 
                 if (pipeline.FedCount != lastFed)
                 {
@@ -180,6 +187,53 @@ public static class CaptureEnvelopeRecorder
                 ThrowIfFaulted(pipeline);
                 if (health?.GameExitedTask.IsCompleted == true)
                     throw new GameExitedException("录制中游戏进程退出。");
+            }
+
+            // 6b. DiskPressure Critical: controlled stop, never a skip of the
+            //     finalization. Order: strict endmovie → physical quiescence →
+            //     freeze/drain → Native Finish. Any failure propagates without
+            //     a controlled-stop result, so no partial can be recorded.
+            if (pressureSnapshot is not null)
+            {
+                Stage(NodeExecutionStage.DiskPressureRequested, "DiskPressureControlledStop", "磁盘压力受控收尾");
+                var pressureStop = await MomentumReplaySession.ExecuteEndMovieAsync(netCon, timeouts, phase, token);
+                if (pressureStop is not StopMovieResult.CommandAcked and not StopMovieResult.KnownAlreadyStopped)
+                {
+                    if (pressureStop == StopMovieResult.NetConLost)
+                        throw new CaptureStopUnconfirmedException("DiskPressure 受控收尾：endmovie NetCon 断开，无法确认停止。");
+                    throw new CaptureStopUnconfirmedException($"DiskPressure 受控收尾：endmovie 未确认（{pressureStop}）。");
+                }
+
+                Stage(NodeExecutionStage.WaitingCaptureQuiescence, "DiskPressureQuiescence", "等待 TGA 物理静默");
+                await pipeline.Watcher.WaitForQuiescenceAsync(
+                    timeouts.TgaQuiescenceQuietWindow,
+                    timeouts.TgaQuiescenceHardTimeout,
+                    token);
+
+                // FinalizeAsync performs freeze → drain → native Finish; advance
+                // the state machine through the same stages so no transition is
+                // skipped.
+                Stage(NodeExecutionStage.FreezingWatcher, "DiskPressureFreeze", "冻结 watcher");
+                Stage(NodeExecutionStage.DrainingFrames, "DiskPressureDrain", "排空已稳定帧");
+                Stage(NodeExecutionStage.FinalizingEncoder, "DiskPressureFinalize", "Native Finish");
+                var finalize = await pipeline.FinalizeAsync(timeouts, token);
+
+                if (pipeline.ActivityAnchorFrame is null || !pipeline.HasVisualChange)
+                    throw new InvalidOperationException("成片校验失败：DiskPressure 收尾前未建立 PlaybackEvidence。");
+
+                var stopResult = new ControlledStopResult(
+                    Finalize: finalize,
+                    Snapshot: pressureSnapshot,
+                    LastFrameIndex: finalize.LastFrameIndex,
+                    SubmittedFrames: finalize.SubmittedFrames,
+                    OutputFrames: finalize.ProducedFrames,
+                    StoppedAtUtc: DateTimeOffset.UtcNow);
+                Stage(NodeExecutionStage.PartialValidated, "DiskPressurePartial", "受控收尾完成，等待媒体校验与持久化");
+                throw new DiskPressureException(
+                    $"监视盘 {FormatDriveRoot(pressureSnapshot.DriveRoot)} 剩余 {pressureSnapshot.FreePercent:0.0}% / {ToGiB(pressureSnapshot.FreeBytes):0.0} GiB，" +
+                    $"已达到安全下限 {pressureSnapshot.SafetyPercent}% / {ToGiB(pressureSnapshot.SafetyBytes):0.0} GiB。已受控收尾（帧 {finalize.SubmittedFrames}，输出 {finalize.ProducedFrames}）。",
+                    pressureSnapshot,
+                    stopResult);
             }
 
             // 7. Strict endmovie: only CommandAcked / KnownAlreadyStopped proceed.

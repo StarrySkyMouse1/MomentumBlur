@@ -23,6 +23,7 @@ public sealed record CaptureSessionInfo(
 /// <summary>
 /// Fine-grained internal execution stage of a node attempt. Kept separate from
 /// the user-visible RenderNodeStatus; persisted in render_attempts.
+/// Values are append-only: old databases store integer ordinals.
 /// </summary>
 public enum NodeExecutionStage
 {
@@ -50,6 +51,12 @@ public enum NodeExecutionStage
     RetryRecovery = 21,
     Canceled = 22,
     Failed = 23,
+
+    // ---- M4: DiskPressure controlled-stop path (append-only) ----
+    /// <summary>DiskPressure Critical hit; endmovie requested but not yet proven.</summary>
+    DiskPressureRequested = 24,
+    /// <summary>The controlled stop produced a validated, persisted partial clip.</summary>
+    PartialValidated = 25,
 }
 
 /// <summary>Stable failure classification driving retry/recovery policy.</summary>
@@ -105,6 +112,34 @@ public enum CaptureCleanupState
     Dirty = 2,
     GameRestartRequired = 3,
 }
+
+/// <summary>
+/// Persisted partial-clip lifecycle (M4). None: no partial exists or the
+/// attempt's temp output is unproven; Pending: a partial candidate exists
+/// but is not yet validated/committed; Validated: media-validated and
+/// atomically committed to the deterministic partial path. Values are
+/// append-only; old databases read as None.
+/// </summary>
+public enum PartialState
+{
+    None = 0,
+    Pending = 1,
+    Validated = 2,
+}
+
+/// <summary>
+/// Result of a DiskPressure controlled stop (M4). Produced only after the
+/// full sequence strict endmovie → physical quiescence → freeze/drain →
+/// Native Finish proved successful; the caller still performs media
+/// validation + atomic commit + persistence.
+/// </summary>
+public sealed record ControlledStopResult(
+    PipelineFinalizeResult Finalize,
+    DiskHealthSnapshot Snapshot,
+    int LastFrameIndex,
+    long SubmittedFrames,
+    long OutputFrames,
+    DateTimeOffset StoppedAtUtc);
 
 /// <summary>Result of a strict typed NetCon command.</summary>
 public sealed record NetConCommandResult(

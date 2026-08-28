@@ -67,6 +67,10 @@ public sealed class CaptureCleanupCoordinator
         }
 
         // 3. Pipeline finalize (drain + native finish) so no encoder is leaked.
+        //    Idempotent by design: a pipeline that already completed its
+        //    controlled finalize (M4 DiskPressure path or the happy path) is
+        //    in Finalized/Faulted/Disposed state and is never finished twice —
+        //    a second native Finish must not corrupt the validated partial.
         var pipelineFinalized = pipeline is null
             || pipeline.State is PipelineState.Finalized or PipelineState.Faulted or PipelineState.Disposed;
         var watcherDrained = pipelineFinalized;
