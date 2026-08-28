@@ -324,3 +324,55 @@ public sealed record PerformancePreflightResult(
     EncoderBackend EncoderBackend,
     PerformancePreflightRating Rating,
     DateTimeOffset CreatedAt);
+
+// ---- M3: real capture performance telemetry contracts ----
+
+/// <summary>
+/// Trend of the pending-frame backlog over the rolling window.
+/// Unknown: not enough samples; Stable: inside the noise dead-zone;
+/// Growing: produced consistently outpaces consumed; Shrinking: consumption
+/// consistently outpaces production.
+/// </summary>
+public enum BacklogTrend
+{
+    Unknown = 0,
+    Stable = 1,
+    Growing = 2,
+    Shrinking = 3,
+}
+
+/// <summary>Current-session backlog (stable pending frames and their bytes).</summary>
+public sealed record BacklogSnapshot(
+    long PendingFrames,
+    long PendingBytes,
+    long PeakPendingFrames,
+    long PeakPendingBytes);
+
+/// <summary>
+/// Immutable runtime capture-performance snapshot (M3). Every rate comes from
+/// a real counter (stable TGA produced, native submits, native frames_output);
+/// no value is derived from submitted/N. Candidate files keep their own
+/// semantics and never count toward produced or backlog.
+/// </summary>
+public sealed record PerformanceSnapshot(
+    double ProducedFramesPerSecond,
+    double ConsumedFramesPerSecond,
+    double OutputFramesPerSecond,
+    double ConsumptionRatio,
+    BacklogSnapshot Backlog,
+    BacklogTrend BacklogTrend,
+    double? CatchUpSeconds,
+    ProcessingBackend QualityBackend,
+    EncoderBackend EncoderBackend,
+    DateTimeOffset SampledAt)
+{
+    /// <summary>Empty snapshot before any real observation exists.</summary>
+    public static PerformanceSnapshot Empty { get; } = new(
+        0, 0, 0, 0,
+        new BacklogSnapshot(0, 0, 0, 0),
+        BacklogTrend.Unknown,
+        null,
+        ProcessingBackend.Unknown,
+        EncoderBackend.Unknown,
+        DateTimeOffset.MinValue);
+}

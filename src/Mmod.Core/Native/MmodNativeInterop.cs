@@ -68,6 +68,21 @@ internal static class MmodNativeInterop
     internal static extern int mmod_session_get_processing_status(
         IntPtr session, out int outEffectsEnabled, out int outUsingCpuFallback);
 
+    /// <summary>Must match MMOD_BACKENDS_ABI_VERSION in mmod_native.h.</summary>
+    internal const int BackendsAbiVersion = 1;
+
+    /// <summary>Must match MmodProcessingBackend in mmod_native.h.</summary>
+    internal const int ProcessingBackendDisabled = 1;
+    internal const int ProcessingBackendGpu = 2;
+    internal const int ProcessingBackendCpuFallback = 3;
+
+    /// <summary>Must match MmodEncoderBackend in mmod_native.h.</summary>
+    internal const int EncoderBackendSoftware = 2;
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int mmod_session_get_backends(
+        IntPtr session, out int outAbiVersion, out int outProcessing, out int outEncoder);
+
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     internal static extern int mmod_process_video_file(
         string inputPath,

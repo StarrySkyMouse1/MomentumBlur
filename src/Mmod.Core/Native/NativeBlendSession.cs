@@ -131,6 +131,35 @@ public sealed class NativeBlendSession : IDisposable
         return (enabled != 0, cpuFallback != 0);
     }
 
+    /// <summary>
+    /// Versioned native backend diagnosis (M3). Returns the real processing
+    /// path (Disabled / Gpu / CpuFallback) and the real encoder path
+    /// (currently Software because the live capture path disables hardware
+    /// MFTs). Query failure surfaces as Unknown, never as a fabricated value.
+    /// </summary>
+    public (ProcessingBackend Processing, EncoderBackend Encoder) GetBackends()
+    {
+        EnsureNotDisposed();
+        var code = MmodNativeInterop.mmod_session_get_backends(
+            _handle, out var abiVersion, out var processing, out var encoder);
+        if (code != 0 || abiVersion != MmodNativeInterop.BackendsAbiVersion)
+            return (ProcessingBackend.Unknown, EncoderBackend.Unknown);
+
+        var backend = processing switch
+        {
+            MmodNativeInterop.ProcessingBackendDisabled => ProcessingBackend.Disabled,
+            MmodNativeInterop.ProcessingBackendGpu => ProcessingBackend.Gpu,
+            MmodNativeInterop.ProcessingBackendCpuFallback => ProcessingBackend.CpuFallback,
+            _ => ProcessingBackend.Unknown,
+        };
+        var encoderBackend = encoder switch
+        {
+            MmodNativeInterop.EncoderBackendSoftware => EncoderBackend.Software,
+            _ => EncoderBackend.Unknown,
+        };
+        return (backend, encoderBackend);
+    }
+
     public void SubmitBgra(byte[] bgra, int stride)
     {
         EnsureNotDisposed();

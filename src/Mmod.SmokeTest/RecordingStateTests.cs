@@ -28,6 +28,8 @@ public sealed class RecordingStateTests
         await WatcherTests(failures);
         await PolicyTests(failures);
         MediaProbeTests(failures);
+        TelemetryTests(failures);
+        WatcherTelemetryTests(failures);
     }
 
     // ---- 17.5 / 17.6 / 17.7: visual playback evidence probe ----
@@ -548,6 +550,234 @@ public sealed class RecordingStateTests
         }
     }
 
+    // ---- M3: rolling rate window + performance tracker (pure fakes) ----
+
+    private void TelemetryTests(List<string> failures)
+    {
+        // 1. Window not ready: no samples → null rate, and the snapshot never
+        //    contains NaN/Infinity or a bogus ratio.
+        {
+            var rw = new RateWindow(TimeSpan.FromSeconds(10));
+            if (rw.GetRatePerSecond() is not null)
+                failures.Add("M3 rate window must be null before any sample");
+            var tracker = new CapturePerformanceTracker();
+            var s = tracker.BuildSnapshot(ProcessingBackend.Unknown, EncoderBackend.Unknown, 0, 0);
+            if (s.ProducedFramesPerSecond != 0 || s.ConsumedFramesPerSecond != 0 || s.OutputFramesPerSecond != 0)
+                failures.Add("M3 empty snapshot must have zero rates");
+            if (!double.IsFinite(s.ConsumptionRatio) || double.IsNaN(s.ConsumptionRatio) || double.IsInfinity(s.ConsumptionRatio))
+                failures.Add("M3 empty snapshot ratio must be finite");
+            if (s.BacklogTrend != BacklogTrend.Unknown || s.CatchUpSeconds is not null)
+                failures.Add("M3 empty snapshot must be Unknown trend with no catch-up");
+        }
+
+        // 2. Monotonic growth: samples every 10ms with counts scaled by the
+        //    measured elapsed time so the rate converges to the intended
+        //    100/50/50 fps regardless of OS timer resolution.
+        {
+            var tracker = new CapturePerformanceTracker(TimeSpan.FromSeconds(10));
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            for (var i = 1; i <= 30; i++)
+            {
+                var elapsed = sw.Elapsed.TotalSeconds;
+                tracker.AddSample(new CapturePerformanceTracker.Sample(
+                    Produced: elapsed * 100, Consumed: elapsed * 50, Output: elapsed * 50,
+                    PendingFrames: 0, PendingBytes: 0));
+                Thread.Sleep(10);
+            }
+
+            var s = tracker.BuildSnapshot(ProcessingBackend.Disabled, EncoderBackend.Software, 0, 0);
+            if (!(s.ProducedFramesPerSecond > 0))
+                failures.Add("M3 growth must produce a positive produced rate");
+            if (s.ProducedFramesPerSecond < 80 || s.ProducedFramesPerSecond > 120)
+                failures.Add($"M3 produced rate out of range: {s.ProducedFramesPerSecond}");
+            if (s.ConsumedFramesPerSecond < 40 || s.ConsumedFramesPerSecond > 60)
+                failures.Add($"M3 consumed rate out of range: {s.ConsumedFramesPerSecond}");
+            if (Math.Abs(s.ConsumptionRatio - 0.5) > 0.15)
+                failures.Add($"M3 consumption ratio must be ~0.5: {s.ConsumptionRatio}");
+        }
+
+        // 3. Counter reset must not produce negative/NaN rates.
+        {
+            var rw = new RateWindow(TimeSpan.FromSeconds(10));
+            rw.AddSample(100);
+            rw.AddSample(200);
+            rw.AddSample(10); // reset to a new session
+            rw.AddSample(30);
+            var rate = rw.GetRatePerSecond();
+            if (rate is null || rate < 0 || double.IsNaN(rate.Value) || double.IsInfinity(rate.Value))
+                failures.Add($"M3 counter reset must yield a safe rate, got {rate}");
+        }
+
+        // 4. Zero interval (same instant) must not divide by zero.
+        {
+            var rw = new RateWindow(TimeSpan.FromSeconds(10));
+            rw.AddSample(100);
+            rw.AddSample(100); // zero delta
+            if (rw.GetRatePerSecond() != 0)
+                failures.Add("M3 zero delta must yield 0 rate");
+        }
+
+        // 5. Window expiry: old samples fall out of the window.
+        {
+            var rw = new RateWindow(TimeSpan.FromMilliseconds(10));
+            rw.AddSample(0);
+            Thread.Sleep(30); // > 10ms window
+            rw.AddSample(100);
+            rw.AddSample(200); // the second sample establishes a new baseline
+            var rate = rw.GetRatePerSecond();
+            if (rate is null || rate <= 0)
+                failures.Add("M3 window expiry must keep only recent samples");
+        }
+
+        // 6. Trend dead zone: small deltas are Stable, big deltas are
+        //    Growing/Shrinking, no production rate is Unknown.
+        {
+            var tracker = new CapturePerformanceTracker(TimeSpan.FromSeconds(10), deadZoneRatio: 0.05);
+            if (tracker.EvaluateTrend(0, 100) != BacklogTrend.Unknown)
+                failures.Add("M3 trend must be Unknown with no production rate");
+            if (tracker.EvaluateTrend(100, 100) != BacklogTrend.Stable)
+                failures.Add("M3 equal rates must be Stable");
+            if (tracker.EvaluateTrend(100, 103) != BacklogTrend.Stable)
+                failures.Add("M3 3% delta must stay inside the 5% dead zone");
+            if (tracker.EvaluateTrend(100, 80) != BacklogTrend.Growing)
+                failures.Add("M3 consumption below production must be Growing");
+            if (tracker.EvaluateTrend(100, 120) != BacklogTrend.Shrinking)
+                failures.Add("M3 consumption above production must be Shrinking");
+        }
+
+        // 7. Catch-up time: only when a backlog exists and consumption clearly
+        //    outpaces production. Must never be computed as a task ETA.
+        {
+            // Growing backlog: produced 100, consumed 20 → catch-up is null.
+            var tracker = new CapturePerformanceTracker(TimeSpan.FromSeconds(10));
+            var swGrow = System.Diagnostics.Stopwatch.StartNew();
+            for (var i = 1; i <= 20; i++)
+            {
+                var elapsed = swGrow.Elapsed.TotalSeconds;
+                tracker.AddSample(new CapturePerformanceTracker.Sample(
+                    Produced: elapsed * 100, Consumed: elapsed * 20, Output: elapsed * 20,
+                    PendingFrames: 100, PendingBytes: 0));
+                Thread.Sleep(10);
+            }
+
+            var growing = tracker.BuildSnapshot(ProcessingBackend.Gpu, EncoderBackend.Software, 100, 0);
+            if (growing.CatchUpSeconds is not null)
+                failures.Add("M3 catch-up must be null when production outpaces consumption");
+
+            // Shrinking: consumed 120 vs produced 100 → pending / 20.
+            var tracker2 = new CapturePerformanceTracker(TimeSpan.FromSeconds(10));
+            var swShrink = System.Diagnostics.Stopwatch.StartNew();
+            for (var i = 1; i <= 20; i++)
+            {
+                var elapsed = swShrink.Elapsed.TotalSeconds;
+                tracker2.AddSample(new CapturePerformanceTracker.Sample(
+                    Produced: elapsed * 100, Consumed: elapsed * 120, Output: elapsed * 120,
+                    PendingFrames: 100, PendingBytes: 0));
+                Thread.Sleep(10);
+            }
+
+            var shrinking = tracker2.BuildSnapshot(ProcessingBackend.Gpu, EncoderBackend.Software, 100, 0);
+            if (shrinking.CatchUpSeconds is null || Math.Abs(shrinking.CatchUpSeconds.Value - 5.0) > 2.0)
+                failures.Add($"M3 catch-up must be ~5s for 100 pending at 20fps drain: {shrinking.CatchUpSeconds}");
+
+            // No backlog → no catch-up even with fast consumption.
+            var noBacklog = tracker2.BuildSnapshot(ProcessingBackend.Gpu, EncoderBackend.Software, 0, 0);
+            if (noBacklog.CatchUpSeconds is not null)
+                failures.Add("M3 catch-up must be null with no backlog");
+        }
+
+        // 8. Peak backlog tracking (frames and bytes, long).
+        {
+            var tracker = new CapturePerformanceTracker(TimeSpan.FromSeconds(10));
+            tracker.AddSample(new CapturePerformanceTracker.Sample(0, 0, 0, PendingFrames: 5, PendingBytes: 5000));
+            tracker.AddSample(new CapturePerformanceTracker.Sample(0, 0, 0, PendingFrames: 8, PendingBytes: 8000));
+            tracker.AddSample(new CapturePerformanceTracker.Sample(0, 0, 0, PendingFrames: 3, PendingBytes: 3000));
+            var s = tracker.BuildSnapshot(ProcessingBackend.Disabled, EncoderBackend.Software, 3, 3000);
+            if (s.Backlog.PeakPendingFrames != 8 || s.Backlog.PeakPendingBytes != 8000)
+                failures.Add($"M3 peak backlog must track the maximum: {s.Backlog}");
+        }
+
+        // 9. Ratio is Unknown when there is no valid production rate, and
+        //    never NaN/Infinity.
+        {
+            var tracker = new CapturePerformanceTracker(TimeSpan.FromSeconds(10));
+            tracker.AddSample(new CapturePerformanceTracker.Sample(Produced: 0, Consumed: 50, Output: 50, PendingFrames: 0, PendingBytes: 0));
+            var s = tracker.BuildSnapshot(ProcessingBackend.Unknown, EncoderBackend.Unknown, 0, 0);
+            if (s.ConsumptionRatio != 0 || !double.IsFinite(s.ConsumptionRatio))
+                failures.Add("M3 ratio must be 0 (unknown) without a production rate");
+        }
+    }
+
+    // ---- M3: watcher backlog/produced/read-failure telemetry ----
+
+    private void WatcherTelemetryTests(List<string> failures)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "mmod_tele_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            // Produced counts only stable frames; duplicate events cannot
+            // inflate it; candidates never count as produced.
+            var path1 = Path.Combine(dir, "tel_0001.tga");
+            var path2 = Path.Combine(dir, "tel_0002.tga");
+            File.WriteAllBytes(path1, BuildTga(4, 4));
+            File.WriteAllBytes(path2, BuildTga(4, 4));
+            var watcher = new TgaDirectoryWatcher(dir, "tel_");
+            watcher.Start(acceptPreSessionFiles: true);
+            Thread.Sleep(700); // let candidates stabilize
+            watcher.ForceFullScan();
+            if (watcher.ProducedCount != 2)
+                failures.Add($"M3 produced must count 2 stable frames, got {watcher.ProducedCount}");
+            if (watcher.CandidateCount != 0)
+                failures.Add($"M3 candidates must drain after stabilization, got {watcher.CandidateCount}");
+            if (watcher.PendingBytes <= 0)
+                failures.Add($"M3 pending bytes must be positive, got {watcher.PendingBytes}");
+            if (watcher.PeakPendingFrames < 2 || watcher.PeakPendingBytes <= 0)
+                failures.Add("M3 peak backlog must be tracked by the watcher");
+
+            // Consumed: remove frames one at a time; bytes shrink accordingly.
+            watcher.TryTake(1, out _);
+            if (watcher.PendingCount != 1 || watcher.PendingBytes <= 0)
+                failures.Add("M3 pending bytes must shrink after take");
+            watcher.TryTake(2, out _);
+            if (watcher.PendingCount != 0 || watcher.PendingBytes != 0)
+                failures.Add($"M3 pending must be empty with 0 bytes after drain, got {watcher.PendingBytes}");
+
+            // File disappears → read failure flagged, no exception.
+            File.WriteAllBytes(path1, BuildTga(4, 4));
+            watcher.ForceFullScan();
+            Thread.Sleep(700);
+            watcher.ForceFullScan();
+            File.Delete(path1); // vanishes while pending
+            watcher.ForceFullScan();
+            Thread.Sleep(100);
+            watcher.ForceFullScan();
+            if (!watcher.HasPendingReadFailure)
+                failures.Add("M3 vanished pending file must set the read-failure flag");
+            watcher.Dispose();
+
+            // Duplicate FS events for the same index must not re-count.
+            var dupDir = Path.Combine(Path.GetTempPath(), "mmod_dup_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dupDir);
+            var dup = new TgaDirectoryWatcher(dupDir, "dup_");
+            dup.Start(acceptPreSessionFiles: true);
+            File.WriteAllBytes(Path.Combine(dupDir, "dup_0001.tga"), BuildTga(4, 4));
+            File.WriteAllBytes(Path.Combine(dupDir, "dup_0002.tga"), BuildTga(4, 4));
+            Thread.Sleep(700);
+            dup.ForceFullScan();
+            Thread.Sleep(100);
+            dup.ForceFullScan();
+            if (dup.ProducedCount != 2)
+                failures.Add($"M3 duplicate events must not inflate produced: {dup.ProducedCount}");
+            dup.Dispose();
+            try { Directory.Delete(dupDir, true); } catch { }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
     private static byte[] BuildTga(int w, int h)
     {
         var header = new byte[18];
@@ -738,6 +968,7 @@ internal sealed class FakePipeline : ICapturePipeline
     public string? OutputPath { get; set; } = "out.mp4";
     public string? CaptureSessionId { get; set; } = "sess-fake";
     public ITgaCaptureWatcher Watcher { get; set; }
+    public PerformanceSnapshot Performance { get; set; } = PerformanceSnapshot.Empty;
     public TaskCompletionSource CompletionSrc { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Task Completion => CompletionSrc.Task;
     public bool HasVisualChange { get; set; }
@@ -843,6 +1074,11 @@ internal sealed class FakeWatcher : ITgaCaptureWatcher
     public int? LastAcceptedFrameIndex { get; set; }
     public int MaxObservedFrameIndex { get; set; }
     public int SessionFileCount { get; set; }
+    public long PendingBytes { get; set; }
+    public long ProducedCount { get; set; }
+    public long PeakPendingFrames { get; set; }
+    public long PeakPendingBytes { get; set; }
+    public bool HasPendingReadFailure { get; set; }
     public bool HasUnstableFiles { get; set; }
     public bool IsFrozen { get; set; }
     public string SequencePrefix { get; set; } = "mmod_fake_";

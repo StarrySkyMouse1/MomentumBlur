@@ -99,6 +99,25 @@ MMOD_API int32_t mmod_session_get_progress(MmodSession* session, int32_t* out_do
 /* Diagnostics: whether quality effects are enabled and whether the session fell back to CPU processing. */
 MMOD_API int32_t mmod_session_get_processing_status(MmodSession* session, int32_t* out_effects_enabled, int32_t* out_using_cpu_fallback);
 
+/* Versioned backend diagnosis (M3). out_abi_version must be written with the
+   supported layout version (1); the caller passes the pointer to read it back.
+   out_processing reports the actual processing path: 0 Unknown, 1 Disabled,
+   2 Gpu, 3 CpuFallback. out_encoder reports the actual encoding path:
+   0 Unknown, 1 Hardware, 2 Software. */
+#define MMOD_BACKENDS_ABI_VERSION 1
+enum MmodProcessingBackend {
+  MmodProcessing_Unknown = 0,
+  MmodProcessing_Disabled = 1,
+  MmodProcessing_Gpu = 2,
+  MmodProcessing_CpuFallback = 3
+};
+enum MmodEncoderBackend {
+  MmodEncoderBackend_Unknown = 0,
+  MmodEncoderBackend_Hardware = 1,
+  MmodEncoderBackend_Software = 2
+};
+MMOD_API int32_t mmod_session_get_backends(MmodSession* session, int32_t* out_abi_version, int32_t* out_processing, int32_t* out_encoder);
+
 /* One-shot: decode input video via Media Foundation, mosample, encode MP4. */
 MMOD_API int32_t mmod_process_video_file(
     const wchar_t* input_path,

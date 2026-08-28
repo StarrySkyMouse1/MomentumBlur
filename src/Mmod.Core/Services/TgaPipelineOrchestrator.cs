@@ -13,6 +13,7 @@ namespace Mmod.Core.Services;
 public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
 {
     private readonly VisualPlaybackEvidenceProbe _evidenceProbe;
+    private readonly CapturePerformanceTracker _performanceTracker = new();
     private CancellationTokenSource? _cts;
     private Task? _loop;
     private TaskCompletionSource _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -21,6 +22,9 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
     private int _nextFrame;
     private long _fed;
     private long _submittedInputFrames;
+    private long _outputFrames;
+    private ProcessingBackend _processingBackend = ProcessingBackend.Unknown;
+    private EncoderBackend _encoderBackend = EncoderBackend.Unknown;
     private int _firstFrameWidth;
     private int _firstFrameHeight;
     private Exception? _fault;
@@ -49,6 +53,18 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
     public string? WatchDirectory { get; private set; }
     public string? SessionDiagnostics => _sessionDiagnostics;
     public string Status { get; private set; } = "空闲";
+
+    /// <summary>
+    /// Immutable runtime capture-performance snapshot. Produced comes from the
+    /// watcher's stable-frame counter, Consumed from successful native
+    /// submits, Output from the native frames_output counter.
+    /// </summary>
+    public PerformanceSnapshot Performance => _performanceTracker.BuildSnapshot(
+        _processingBackend,
+        _encoderBackend,
+        _watcher?.PendingCount ?? 0,
+        _watcher?.PendingBytes ?? 0);
+
     public ITgaCaptureWatcher Watcher => _watcher ?? throw new InvalidOperationException("Watcher 尚未启动。");
     public string? CaptureSessionId { get; private set; }
     public string? SequencePrefix { get; private set; }
@@ -104,6 +120,10 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
 
         _fed = 0;
         _submittedInputFrames = 0;
+        _outputFrames = 0;
+        _processingBackend = ProcessingBackend.Unknown;
+        _encoderBackend = EncoderBackend.Unknown;
+        _performanceTracker.Reset();
         HasVisualChange = false;
         ActivityAnchorFrame = null;
         LastVisualChangeFrame = null;
@@ -240,6 +260,9 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
         var progress = _session.GetProgress();
         _session.Finish(); // P0-06: Finish fault must propagate
 
+        _outputFrames = progress.Done; // real native frames_output, never submitted/N
+        SamplePerformance();
+
         _state = PipelineState.Finalized;
         Status = File.Exists(OutputPath) ? $"完成：{OutputPath}" : "已停止（无输出文件）";
         Changed?.Invoke();
@@ -301,7 +324,9 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
                 _session.SubmitBgra(bgra, width * 4);
                 _submittedInputFrames++;
                 _fed++;
+                _outputFrames = _session.GetProgress().Done;
                 TrackPlaybackEvidence(bgra, width, height);
+                SamplePerformance();
 
                 Status = $"合成中：已喂入 {_fed} 帧，待处理 {_watcher.PendingCount}";
                 Changed?.Invoke();
@@ -335,6 +360,7 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
             NativeSessionFactory.BuildOptions(settings));
         _sessionDiagnostics = NativeSessionDiagnostics.Describe(
             settings, width, height, blend, ProjectConstants.FinalOutputFramerate);
+        (_processingBackend, _encoderBackend) = session.GetBackends();
         return session;
     }
 
@@ -353,7 +379,25 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
         _session.SubmitBgra(bgra, width * 4);
         _submittedInputFrames++;
         _fed++;
+        _outputFrames = _session.GetProgress().Done;
         try { File.Delete(path); } catch { /* ignore */ }
+    }
+
+    /// <summary>
+    /// Samples the rolling performance windows from real counters. Produced is
+    /// the watcher's stable-frame count (duplicate events cannot inflate it),
+    /// Consumed is successful native submits, Output is the native
+    /// frames_output counter, and the backlog is the current session's
+    /// stable pending frames/bytes (candidates keep their own semantics).
+    /// </summary>
+    private void SamplePerformance()
+    {
+        _performanceTracker.AddSample(new CapturePerformanceTracker.Sample(
+            Produced: _watcher?.ProducedCount ?? 0,
+            Consumed: _submittedInputFrames,
+            Output: _outputFrames,
+            PendingFrames: _watcher?.PendingCount ?? 0,
+            PendingBytes: _watcher?.PendingBytes ?? 0));
     }
 
     private void TrackPlaybackEvidence(ReadOnlySpan<byte> bgra, int width, int height)
