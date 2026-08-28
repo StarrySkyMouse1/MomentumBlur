@@ -30,13 +30,22 @@ public sealed class GameExitedException : RecordingStageException
 /// <summary>Watch drive free space fell below the percentage safety floor.</summary>
 public sealed class DiskPressureException : RecordingStageException
 {
-    public DiskPressureException(string message, DiskHealthSnapshot? snapshot = null)
+    public DiskPressureException(string message, DiskHealthSnapshot? snapshot = null, ControlledStopResult? controlledStop = null)
         : base(RecordingFailureKind.DiskPressure, message)
     {
         Snapshot = snapshot;
+        ControlledStop = controlledStop;
     }
 
     public DiskHealthSnapshot? Snapshot { get; }
+
+    /// <summary>
+    /// Non-null only when the controlled stop sequence (strict endmovie →
+    /// quiescence → freeze/drain → Native Finish) proved successful. The
+    /// caller then runs media validation + atomic commit + persistence; a
+    /// null value means no partial may be recorded.
+    /// </summary>
+    public ControlledStopResult? ControlledStop { get; }
 }
 
 /// <summary>

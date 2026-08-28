@@ -718,6 +718,58 @@ if (args.Length >= 1 && args[0] == "repository")
         Console.WriteLine("REPOSITORY_FAIL: quality config lost in task SettingsJson");
         return 6;
     }
+
+    // ---- M4: partial-clip persistence + old-DB equivalence ----
+    // 1. An attempt with no partial reads as "no partial" (old-record semantics).
+    var m4Node = reopened.GetNodes(id).Single();
+    var attemptId = reopened.CreateAttempt(new RenderAttemptRecord(
+        Id: Guid.NewGuid().ToString("N"),
+        SessionId: "sess-m4",
+        TaskId: id,
+        NodeId: m4Node.Id,
+        AttemptNumber: 1,
+        Stage: NodeExecutionStage.DiskPressureRequested,
+        SequencePrefix: "mmod_m4_",
+        TempClipPath: null,
+        CreatedAt: DateTimeOffset.UtcNow,
+        UpdatedAt: DateTimeOffset.UtcNow,
+        FinishedAt: null,
+        LastError: null,
+        FailureKind: RecordingFailureKind.DiskPressure,
+        CleanupState: CaptureCleanupState.Clean,
+        GameProcessId: null,
+        GameProcessStartedUtc: null,
+        NetConPort: null,
+        ExpectedMap: "map",
+        FedCount: 0,
+        SubmittedFrameCount: 0,
+        LastTgaIndex: null));
+    var noPartial = reopened.GetAttemptsForNode(id, m4Node.Id).Single();
+    if (noPartial.PartialState != PartialState.None)
+    {
+        Console.WriteLine("REPOSITORY_FAIL: fresh attempt must read as no partial");
+        return 7;
+    }
+
+    // 2. Validated partial round-trips through reopen (idempotent migration).
+    reopened.UpdateAttemptPartial(attemptId, @"C:\work\attempt_1.partial.mp4", DateTimeOffset.UtcNow, 800, "DiskPressure Critical");
+    var withPartial = new RenderTaskRepository(db).GetAttemptsForNode(id, node.Id).Single();
+    if (withPartial.PartialState != PartialState.Validated ||
+        withPartial.PartialPath != @"C:\work\attempt_1.partial.mp4" ||
+        withPartial.PartialOutputFrames != 800 ||
+        withPartial.PartialReason is null ||
+        new RenderTaskRepository(db).GetAttemptsWithValidatedPartial().Count != 1)
+    {
+        Console.WriteLine("REPOSITORY_FAIL: validated partial must round-trip");
+        return 8;
+    }
+
+    // 3. Node ClipPath stays null; a partial never marks the node Completed.
+    if (reopened.GetNodes(id).Single().ClipPath is not null)
+    {
+        Console.WriteLine("REPOSITORY_FAIL: partial must not occupy ClipPath");
+        return 9;
+    }
     Console.WriteLine("REPOSITORY_OK");
     return 0;
 }

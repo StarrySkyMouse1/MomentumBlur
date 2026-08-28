@@ -293,6 +293,36 @@ public sealed class RenderTaskRepository
         command.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// M4: persists a media-validated partial clip on the attempt. The
+    /// node's formal ClipPath is never touched here; merge input can only
+    /// read Completed nodes, so partials can never be merged.
+    /// </summary>
+    public void UpdateAttemptPartial(
+        string attemptId,
+        string partialPath,
+        DateTimeOffset validatedAt,
+        long outputFrames,
+        string reason)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE render_attempts SET partial_state=$state, partial_path=$path,
+                partial_validated_at=$at, partial_output_frames=$frames, partial_reason=$reason,
+                updated_at=$now
+            WHERE id=$id;
+            """;
+        command.Parameters.AddWithValue("$state", (int)PartialState.Validated);
+        command.Parameters.AddWithValue("$path", partialPath);
+        command.Parameters.AddWithValue("$at", validatedAt.ToString("O"));
+        command.Parameters.AddWithValue("$frames", outputFrames);
+        command.Parameters.AddWithValue("$reason", (object?)reason ?? DBNull.Value);
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$id", attemptId);
+        command.ExecuteNonQuery();
+    }
+
     public IReadOnlyList<RenderAttemptRecord> GetAttemptsForNode(string taskId, string nodeId)
     {
         using var connection = Open();
@@ -316,6 +346,23 @@ public sealed class RenderTaskRepository
         command.Parameters.AddWithValue("$completed", (int)NodeExecutionStage.Completed);
         command.Parameters.AddWithValue("$failed", (int)NodeExecutionStage.Failed);
         command.Parameters.AddWithValue("$canceled", (int)NodeExecutionStage.Canceled);
+        using var reader = command.ExecuteReader();
+        var result = new List<RenderAttemptRecord>();
+        while (reader.Read())
+            result.Add(ReadAttempt(reader));
+        return result;
+    }
+
+    /// <summary>
+    /// M4: attempts with a persisted Validated partial (crash recovery keeps
+    /// them; unvalidated temp outputs are conservatively deleted).
+    /// </summary>
+    public IReadOnlyList<RenderAttemptRecord> GetAttemptsWithValidatedPartial()
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT * FROM render_attempts WHERE partial_state=$validated;";
+        command.Parameters.AddWithValue("$validated", (int)PartialState.Validated);
         using var reader = command.ExecuteReader();
         var result = new List<RenderAttemptRecord>();
         while (reader.Read())
@@ -470,7 +517,10 @@ public sealed class RenderTaskRepository
                 game_process_id INTEGER NULL, game_process_started_at TEXT NULL,
                 netcon_port INTEGER NULL, expected_map TEXT NULL,
                 fed_count INTEGER NOT NULL DEFAULT 0, submitted_frame_count INTEGER NOT NULL DEFAULT 0,
-                last_tga_index INTEGER NULL
+                last_tga_index INTEGER NULL,
+                partial_state INTEGER NOT NULL DEFAULT 0, partial_path TEXT NULL,
+                partial_validated_at TEXT NULL, partial_output_frames INTEGER NULL,
+                partial_reason TEXT NULL
             );
             CREATE INDEX IF NOT EXISTS ix_render_attempts_node ON render_attempts(task_id, node_id, attempt_number);
             CREATE INDEX IF NOT EXISTS ix_render_attempts_active ON render_attempts(stage);
@@ -484,6 +534,12 @@ public sealed class RenderTaskRepository
         EnsureColumn(connection, "runner_session", "sequence_prefix", "TEXT NULL");
         EnsureColumn(connection, "runner_session", "ownership_token", "TEXT NULL");
         EnsureColumn(connection, "runner_session", "watch_directory", "TEXT NULL");
+        // M4: partial-clip lifecycle columns (nullable, idempotent; old DBs read as "no partial").
+        EnsureColumn(connection, "render_attempts", "partial_state", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn(connection, "render_attempts", "partial_path", "TEXT NULL");
+        EnsureColumn(connection, "render_attempts", "partial_validated_at", "TEXT NULL");
+        EnsureColumn(connection, "render_attempts", "partial_output_frames", "INTEGER NULL");
+        EnsureColumn(connection, "render_attempts", "partial_reason", "TEXT NULL");
         NormalizeInterruptedWork(connection);
     }
 
@@ -606,7 +662,12 @@ public sealed class RenderTaskRepository
         GetNullableString(reader, "expected_map"),
         reader.GetInt64(reader.GetOrdinal("fed_count")),
         reader.GetInt64(reader.GetOrdinal("submitted_frame_count")),
-        GetNullableInt(reader, "last_tga_index"));
+        GetNullableInt(reader, "last_tga_index"),
+        (PartialState)reader.GetInt32(reader.GetOrdinal("partial_state")),
+        GetNullableString(reader, "partial_path"),
+        GetNullableDate(reader, "partial_validated_at"),
+        reader.IsDBNull(reader.GetOrdinal("partial_output_frames")) ? null : reader.GetInt64(reader.GetOrdinal("partial_output_frames")),
+        GetNullableString(reader, "partial_reason"));
 
     private static DateTimeOffset? GetNullableDate(SqliteDataReader reader, string name)
     {

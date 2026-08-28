@@ -31,6 +31,9 @@ public sealed class RecordingStateTests
         TelemetryTests(failures);
         WatcherTelemetryTests(failures);
         WatcherDedupTests(failures);
+        await DiskPressureControlledStopTests(failures);
+        await PartialPersistenceTests(failures);
+        await PartialCrashRecoveryTests(failures);
     }
 
     // ---- 17.5 / 17.6 / 17.7: visual playback evidence probe ----
@@ -227,8 +230,9 @@ public sealed class RecordingStateTests
             TgaQuiescenceHardTimeout = TimeSpan.FromSeconds(2),
         };
 
-        // A-S2-03: 100 GiB volume with 9 GiB free at 10% must trigger DiskPressure
-        // even though 9 GiB >> old 2 GiB floor.
+        // A-S2-03: 100 GiB volume with 9 GiB free at 10% must trigger the
+        // controlled stop (M4): endmovie → quiescence → drain → Finish, then
+        // throw DiskPressure carrying the ControlledStop result.
         {
             var t = DiskTimeouts();
             var (net, pipe, health) = Fakes.ForStall(t, stall: 2000);
@@ -245,6 +249,10 @@ public sealed class RecordingStateTests
             {
                 if (!ex.Message.Contains("9.0%", StringComparison.Ordinal) || !ex.Message.Contains("R:\\", StringComparison.Ordinal))
                     failures.Add($"A-S2-03 DiskPressure message must carry FreePercent/DriveRoot: {ex.Message}");
+                if (ex.ControlledStop is null)
+                    failures.Add("A-S2-03 DiskPressure must carry a ControlledStop after the controlled sequence");
+                else if (ex.ControlledStop.Finalize.FinishSucceeded != true || pipe.FinalizeCount < 1)
+                    failures.Add("A-S2-03 controlled stop must have run finalize");
             }
         }
 
@@ -356,6 +364,292 @@ public sealed class RecordingStateTests
                 failures.Add($"A-S2-09 disk sampling not time-throttled: {callCount} samples in a 2s stall");
             if (callCount < 10)
                 failures.Add($"A-S2-09 disk sampling too sparse (interval too large or clock broken): {callCount}");
+        }
+    }
+
+    // ---- M4: DiskPressure controlled stop + partial lifecycle ----
+
+    private async Task DiskPressureControlledStopTests(List<string> failures)
+    {
+        const long gib = 1024L * 1024 * 1024;
+        RecordingTimeoutPolicy DiskTimeouts() => new()
+        {
+            ProgressSampleInterval = TimeSpan.FromMilliseconds(10),
+            DiskHealthSampleInterval = TimeSpan.FromMilliseconds(30),
+            DiskHealthUnavailableMaxConsecutiveSamples = 3,
+            TgaQuiescenceQuietWindow = TimeSpan.FromMilliseconds(20),
+            TgaQuiescenceHardTimeout = TimeSpan.FromSeconds(2),
+        };
+        DiskHealthSnapshot CriticalSnap() =>
+            DiskSafetyPolicy.EvaluateSnapshot("R:\\", 100 * gib, 9 * gib, 10, DateTimeOffset.UtcNow);
+
+        // M4-01: controlled-stop endmovie failure → CaptureStopUnconfirmed and
+        //        no ControlledStop (no partial may be recorded).
+        {
+            var t = DiskTimeouts();
+            var (net, pipe, health) = Fakes.ForStall(t, stall: 2000);
+            net.OnStrict = (cmd) =>
+            {
+                if (cmd == "endmovie")
+                    throw new TimeoutException("endmovie timeout");
+                return Task.FromResult(new NetConCommandResult(cmd, "m", DateTime.UtcNow, DateTime.UtcNow, [], null));
+            };
+            health.Snapshots.Add(CriticalSnap());
+            try
+            {
+                await CaptureEnvelopeRecorder.RecordAsync(
+                    net, pipe, new UserSettings { SupersamplingMultiplier = 1, DiskSafetyFreePercent = 10 }, "replays/x.mtv", 1.0,
+                    health, null, null, CancellationToken.None, t, _ => { });
+                failures.Add("M4-01 endmovie failure must throw");
+            }
+            catch (CaptureStopUnconfirmedException ex)
+            {
+                if (ex.FailureKind != RecordingFailureKind.CaptureStopUnconfirmed)
+                    failures.Add("M4-01 must classify as CaptureStopUnconfirmed");
+            }
+            catch (Exception ex)
+            {
+                failures.Add($"M4-01 unexpected exception: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        // M4-02: quiescence failure during the controlled stop → no
+        //        ControlledStop (no partial may be recorded).
+        {
+            var t = DiskTimeouts();
+            var (net, pipe, health) = Fakes.ForStall(t, stall: 2000);
+            pipe.Watcher = new FakeWatcher { ThrowQuiescence = true };
+            health.Snapshots.Add(CriticalSnap());
+            try
+            {
+                await CaptureEnvelopeRecorder.RecordAsync(
+                    net, pipe, new UserSettings { SupersamplingMultiplier = 1, DiskSafetyFreePercent = 10 }, "replays/x.mtv", 1.0,
+                    health, null, null, CancellationToken.None, t, _ => { });
+                failures.Add("M4-02 quiescence failure must throw");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                if (ex is DiskPressureException { ControlledStop: not null })
+                    failures.Add("M4-02 quiescence failure must not produce a ControlledStop");
+            }
+        }
+
+        // M4-03: finalize failure during the controlled stop → no ControlledStop.
+        {
+            var t = DiskTimeouts();
+            var (net, pipe, health) = Fakes.ForStall(t, stall: 2000);
+            pipe.OnFinalize = (_, _) => throw new InvalidOperationException("native finish failed");
+            health.Snapshots.Add(CriticalSnap());
+            try
+            {
+                await CaptureEnvelopeRecorder.RecordAsync(
+                    net, pipe, new UserSettings { SupersamplingMultiplier = 1, DiskSafetyFreePercent = 10 }, "replays/x.mtv", 1.0,
+                    health, null, null, CancellationToken.None, t, _ => { });
+                failures.Add("M4-03 finalize failure must throw");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                if (ex is DiskPressureException { ControlledStop: not null })
+                    failures.Add("M4-03 finalize failure must not produce a ControlledStop");
+            }
+        }
+
+        // M4-04: successful controlled stop carries real output facts.
+        {
+            var t = DiskTimeouts();
+            var (net, pipe, health) = Fakes.ForStall(t, stall: 2000);
+            pipe.FinalizeResult = new PipelineFinalizeResult(1000, 800, 0, 999, "out.mp4", true, 1920, 1080);
+            health.Snapshots.Add(CriticalSnap());
+            try
+            {
+                await CaptureEnvelopeRecorder.RecordAsync(
+                    net, pipe, new UserSettings { SupersamplingMultiplier = 1, DiskSafetyFreePercent = 10 }, "replays/x.mtv", 1.0,
+                    health, null, null, CancellationToken.None, t, _ => { });
+                failures.Add("M4-04 controlled stop must throw DiskPressure");
+            }
+            catch (DiskPressureException ex)
+            {
+                if (ex.ControlledStop is null)
+                {
+                    failures.Add("M4-04 controlled stop must carry the result");
+                }
+                else
+                {
+                    if (ex.ControlledStop.OutputFrames != 800 || ex.ControlledStop.SubmittedFrames != 1000)
+                        failures.Add($"M4-04 controlled stop facts wrong: {ex.ControlledStop}");
+                    if (ex.ControlledStop.Finalize.FirstFrameWidth != 1920)
+                        failures.Add("M4-04 controlled stop must carry first-frame geometry");
+                    if (pipe.FinalizeCount < 1)
+                        failures.Add("M4-04 controlled stop must run finalize");
+                }
+            }
+        }
+
+        // M4-05: Warning and 0% Disabled never enter the partial flow.
+        {
+            var t = DiskTimeouts();
+            var (net, pipe, health) = Fakes.ForHappyPath(t);
+            health.Snapshots.Add(DiskSafetyPolicy.EvaluateSnapshot("R:\\", 100 * gib, 12 * gib, 10, DateTimeOffset.UtcNow));
+            var result = await CaptureEnvelopeRecorder.RecordAsync(
+                net, pipe, new UserSettings { SupersamplingMultiplier = 1, DiskSafetyFreePercent = 10 }, "replays/x.mtv", 1.0,
+                health, null, null, CancellationToken.None, t, _ => { });
+            if (result.FinishSucceeded != true)
+                failures.Add("M4-05 Warning must not stop recording");
+        }
+    }
+
+    // ---- M4: partial persistence + crash recovery (pure repository fakes) ----
+
+    private async Task PartialPersistenceTests(List<string> failures)
+    {
+        var db = Path.Combine(Path.GetTempPath(), "mmod_m4_" + Guid.NewGuid().ToString("N") + ".db");
+        var repo = new RenderTaskRepository(db);
+        try
+        {
+            var settings = new RenderSettingsSnapshot(10, 0.5, @"R:\", @"C:\Videos", @"C:\Game", false, 60, 0);
+            var taskId = repo.CreateTask(new NewRenderTask("map", "player", 1, @"C:\Videos\out.mp4", settings,
+                [new NewRenderNode(@"C:\record.mtv", 1, 0, 12.3, 738)]));
+            var nodeId = repo.GetNodes(taskId).Single().Id;
+            var session = CaptureSessionInfo.Create(taskId, 0, 1);
+            var attemptId = repo.CreateAttempt(new RenderAttemptRecord(
+                Id: Guid.NewGuid().ToString("N"),
+                SessionId: session.CaptureSessionId,
+                TaskId: taskId,
+                NodeId: nodeId,
+                AttemptNumber: 1,
+                Stage: NodeExecutionStage.DiskPressureRequested,
+                SequencePrefix: session.SequencePrefix,
+                TempClipPath: @"C:\work\attempt_1.encoding.mp4",
+                CreatedAt: DateTimeOffset.UtcNow,
+                UpdatedAt: DateTimeOffset.UtcNow,
+                FinishedAt: null,
+                LastError: null,
+                FailureKind: RecordingFailureKind.DiskPressure,
+                CleanupState: CaptureCleanupState.Clean,
+                GameProcessId: null,
+                GameProcessStartedUtc: null,
+                NetConPort: null,
+                ExpectedMap: "map",
+                FedCount: 100,
+                SubmittedFrameCount: 100,
+                LastTgaIndex: 99));
+
+            // Old-record equivalent: fresh attempt reads as "no partial".
+            var fresh = repo.GetAttemptsForNode(taskId, nodeId).Single();
+            if (fresh.PartialState != PartialState.None || fresh.PartialPath is not null || fresh.PartialOutputFrames is not null)
+                failures.Add("M4 fresh attempt must read as no partial");
+
+            // Persist a validated partial.
+            var validatedAt = DateTimeOffset.UtcNow;
+            repo.UpdateAttemptPartial(attemptId, @"C:\work\attempt_1.partial.mp4", validatedAt, 800, "DiskPressure Critical");
+
+            var stored = repo.GetAttemptsForNode(taskId, nodeId).Single();
+            if (stored.PartialState != PartialState.Validated)
+                failures.Add($"M4 partial must persist as Validated, got {stored.PartialState}");
+            if (stored.PartialPath != @"C:\work\attempt_1.partial.mp4")
+                failures.Add("M4 partial path must round-trip");
+            if (stored.PartialOutputFrames != 800)
+                failures.Add($"M4 partial output frames must round-trip, got {stored.PartialOutputFrames}");
+            if (stored.PartialValidatedAt is null)
+                failures.Add("M4 partial validated-at must round-trip");
+            if (stored.PartialReason is null || !stored.PartialReason.Contains("DiskPressure", StringComparison.Ordinal))
+                failures.Add("M4 partial reason must round-trip");
+
+            // Reopen the DB: idempotent migration, values survive.
+            var reopened = new RenderTaskRepository(db);
+            var reread = reopened.GetAttemptsForNode(taskId, nodeId).Single();
+            if (reread.PartialState != PartialState.Validated || reread.PartialPath != @"C:\work\attempt_1.partial.mp4")
+                failures.Add("M4 partial must survive DB reopen");
+            if (reopened.GetAttemptsWithValidatedPartial().Count != 1)
+                failures.Add("M4 GetAttemptsWithValidatedPartial must find the attempt");
+
+            // Terminal attempt + validated partial: node stays not-completed,
+            // ClipPath stays null (merge can never include partials).
+            var node = reopened.GetNodes(taskId).Single();
+            if (node.ClipPath is not null)
+                failures.Add("M4 node ClipPath must stay null with a validated partial");
+            if (node.Status == RenderNodeStatus.Completed)
+                failures.Add("M4 node must never be Completed by a partial");
+        }
+        finally
+        {
+            try { File.Delete(db); } catch { }
+            try { File.Delete(db + "-wal"); } catch { }
+            try { File.Delete(db + "-shm"); } catch { }
+        }
+    }
+
+    // ---- M4: crash recovery keeps validated partials, cleans unvalidated temp ----
+
+    private async Task PartialCrashRecoveryTests(List<string> failures)
+    {
+        var workDir = Path.Combine(Path.GetTempPath(), "mmod_m4crash_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workDir);
+        var db = Path.Combine(Path.GetTempPath(), "mmod_m4crash_" + Guid.NewGuid().ToString("N") + ".db");
+        var repo = new RenderTaskRepository(db);
+        try
+        {
+            var settings = new RenderSettingsSnapshot(10, 0.5, @"R:\", @"C:\Videos", @"C:\Game", false, 60, 0);
+            var taskId = repo.CreateTask(new NewRenderTask("map", "player", 1, @"C:\Videos\out.mp4", settings,
+                [new NewRenderNode(@"C:\record.mtv", 1, 0, 12.3, 738)]));
+            var nodeId = repo.GetNodes(taskId).Single().Id;
+
+            // Validated partial: file exists and must be kept.
+            var validatedDir = Path.Combine(workDir, "node_001");
+            Directory.CreateDirectory(validatedDir);
+            var validatedFile = Path.Combine(validatedDir, "attempt_1_abc123.partial.mp4");
+            File.WriteAllText(validatedFile, "validated-partial-bytes");
+            var vSession = CaptureSessionInfo.Create(taskId, 0, 1);
+            var vAttemptId = repo.CreateAttempt(new RenderAttemptRecord(
+                Guid.NewGuid().ToString("N"), vSession.CaptureSessionId, taskId, nodeId, 1,
+                NodeExecutionStage.Failed, vSession.SequencePrefix, null,
+                DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+                "DiskPressure", RecordingFailureKind.DiskPressure, CaptureCleanupState.Clean,
+                null, null, null, "map", 100, 100, 99));
+            repo.UpdateAttemptPartial(vAttemptId, validatedFile, DateTimeOffset.UtcNow, 800, "DiskPressure Critical");
+
+            // Unvalidated attempt with a temp file: must be deleted.
+            var tempDir = Path.Combine(workDir, "node_002");
+            Directory.CreateDirectory(tempDir);
+            var tempFile = Path.Combine(tempDir, "attempt_2_def456.encoding.mp4");
+            File.WriteAllText(tempFile, "unvalidated-temp-bytes");
+            var uSession = CaptureSessionInfo.Create(taskId, 1, 2);
+            repo.CreateAttempt(new RenderAttemptRecord(
+                Guid.NewGuid().ToString("N"), uSession.CaptureSessionId, taskId, nodeId, 2,
+                NodeExecutionStage.Capturing, uSession.SequencePrefix, tempFile,
+                DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null,
+                null, null, CaptureCleanupState.NotRequired,
+                null, null, null, "map", 10, 10, 9));
+
+            // Runner session pointing at the task → recovery runs.
+            repo.SaveRunnerSession(new RunnerSessionRecord(
+                ProcessId: null, NetConPort: null, NetConPassword: null, TaskId: taskId, NodeId: nodeId,
+                ExePath: null, ProcessStartedAt: null, GameSessionId: null,
+                CaptureSessionId: null, SequencePrefix: null, OwnershipToken: null,
+                WatchDirectory: @"R:\"));
+
+            var runner = new RenderTaskRunner(repo);
+            await runner.RecoverFromCrashAsync(CancellationToken.None);
+
+            // Validated partial file kept.
+            if (!File.Exists(validatedFile))
+                failures.Add("M4 crash recovery must keep the validated partial file");
+            // Unvalidated temp deleted.
+            if (File.Exists(tempFile))
+                failures.Add("M4 crash recovery must delete the unvalidated temp");
+            // Node back to re-recordable state.
+            var node = repo.GetNodes(taskId).Single();
+            if (node.Status != RenderNodeStatus.Pending)
+                failures.Add($"M4 crash recovery must leave the node Pending, got {node.Status}");
+            if (node.ClipPath is not null)
+                failures.Add("M4 crash recovery must not adopt a crash-window file as ClipPath");
+        }
+        finally
+        {
+            try { Directory.Delete(workDir, true); } catch { }
+            try { File.Delete(db); } catch { }
+            try { File.Delete(db + "-wal"); } catch { }
+            try { File.Delete(db + "-shm"); } catch { }
         }
     }
 
