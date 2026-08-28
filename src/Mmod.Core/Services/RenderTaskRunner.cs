@@ -574,7 +574,11 @@ public sealed class RenderTaskRunner : IAsyncDisposable
         Directory.CreateDirectory(s.OutputDirectory);
     }
 
-    /// <summary>Shared conversion used by the node coordinator (per-attempt).</summary>
+    /// <summary>
+    /// Shared conversion used by the node coordinator (per-attempt). The frozen
+    /// task percentage is copied explicitly (normalized) so the runtime never
+    /// falls back to the UserSettings default of 10.
+    /// </summary>
     public static UserSettings ToUserSettingsForAttempt(RenderSettingsSnapshot s) => new()
     {
         CaptureMode = CaptureMode.Tga,
@@ -588,6 +592,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
         MotionBlurWeightMode = s.MotionBlurMode,
         ShutterAngle = s.ShutterAngle,
         IntermediateTargetBitrate = s.TargetBitrate,
+        DiskSafetyFreePercent = DiskSafetyPolicy.NormalizeSafetyPercent(s.DiskSafetyFreePercent),
         VideoProcessing = s.VideoProcessing?.Clone(),
     };
 

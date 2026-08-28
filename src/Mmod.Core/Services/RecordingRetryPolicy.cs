@@ -11,7 +11,7 @@ public static class RecordingRetryPolicy
 {
     /// <summary>Kinds that must never auto-retry (user must act).</summary>
     public static readonly RecordingFailureKind[] Permanent =
-        [RecordingFailureKind.InvalidInput, RecordingFailureKind.UnsupportedReplay, RecordingFailureKind.MapUnavailable, RecordingFailureKind.DiskPressure, RecordingFailureKind.UserCanceled];
+        [RecordingFailureKind.InvalidInput, RecordingFailureKind.UnsupportedReplay, RecordingFailureKind.MapUnavailable, RecordingFailureKind.DiskPressure, RecordingFailureKind.UserCanceled, RecordingFailureKind.DiskHealthUnavailable];
 
     /// <summary>Kinds that force a fresh game session before retrying.</summary>
     public static readonly RecordingFailureKind[] RequiresRestartGame =

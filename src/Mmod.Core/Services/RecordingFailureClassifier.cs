@@ -27,10 +27,31 @@ public sealed class GameExitedException : RecordingStageException
     public GameExitedException(string message) : base(RecordingFailureKind.GameExited, message) { }
 }
 
-/// <summary>Watch drive free space fell below the safety floor.</summary>
+/// <summary>Watch drive free space fell below the percentage safety floor.</summary>
 public sealed class DiskPressureException : RecordingStageException
 {
-    public DiskPressureException(string message) : base(RecordingFailureKind.DiskPressure, message) { }
+    public DiskPressureException(string message, DiskHealthSnapshot? snapshot = null)
+        : base(RecordingFailureKind.DiskPressure, message)
+    {
+        Snapshot = snapshot;
+    }
+
+    public DiskHealthSnapshot? Snapshot { get; }
+}
+
+/// <summary>
+/// Watch-drive health could not be sampled (consecutive Unavailable samples).
+/// Distinct from DiskPressure: diagnostics and recovery semantics differ.
+/// </summary>
+public sealed class DiskHealthUnavailableException : RecordingStageException
+{
+    public DiskHealthUnavailableException(string message, DiskHealthSnapshot? snapshot = null)
+        : base(RecordingFailureKind.DiskHealthUnavailable, message)
+    {
+        Snapshot = snapshot;
+    }
+
+    public DiskHealthSnapshot? Snapshot { get; }
 }
 
 /// <summary>Maps exceptions to stable failure kinds for the retry policy.</summary>

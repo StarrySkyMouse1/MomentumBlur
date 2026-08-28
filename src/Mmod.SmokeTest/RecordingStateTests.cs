@@ -24,6 +24,7 @@ public sealed class RecordingStateTests
     {
         await ProbeTests(failures);
         await RecorderTests(failures);
+        await DiskSafetyTests(failures);
         await WatcherTests(failures);
         await PolicyTests(failures);
         MediaProbeTests(failures);
@@ -208,7 +209,152 @@ public sealed class RecordingStateTests
         }
     }
 
-    // ---- watcher (17.10 / 17.11 / 17.12 / 17.18 / 17.19) ----
+    // ---- S2: percentage disk safety at runtime (A-S2-03 .. A-S2-10) ----
+
+    private async Task DiskSafetyTests(List<string> failures)
+    {
+        const long gib = 1024L * 1024 * 1024;
+
+        RecordingTimeoutPolicy DiskTimeouts() => new()
+        {
+            ProgressSampleInterval = TimeSpan.FromMilliseconds(10),
+            DiskHealthSampleInterval = TimeSpan.FromMilliseconds(30),
+            DiskHealthUnavailableMaxConsecutiveSamples = 3,
+            TgaQuiescenceQuietWindow = TimeSpan.FromMilliseconds(20),
+            TgaQuiescenceHardTimeout = TimeSpan.FromSeconds(2),
+        };
+
+        // A-S2-03: 100 GiB volume with 9 GiB free at 10% must trigger DiskPressure
+        // even though 9 GiB >> old 2 GiB floor.
+        {
+            var t = DiskTimeouts();
+            var (net, pipe, health) = Fakes.ForStall(t, stall: 2000);
+            var snap = DiskSafetyPolicy.EvaluateSnapshot("R:\\", 100 * gib, 9 * gib, 10, DateTimeOffset.UtcNow);
+            health.Snapshots.Add(snap);
+            try
+            {
+                await CaptureEnvelopeRecorder.RecordAsync(
+                    net, pipe, new UserSettings { SupersamplingMultiplier = 1, DiskSafetyFreePercent = 10 }, "replays/x.mtv", 1.0,
+                    health, null, null, CancellationToken.None, t, _ => { });
+                failures.Add("A-S2-03 critical at 9/100 GiB (10%) must throw DiskPressure");
+            }
+            catch (DiskPressureException ex)
+            {
+                if (!ex.Message.Contains("9.0%", StringComparison.Ordinal) || !ex.Message.Contains("R:\\", StringComparison.Ordinal))
+                    failures.Add($"A-S2-03 DiskPressure message must carry FreePercent/DriveRoot: {ex.Message}");
+            }
+        }
+
+        // A-S2-04: 8 GiB volume with 1 GiB free (12.5%) at 10% must NOT stop,
+        // even though 1 GiB < old 2 GiB floor.
+        {
+            var t = DiskTimeouts();
+            var (net, pipe, health) = Fakes.ForHappyPath(t);
+            health.Snapshots.Add(DiskSafetyPolicy.EvaluateSnapshot("R:\\", 8 * gib, gib, 10, DateTimeOffset.UtcNow));
+            var result = await CaptureEnvelopeRecorder.RecordAsync(
+                net, pipe, new UserSettings { SupersamplingMultiplier = 1, DiskSafetyFreePercent = 10 }, "replays/x.mtv", 1.0,
+                health, null, null, CancellationToken.None, t, _ => { });
+            if (result.FinishSucceeded != true)
+                failures.Add("A-S2-04 1 GiB free on 8 GiB volume (12.5%) must not stop");
+        }
+
+        // A-S2-05: 0% protection off — 0 bytes free must not stop.
+        {
+            var t = DiskTimeouts();
+            var (net, pipe, health) = Fakes.ForHappyPath(t);
+            health.Snapshots.Add(DiskSafetyPolicy.EvaluateSnapshot("R:\\", 8 * gib, 0, 0, DateTimeOffset.UtcNow));
+            var result = await CaptureEnvelopeRecorder.RecordAsync(
+                net, pipe, new UserSettings { SupersamplingMultiplier = 1, DiskSafetyFreePercent = 0 }, "replays/x.mtv", 1.0,
+                health, null, null, CancellationToken.None, t, _ => { });
+            if (result.FinishSucceeded != true)
+                failures.Add("A-S2-05 0% with 0 bytes free must not stop");
+        }
+
+        // A-S2-05b: 0% protection off — Unavailable samples must not fail either.
+        {
+            var t = DiskTimeouts();
+            var (net, pipe, health) = Fakes.ForStall(t, stall: 2000);
+            for (var i = 0; i < 6; i++)
+                health.Snapshots.Add(DiskSafetyPolicy.EvaluateSnapshot("R:\\", 0, 0, 10, DateTimeOffset.UtcNow));
+            var result = await CaptureEnvelopeRecorder.RecordAsync(
+                net, pipe, new UserSettings { SupersamplingMultiplier = 1, DiskSafetyFreePercent = 0 }, "replays/x.mtv", 1.0,
+                health, null, null, CancellationToken.None, t, _ => { });
+            if (result.FinishSucceeded != true)
+                failures.Add("A-S2-05b 0% with Unavailable inputs must not stop");
+        }
+
+        // A-S2-06: Warning (12% free at 10% safety, 15% warning line) must not stop.
+        {
+            var t = DiskTimeouts();
+            var (net, pipe, health) = Fakes.ForHappyPath(t);
+            health.Snapshots.Add(DiskSafetyPolicy.EvaluateSnapshot("R:\\", 100 * gib, 12 * gib, 10, DateTimeOffset.UtcNow));
+            var result = await CaptureEnvelopeRecorder.RecordAsync(
+                net, pipe, new UserSettings { SupersamplingMultiplier = 1, DiskSafetyFreePercent = 10 }, "replays/x.mtv", 1.0,
+                health, null, null, CancellationToken.None, t, _ => { });
+            if (result.FinishSucceeded != true)
+                failures.Add("A-S2-06 Warning (12%) must not stop");
+        }
+
+        // A-S2-07: consecutive Unavailable reaching the configured max throws
+        // DiskHealthUnavailableException (max=3; the immediate + 2 resamples hit it).
+        {
+            var t = DiskTimeouts();
+            var (net, pipe, health) = Fakes.ForStall(t, stall: 2000);
+            for (var i = 0; i < 5; i++)
+                health.Snapshots.Add(DiskSafetyPolicy.EvaluateSnapshot("R:\\", 0, 0, 10, DateTimeOffset.UtcNow));
+            try
+            {
+                await CaptureEnvelopeRecorder.RecordAsync(
+                    net, pipe, new UserSettings { SupersamplingMultiplier = 1, DiskSafetyFreePercent = 10 }, "replays/x.mtv", 1.0,
+                    health, null, null, CancellationToken.None, t, _ => { });
+                failures.Add("A-S2-07 consecutive Unavailable must throw DiskHealthUnavailableException");
+            }
+            catch (DiskHealthUnavailableException)
+            {
+                // expected
+            }
+        }
+
+        // A-S2-08: recovery resets the consecutive count:
+        // U, U, Normal, U, U with max=3 must NOT fail (only 2 consecutive at the end).
+        // The trailing Normal also proves Normal resets the count: without the
+        // reset, the 4th sample (U after N) would already hit 3.
+        {
+            var t = DiskTimeouts();
+            var (net, pipe, health) = Fakes.ForStall(t, stall: 2000);
+            health.Snapshots.Add(DiskSafetyPolicy.EvaluateSnapshot("R:\\", 0, 0, 10, DateTimeOffset.UtcNow));                              // 1
+            health.Snapshots.Add(DiskSafetyPolicy.EvaluateSnapshot("R:\\", 0, 0, 10, DateTimeOffset.UtcNow));                              // 2
+            health.Snapshots.Add(DiskSafetyPolicy.EvaluateSnapshot("R:\\", 100 * gib, 90 * gib, 10, DateTimeOffset.UtcNow));               // Normal → reset
+            health.Snapshots.Add(DiskSafetyPolicy.EvaluateSnapshot("R:\\", 0, 0, 10, DateTimeOffset.UtcNow));                              // 1
+            health.Snapshots.Add(DiskSafetyPolicy.EvaluateSnapshot("R:\\", 0, 0, 10, DateTimeOffset.UtcNow));                              // 2
+            health.Snapshots.Add(DiskSafetyPolicy.EvaluateSnapshot("R:\\", 100 * gib, 90 * gib, 10, DateTimeOffset.UtcNow));               // Normal → reset (repeats)
+            var result = await CaptureEnvelopeRecorder.RecordAsync(
+                net, pipe, new UserSettings { SupersamplingMultiplier = 1, DiskSafetyFreePercent = 10 }, "replays/x.mtv", 1.0,
+                health, null, null, CancellationToken.None, t, _ => { });
+            if (result.FinishSucceeded != true)
+                failures.Add("A-S2-08 recovery must reset the consecutive Unavailable count");
+        }
+
+        // A-S2-09: disk sampling is time-throttled — a stall loop that never
+        // reaches safeEnd must not sample per iteration.
+        {
+            var t = DiskTimeouts();
+            var (net, pipe, health) = Fakes.ForStall(t, stall: 2000);
+            health.Snapshots.Add(DiskSafetyPolicy.EvaluateSnapshot("R:\\", 100 * gib, 90 * gib, 10, DateTimeOffset.UtcNow));
+            var result = await CaptureEnvelopeRecorder.RecordAsync(
+                net, pipe, new UserSettings { SupersamplingMultiplier = 1, DiskSafetyFreePercent = 10 }, "replays/x.mtv", 1.0,
+                health, null, null, CancellationToken.None, t, _ => { });
+            var callCount = health.SampleCount;
+            if (result.FinishSucceeded != true)
+                failures.Add("A-S2-09 throttled sample run must complete");
+            // 2000ms stall / 30ms interval ⇒ ~66 samples; anything near
+            // iterations-per-ms would mean per-loop sampling, so >200 fails.
+            if (callCount > 200)
+                failures.Add($"A-S2-09 disk sampling not time-throttled: {callCount} samples in a 2s stall");
+            if (callCount < 10)
+                failures.Add($"A-S2-09 disk sampling too sparse (interval too large or clock broken): {callCount}");
+        }
+    }
 
     private async Task WatcherTests(List<string> failures)
     {
@@ -295,11 +441,24 @@ public sealed class RecordingStateTests
     private Task PolicyTests(List<string> failures)
     {
         // permanent kinds never auto-retry
-        foreach (var kind in new[] { RecordingFailureKind.InvalidInput, RecordingFailureKind.UnsupportedReplay, RecordingFailureKind.MapUnavailable, RecordingFailureKind.DiskPressure, RecordingFailureKind.UserCanceled })
+        foreach (var kind in new[] { RecordingFailureKind.InvalidInput, RecordingFailureKind.UnsupportedReplay, RecordingFailureKind.MapUnavailable, RecordingFailureKind.DiskPressure, RecordingFailureKind.UserCanceled, RecordingFailureKind.DiskHealthUnavailable })
         {
             var d = RecordingRetryPolicy.Decide(kind, 1, 3, cleanupSucceeded: true);
             if (d.Action != RetryAction.NoRetryNeedsUser)
                 failures.Add($"retry policy: {kind} must not auto-retry");
+        }
+
+        // A-S2-10: both DiskPressure and DiskHealthUnavailable are permanent and
+        // classified independently (never reuse DiskPressure for sample failure).
+        {
+            var dp = RecordingRetryPolicy.Decide(RecordingFailureKind.DiskPressure, 1, 3, cleanupSucceeded: true);
+            var du = RecordingRetryPolicy.Decide(RecordingFailureKind.DiskHealthUnavailable, 1, 3, cleanupSucceeded: true);
+            if (dp.Action != RetryAction.NoRetryNeedsUser || du.Action != RetryAction.NoRetryNeedsUser)
+                failures.Add("A-S2-10 DiskPressure/DiskHealthUnavailable must both be NoRetryNeedsUser");
+            if (RecordingFailureClassifier.Classify(new DiskHealthUnavailableException("x")) != RecordingFailureKind.DiskHealthUnavailable)
+                failures.Add("A-S2-10 DiskHealthUnavailableException must classify as DiskHealthUnavailable");
+            if (RecordingFailureClassifier.Classify(new DiskPressureException("x")) != RecordingFailureKind.DiskPressure)
+                failures.Add("A-S2-10 DiskPressureException must classify as DiskPressure");
         }
 
         // 17.20: stop unconfirmed → restart game, and never same-session
@@ -509,6 +668,21 @@ internal static class Fakes
         var pipe = new FakePipeline(timeouts) { FedCount = 10, ActivityAnchorFrame = 3, HasVisualChange = true };
         return (net, pipe, new FakeHealth());
     }
+
+    /// <summary>Recording that stalls below safeEnd: the Capturing loop spins
+    /// (sampling disk per interval) until it is released or fails.</summary>
+    public static (FakeNetCon Net, FakePipeline Pipe, FakeHealth Health) ForStall(RecordingTimeoutPolicy timeouts, int stall)
+    {
+        var net = new FakeNetCon();
+        var pipe = new FakePipeline(timeouts) { FedCount = 10, ActivityAnchorFrame = 3, HasVisualChange = true };
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(stall);
+            pipe.FedCount = 5000;
+            pipe.CompletionSrc.TrySetResult();
+        });
+        return (net, pipe, new FakeHealth());
+    }
 }
 
 internal sealed class FakeNetCon : INetConClient
@@ -697,5 +871,27 @@ internal sealed class FakeHealth : IGameSessionHealthMonitor
     public TaskCompletionSource ExitSrc { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Task GameExitedTask => ExitSrc.Task;
     public bool IsGameRunning { get; set; } = true;
-    public long? WatchDriveFreeBytes { get; set; } = long.MaxValue;
+
+    /// <summary>Deterministic snapshots served in call order; last one repeats.</summary>
+    public List<DiskHealthSnapshot> Snapshots { get; } = [];
+
+    /// <summary>Number of GetWatchDiskHealth calls (throttling evidence).</summary>
+    public int SampleCount { get; private set; }
+
+    /// <summary>Last safetyPercent the recorder asked for.</summary>
+    public int LastRequestedSafetyPercent { get; private set; }
+
+    public DiskHealthSnapshot GetWatchDiskHealth(int safetyPercent)
+    {
+        SampleCount++;
+        LastRequestedSafetyPercent = safetyPercent;
+        if (Snapshots.Count == 0)
+            return DiskSafetyPolicy.EvaluateSnapshot("C:\\", 1024L * 1024 * 1024 * 1024, 500L * 1024 * 1024 * 1024, safetyPercent, DateTimeOffset.UtcNow);
+        // When safety is off (0%), the production monitor never reads the drive
+        // and always reports Disabled — mirror that semantics on the last entry.
+        if (DiskSafetyPolicy.NormalizeSafetyPercent(safetyPercent) == 0)
+            return DiskSafetyPolicy.EvaluateSnapshot("", 0, 0, 0, DateTimeOffset.UtcNow);
+        var index = Math.Min(SampleCount - 1, Snapshots.Count - 1);
+        return Snapshots[index];
+    }
 }

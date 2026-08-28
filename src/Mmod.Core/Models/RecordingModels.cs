@@ -73,6 +73,7 @@ public enum RecordingFailureKind
     DiskPressure = 15,
     UserCanceled = 16,
     Unknown = 17,
+    DiskHealthUnavailable = 18,
 }
 
 /// <summary>Result of the strict endmovie path. Only CommandAcked / KnownAlreadyStopped may continue.</summary>

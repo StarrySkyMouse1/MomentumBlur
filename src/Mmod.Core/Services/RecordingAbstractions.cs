@@ -150,8 +150,8 @@ public interface IFileCommitter
 
 /// <summary>
 /// Monitors owned game-session health during capture: process exit, optional
-/// NetCon heartbeat, disk free space. Lets the recorder fail in seconds when
-/// the game dies instead of waiting out a progress timeout.
+/// NetCon heartbeat, watch-drive disk health. Lets the recorder fail in
+/// seconds when the game dies instead of waiting out a progress timeout.
 /// </summary>
 public interface IGameSessionHealthMonitor
 {
@@ -160,8 +160,13 @@ public interface IGameSessionHealthMonitor
 
     bool IsGameRunning { get; }
 
-    /// <summary>Current free bytes on the watch drive, or null when unknown.</summary>
-    long? WatchDriveFreeBytes { get; }
+    /// <summary>
+    /// Samples the TGA watch directory's volume and returns a full frozen
+    /// disk-health snapshot. Implementations must never return null; failures
+    /// to sample the drive surface as an Unavailable snapshot. 0% protection
+    /// is reported as Disabled without requiring a drive read.
+    /// </summary>
+    DiskHealthSnapshot GetWatchDiskHealth(int safetyPercent);
 }
 
 /// <summary>Fake-able game process controller for the node coordinator.</summary>

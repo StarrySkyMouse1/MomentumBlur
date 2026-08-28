@@ -39,9 +39,11 @@ public sealed record RecordingTimeoutPolicy
     public int MaxAttempts { get; init; } = 3; // 1st attempt + 2 retries
     public int PlaybackEvidenceRequiredConsecutive { get; init; } = 3;
 
-    /// <summary>Free space safety floor before controlled stop (bytes).</summary>
-    public long DiskPressureMinFreeBytes { get; init; } = 2L * 1024 * 1024 * 1024; // 2 GiB
-    public int DiskPressureCheckIntervalFrames { get; init; } = 60;
+    /// <summary>Minimum interval between watch-drive health samples (time-throttled, not per frame).</summary>
+    public TimeSpan DiskHealthSampleInterval { get; init; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>Consecutive Unavailable samples before recording fails with DiskHealthUnavailable.</summary>
+    public int DiskHealthUnavailableMaxConsecutiveSamples { get; init; } = 5;
 
     /// <summary>Playback evidence thresholds.</summary>
     public double EvidenceChangedBlockRatioThreshold { get; init; } = 0.08;
