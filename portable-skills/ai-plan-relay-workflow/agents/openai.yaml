@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI 计划中继工作流"
+  short_description: "用最少可靠轮次规划、执行、审核并收尾跨 AI 任务"
+  default_prompt: "Use $ai-plan-relay-workflow to inspect this project and produce a capacity-sized, self-contained execution prompt for another AI."
