@@ -1,0 +1,10 @@
+---
+description: AI 执行计划中继与阶段审核工作流
+alwaysApply: true
+---
+
+当用户要求执行计划、其他 AI 执行、阶段回执审核或继续中继时，读取并遵守：
+
+- `.cursor/skills/ai-plan-relay-workflow/SKILL.md`
+
+规则驻留 Skill，提示词和回执只传任务增量。普通直接开发不自动进入 Relay。

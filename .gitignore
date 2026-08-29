@@ -1,6 +1,5 @@
-**/bin/
-**/obj/
-**/build/
+src/**/bin/
+src/**/obj/
+src/Mmod.Native/build/
 **/.vs/
 *.user
-*.dll
