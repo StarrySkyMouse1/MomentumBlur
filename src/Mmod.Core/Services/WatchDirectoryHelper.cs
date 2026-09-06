@@ -77,6 +77,24 @@ public static class WatchDirectoryHelper
     {
         EnsureDerivedPaths(settings, gameRoot);
         var gameCmd = BuildGameStartmovieCommand(settings.MovieSequenceName);
-        return $"游戏内：{gameCmd}\n监视目录：{settings.RamDiskWatchDirectory}\n文件前缀：{settings.StartmoviePathPrefix}";
+        return $"游戏内：{gameCmd}\n监视目录：{ResolveEffectiveWatchDirectory(settings, gameRoot)}\n文件前缀：{settings.StartmoviePathPrefix}";
+    }
+
+    /// <summary>
+    /// TGA 实际落在游戏工作目录（junction 后为 RAM 盘下的 momentum），
+    /// 与设置里的盘符根目录可能不同。
+    /// </summary>
+    public static string ResolveEffectiveWatchDirectory(UserSettings settings, string? gameRoot = null)
+    {
+        EnsureDerivedPaths(settings, gameRoot ?? settings.GameRootPath);
+        var prefix = settings.StartmoviePathPrefix;
+        if (!string.IsNullOrWhiteSpace(prefix))
+        {
+            var dir = Path.GetDirectoryName(Path.GetFullPath(prefix + "0.tga"));
+            if (!string.IsNullOrWhiteSpace(dir))
+                return dir;
+        }
+
+        return Path.GetFullPath(settings.RamDiskWatchDirectory);
     }
 }

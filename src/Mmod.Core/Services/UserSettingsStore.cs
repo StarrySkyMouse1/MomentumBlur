@@ -32,7 +32,9 @@ public sealed class UserSettingsStore
         try
         {
             var json = File.ReadAllText(_settingsPath);
-            return JsonSerializer.Deserialize<UserSettings>(json, JsonOptions) ?? new UserSettings();
+            var settings = JsonSerializer.Deserialize<UserSettings>(json, JsonOptions) ?? new UserSettings();
+            SettingsMigration.Normalize(settings);
+            return settings;
         }
         catch
         {

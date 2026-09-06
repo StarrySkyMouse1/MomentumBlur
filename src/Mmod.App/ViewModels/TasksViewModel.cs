@@ -1,0 +1,379 @@
+using System.Collections.ObjectModel;
+using System.IO;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Mmod.Core.Models;
+using Mmod.Core.Services;
+using System.Windows.Threading;
+
+namespace Mmod.App.ViewModels;
+
+public partial class TasksViewModel : ObservableObject
+{
+    private readonly SettingsViewModel _settings;
+    private readonly ReplayCatalogService _catalog = new();
+    private readonly RenderTaskRepository _repository = new();
+    private readonly RenderTaskRunner _runner;
+    private readonly DispatcherTimer _runnerUiTimer;
+    private readonly Dictionary<string, PerformancePreflightResult> _preflightByTask = [];
+    private int _runnerUiTicks;
+
+    public ObservableCollection<ReplayTreeNode> Catalog { get; } = [];
+    public ObservableCollection<TaskListItem> Queue { get; } = [];
+    public ObservableCollection<TaskListItem> History { get; } = [];
+    [ObservableProperty] private string statusText = "请刷新回放记录并勾选需要执行的记录。";
+    [ObservableProperty] private TaskListItem? selectedTask;
+    [ObservableProperty] private string selectedTaskDetail = "选择任务后查看节点和日志。";
+    [ObservableProperty] private string preflightText = "尚未对任务执行性能预检。";
+    [ObservableProperty] private string runtimeText = "当前没有正在录制的节点。";
+
+    public TasksViewModel(SettingsViewModel settings)
+    {
+        _settings = settings; _runner = new RenderTaskRunner(_repository);
+        _runnerUiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        _runnerUiTimer.Tick += (_, _) => UpdateRunnerProjection();
+        _runner.Changed += () => System.Windows.Application.Current.Dispatcher.BeginInvoke(() =>
+        {
+            if (!_runnerUiTimer.IsEnabled)
+                _runnerUiTimer.Start();
+        });
+        ReloadTasks();
+    }
+
+    [RelayCommand]
+    private void RefreshCatalog()
+    {
+        Catalog.Clear();
+        var gameRoot = _settings.GameRootPath?.Trim() ?? string.Empty;
+        var result = _catalog.Scan(gameRoot);
+        // Only current-version (compatible) replays are shown; legacy formats are
+        // counted and kept out of the tree so it stays clean and selectable-only.
+        var usable = result.Records.Where(x => x.IsCompatible).ToList();
+        foreach (var mapGroup in usable.GroupBy(x => x.MapName, StringComparer.OrdinalIgnoreCase))
+        {
+            var map = new ReplayTreeNode(mapGroup.Key);
+            foreach (var playerGroup in mapGroup.GroupBy(x => x.PlayerName, StringComparer.CurrentCultureIgnoreCase))
+            {
+                var player = new ReplayTreeNode(playerGroup.Key);
+                foreach (var trackGroup in playerGroup.GroupBy(x => x.TrackNumber).OrderBy(x => x.Key))
+                {
+                    var staged = trackGroup.Any(x => x.StageNumber > 1);
+                    foreach (var stageGroup in trackGroup.GroupBy(x => staged ? x.StageNumber : 0).OrderBy(x => x.Key))
+                    {
+                        var label = staged ? $"{(trackGroup.Key == 1 ? "主赛道" : $"Bonus {trackGroup.Key - 1}")} · 阶段 {stageGroup.Key}" : (trackGroup.Key == 1 ? "完整地图" : $"Bonus {trackGroup.Key - 1}");
+                        var stage = new ReplayTreeNode(label);
+                        foreach (var record in stageGroup.OrderBy(x => x.RunTimeSeconds).ThenByDescending(x => x.RecordedAt))
+                            stage.Children.Add(new ReplayTreeNode($"{FormatDuration(record.RunTimeSeconds)} · {record.RecordedAt.LocalDateTime:yyyy-MM-dd HH:mm:ss}", record, stage));
+                        player.Children.Add(stage);
+                    }
+                }
+                map.Children.Add(player);
+            }
+            Catalog.Add(map);
+        }
+        var incompatible = result.Records.Count - usable.Count;
+        StatusText = $"已解析 {result.Records.Count} 条回放；可执行 {usable.Count} 条；旧版不兼容 {incompatible} 条（已隐藏）；无法解析 {result.Issues.Count} 条。";
+    }
+
+    [RelayCommand]
+    private void CreateTasks()
+    {
+        try
+        {
+            var settings = _settings.Snapshot();
+            ValidateTaskSettings(settings);
+            var selected = Catalog.SelectMany(Flatten).Where(x => x.Record is not null && x.IsSelected).Select(x => x.Record!).ToList();
+            if (selected.Count == 0) throw new InvalidOperationException("请至少勾选一条回放记录。");
+            var incompatible = selected.FirstOrDefault(x => !x.IsCompatible);
+            if (incompatible is not null)
+                throw new InvalidOperationException($"回放与当前游戏不兼容：{Path.GetFileName(incompatible.FilePath)}（{incompatible.CompatibilityIssue}）。");
+            var count = 0;
+            foreach (var group in selected.GroupBy(x => new { x.MapName, x.PlayerName, x.TrackNumber }))
+            {
+                var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                var output = Path.Combine(settings.VideoOutputDirectory, Safe($"{group.Key.MapName}_{group.Key.PlayerName}_{stamp}.mp4"));
+                var nodes = group.OrderBy(x => x.StageNumber).Select((x, i) => new NewRenderNode(x.FilePath, x.StageNumber, i, x.RunTimeSeconds, x.TickCount)).ToList();
+                var snapshot = new RenderSettingsSnapshot(
+                    settings.SupersamplingMultiplier,
+                    settings.Exposure,
+                    settings.RamDiskWatchDirectory,
+                    settings.VideoOutputDirectory,
+                    settings.GameRootPath!,
+                    settings.HideHudInCfg,
+                    ProjectConstants.FinalOutputFramerate,
+                    settings.IntermediateTargetBitrate,
+                    settings.MotionBlurWeightMode,
+                    settings.ShutterAngle,
+                    settings.VideoProcessing?.Clone(),
+                    DiskSafetyFreePercent: settings.DiskSafetyFreePercent);
+                _repository.CreateTask(new NewRenderTask(group.Key.MapName, group.Key.PlayerName, group.Key.TrackNumber, output, snapshot, nodes));
+                count++;
+            }
+            ReloadTasks();
+            StatusText = $"已创建 {count} 个任务并追加到队列。";
+        }
+        catch (Exception ex) { StatusText = ex.Message; }
+    }
+
+    [RelayCommand] private void ReloadTasks()
+    {
+        var selectedId = SelectedTask?.Record.Id;
+        Queue.Clear(); History.Clear();
+        foreach (var task in _repository.GetTasks())
+        {
+            var item = new TaskListItem(task, _repository.GetNodes(task.Id).Count);
+            if (task.Status is RenderTaskStatus.Completed or RenderTaskStatus.Canceled or RenderTaskStatus.ClipsReadyNeedsManualMerge) History.Add(item); else Queue.Add(item);
+        }
+        if (selectedId is not null)
+            SelectedTask = Queue.Concat(History).FirstOrDefault(x => x.Record.Id == selectedId);
+    }
+
+    [RelayCommand]
+    private async Task StartQueue()
+    {
+        var first = Queue.FirstOrDefault(x => x.Record.Status is RenderTaskStatus.Pending or RenderTaskStatus.Paused or RenderTaskStatus.FailedNeedsAttention);
+        if (first is not null && (!_preflightByTask.TryGetValue(first.Record.Id, out var preflight)
+            || preflight.Rating is PerformancePreflightRating.Unknown or PerformancePreflightRating.Fail or PerformancePreflightRating.Marginal))
+        {
+            var state = preflight?.Rating.ToString() ?? "未预检";
+            var answer = System.Windows.MessageBox.Show(
+                $"首个任务的性能预检状态为「{state}」。\n继续执行不会自动降低 N、画质处理或码率，可能产生持续积压。\n\n仍要开始队列吗？",
+                "性能预检确认",
+                System.Windows.MessageBoxButton.YesNo,
+                System.Windows.MessageBoxImage.Warning);
+            if (answer != System.Windows.MessageBoxResult.Yes)
+            {
+                StatusText = "已取消启动；可以先选中任务并执行性能预检。";
+                return;
+            }
+        }
+        await _runner.StartAsync();
+        StatusText = _runner.Status;
+    }
+
+    [RelayCommand]
+    private async Task RunPerformancePreflight()
+    {
+        try
+        {
+            if (SelectedTask?.Record.Status != RenderTaskStatus.Pending)
+                throw new InvalidOperationException("请先选择一个待执行任务。");
+            var taskId = SelectedTask.Record.Id;
+            PreflightText = "正在用任务冻结配置执行真实性能预检…";
+            var result = await _runner.RunPerformancePreflightAsync(taskId);
+            _preflightByTask[taskId] = result;
+            PreflightText = FormatPreflight(result);
+            StatusText = $"性能预检完成：{result.Rating}";
+        }
+        catch (Exception ex)
+        {
+            PreflightText = "性能预检未完成：" + ex.Message;
+            StatusText = ex.Message;
+        }
+    }
+    [RelayCommand] private void PauseAfterNode() => _runner.PauseAfterCurrentNode();
+    [RelayCommand] private void StopNow() => _runner.StopImmediately();
+
+    [RelayCommand]
+    private async Task VerifyReplay()
+    {
+        try
+        {
+            if (_runner.IsRunning || _runner.IsVerifying || _runner.IsPreflighting)
+            {
+                StatusText = "已有任务或验证在进行中，请先点「立即停止」。";
+                return;
+            }
+
+            var selected = Catalog.SelectMany(Flatten).Where(x => x.Record is not null && x.IsSelected).Select(x => x.Record!).ToList();
+            if (selected.Count == 0)
+                throw new InvalidOperationException("请先勾选一条要验证的回放记录。");
+            if (selected.Count > 1)
+                throw new InvalidOperationException("验证回放一次只支持勾选一条记录。");
+
+            var record = selected[0];
+            if (!record.IsCompatible)
+                throw new InvalidOperationException($"回放不兼容：{record.CompatibilityIssue}");
+
+            var gameRoot = _settings.GameRootPath?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(gameRoot) || !Directory.Exists(gameRoot))
+                throw new InvalidOperationException("请先在设置中配置有效的游戏根目录。");
+
+            var snapshot = _settings.Snapshot();
+            snapshot.GameRootPath = gameRoot;
+            StatusText = "正在验证回放（Capture Envelope：startmovie→Activity），请稍候…\n过程日志会显示在下方。";
+            await _runner.VerifyReplayAsync(snapshot, record.MapName, record.FilePath);
+            StatusText = _runner.Status;
+            System.Windows.MessageBox.Show(
+                "验证成功：已检测到回放画面运动（VisualActivity）。\n\n该回放可被自动拉起。下方状态区有逐步日志。",
+                "验证回放",
+                System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            System.Windows.MessageBox.Show(
+                ex.Message,
+                "验证回放失败",
+                System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Warning);
+        }
+    }
+
+    [RelayCommand] private void MoveUp() => Move(-1);
+    [RelayCommand] private void MoveDown() => Move(1);
+    private void Move(int delta)
+    {
+        if (SelectedTask?.Record.Status != RenderTaskStatus.Pending) return;
+        var index = Queue.IndexOf(SelectedTask);
+        if (index < 0) return;
+        _repository.MovePendingTask(SelectedTask.Record.Id, index + delta);
+        ReloadTasks();
+    }
+
+    [RelayCommand] private void DeleteTask()
+    {
+        if (SelectedTask is null) { StatusText = "请先在左侧列表选中要删除的任务。"; return; }
+        var title = SelectedTask.Title;
+        var status = SelectedTask.Record.Status;
+        if (status is RenderTaskStatus.Running or RenderTaskStatus.Starting or RenderTaskStatus.Merging)
+        {
+            StatusText = "任务正在执行中，无法删除。请先「当前节点后暂停」或「立即停止」。";
+            return;
+        }
+        _repository.DeleteTaskRecord(SelectedTask.Record.Id);
+        ReloadTasks();
+        StatusText = $"已删除任务：{title}";
+    }
+
+    partial void OnSelectedTaskChanged(TaskListItem? value)
+    {
+        if (value is null) { SelectedTaskDetail = "选择任务后查看节点和日志。"; PreflightText = "尚未对任务执行性能预检。"; return; }
+        PreflightText = _preflightByTask.TryGetValue(value.Record.Id, out var preflight)
+            ? FormatPreflight(preflight)
+            : "尚未对这个任务执行性能预检。";
+        var nodes = _repository.GetNodes(value.Record.Id).Select(x => $"节点 {x.Sequence + 1} / 阶段 {x.StageNumber}：{x.Status}，重试 {x.RetryCount}/2\n{x.ReplayPath}");
+        var logs = _repository.GetLogs(value.Record.Id).TakeLast(30).Select(x => $"{x.Timestamp.LocalDateTime:MM-dd HH:mm:ss} [{x.Level}] {x.Message}");
+
+        var configLines = new List<string>();
+        try
+        {
+            var snapshot = System.Text.Json.JsonSerializer.Deserialize<RenderSettingsSnapshot>(value.Record.SettingsJson);
+            if (snapshot is not null)
+            {
+                var blur = snapshot.MotionBlurMode == MotionBlurWeightMode.ShutterAngle
+                    ? $"Shutter {snapshot.ShutterAngle:0}°"
+                    : $"Legacy Exposure {snapshot.Exposure:0.##}";
+                var bitrate = snapshot.TargetBitrate > 0 ? $" · 码率 {snapshot.TargetBitrate / 1_000_000.0:0.#} Mbps" : " · 码率 自动";
+                configLines.Add($"合成：N={snapshot.SupersamplingMultiplier} · {blur} · {snapshot.OutputFramerate}fps{bitrate}");
+                configLines.Add(VideoProcessingSummary.Build(snapshot.VideoProcessing));
+            }
+        }
+        catch
+        {
+            // old SettingsJson without new fields: keep legacy display
+        }
+
+        SelectedTaskDetail = string.Join("\n", nodes.Concat(configLines).Concat(["", "最近日志："]).Concat(logs));
+    }
+
+    [RelayCommand] private void RefreshSnapshot()
+    {
+        if (SelectedTask?.Record.Status != RenderTaskStatus.Pending) { StatusText = "只有待执行任务可以刷新设置快照。"; return; }
+        try
+        {
+            var s = _settings.Snapshot(); ValidateTaskSettings(s);
+            _repository.UpdatePendingTaskSettings(SelectedTask.Record.Id, new RenderSettingsSnapshot(
+                s.SupersamplingMultiplier, s.Exposure, s.RamDiskWatchDirectory, s.VideoOutputDirectory,
+                s.GameRootPath!, s.HideHudInCfg, ProjectConstants.FinalOutputFramerate,
+                s.IntermediateTargetBitrate, s.MotionBlurWeightMode, s.ShutterAngle, s.VideoProcessing?.Clone(),
+                DiskSafetyFreePercent: s.DiskSafetyFreePercent));
+            StatusText = "任务设置快照已刷新。"; ReloadTasks();
+        }
+        catch (Exception ex) { StatusText = ex.Message; }
+    }
+
+    [RelayCommand] private void OpenOutput()
+    {
+        if (SelectedTask is null) return;
+        var path = File.Exists(SelectedTask.Record.OutputPath) ? SelectedTask.Record.OutputPath : Path.GetDirectoryName(SelectedTask.Record.OutputPath);
+        if (!string.IsNullOrWhiteSpace(path) && (File.Exists(path) || Directory.Exists(path))) System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{SelectedTask.Record.OutputPath}\"") { UseShellExecute = true });
+    }
+
+    [RelayCommand] private void DeleteOutput()
+    {
+        if (SelectedTask is null || !File.Exists(SelectedTask.Record.OutputPath)) return;
+        if (System.Windows.MessageBox.Show("确定删除该任务的最终输出文件？回放源文件和阶段片段不会删除。", "删除输出", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Warning) != System.Windows.MessageBoxResult.Yes) return;
+        File.Delete(SelectedTask.Record.OutputPath); StatusText = "最终输出文件已删除。";
+    }
+
+    private static IEnumerable<ReplayTreeNode> Flatten(ReplayTreeNode root) { yield return root; foreach (var child in root.Children.SelectMany(Flatten)) yield return child; }
+    private static string FormatDuration(double seconds) => TimeSpan.FromSeconds(seconds).ToString(seconds >= 3600 ? @"h\:mm\:ss\.fff" : @"m\:ss\.fff");
+    private static string Safe(string name) => string.Concat(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+    private static void ValidateTaskSettings(UserSettings s)
+    {
+        if (s.CaptureMode != CaptureMode.Tga) throw new InvalidOperationException("任务仅在 TGA 模式下可用。");
+        if (string.IsNullOrWhiteSpace(s.GameRootPath) || !Directory.Exists(s.GameRootPath)) throw new InvalidOperationException("游戏根目录不存在。");
+        if (string.IsNullOrWhiteSpace(s.RamDiskWatchDirectory) || !Directory.Exists(s.RamDiskWatchDirectory)) throw new InvalidOperationException("TGA 监视目录未配置或不存在。");
+        if (string.IsNullOrWhiteSpace(s.VideoOutputDirectory)) throw new InvalidOperationException("请配置成片输出目录。");
+        Directory.CreateDirectory(s.VideoOutputDirectory);
+    }
+
+    private void UpdateRunnerProjection()
+    {
+        StatusText = _runner.Status;
+        RuntimeText = FormatRuntime(_runner.RuntimeSnapshot);
+        if (++_runnerUiTicks % 4 == 0 && !_runner.IsRunning)
+            ReloadTasks();
+        if (!_runner.IsRunning && !_runner.IsVerifying && !_runner.IsPreflighting)
+        {
+            ReloadTasks();
+            _runnerUiTimer.Stop();
+        }
+    }
+
+    private static string FormatPreflight(PerformancePreflightResult r) =>
+        $"结论：{r.Rating}\n" +
+        $"生产 {r.ProducedFramesPerSecond:0.0} fps · 消费 {r.ConsumedFramesPerSecond:0.0} fps · 输出 {r.OutputFramesPerSecond:0.0} fps · 消费比 {r.ConsumptionRatio:P1}\n" +
+        $"峰值积压 {r.PeakPendingFrames} 帧 / {r.PeakPendingBytes / 1024d / 1024d:0.0} MiB · 画质后端 {r.QualityBackend} · 编码后端 {r.EncoderBackend}\n" +
+        "预检只诊断真实性能，不会自动降低 N、画质处理或码率。";
+
+    private static string FormatRuntime(CaptureRuntimeSnapshot snapshot)
+    {
+        if (snapshot.SampledAt == DateTimeOffset.MinValue)
+            return "当前没有正在录制的节点。";
+        var p = snapshot.Performance;
+        var disk = snapshot.DiskHealth;
+        var diskText = disk is null
+            ? "监视盘：等待采样"
+            : $"监视盘 {disk.DriveRoot}：{disk.FreePercent:0.0}% / {disk.FreeBytes / 1024d / 1024d / 1024d:0.0} GiB（安全线 {disk.SafetyPercent}% · 预警线 {disk.WarningPercent}% · {disk.State}）";
+        var catchUp = p.CatchUpSeconds is { } seconds ? $"{TimeSpan.FromSeconds(seconds):hh\\:mm\\:ss}" : "不可计算";
+        return $"{diskText}\n积压 {p.Backlog.PendingFrames} 帧 / {p.Backlog.PendingBytes / 1024d / 1024d:0.0} MiB · 趋势 {p.BacklogTrend} · 追赶时间 {catchUp}（不是整项任务 ETA）\n画质后端 {p.QualityBackend} · 编码后端 {p.EncoderBackend}";
+    }
+}
+
+public partial class ReplayTreeNode : ObservableObject
+{
+    public string Label { get; }
+    public ReplayRecord? Record { get; }
+    public ReplayTreeNode? SelectionGroup { get; }
+    public ObservableCollection<ReplayTreeNode> Children { get; } = [];
+    [ObservableProperty] private bool isSelected;
+    public bool IsRecord => Record is not null;
+    public bool IsSelectable => Record?.IsCompatible == true;
+    public string? DisabledReason => Record?.CompatibilityIssue;
+    public ReplayTreeNode(string label, ReplayRecord? record = null, ReplayTreeNode? selectionGroup = null) { Label = label; Record = record; SelectionGroup = selectionGroup; }
+    partial void OnIsSelectedChanged(bool value)
+    {
+        if (value && !IsSelectable) { IsSelected = false; return; }
+        if (!value || SelectionGroup is null) return;
+        foreach (var sibling in SelectionGroup.Children.Where(x => x != this && x.IsSelected)) sibling.IsSelected = false;
+    }
+}
+
+public sealed record TaskListItem(RenderTaskRecord Record, int NodeCount)
+{
+    public string Title => $"{Record.MapName} · {Record.PlayerName}";
+    public string Detail => $"{NodeCount} 个节点 · {Record.Status} · 耗时 {TimeSpan.FromSeconds(Record.ElapsedSeconds):hh\\:mm\\:ss}";
+}

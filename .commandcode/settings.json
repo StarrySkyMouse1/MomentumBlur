@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(dotnet:*)",
+      "Shell(git:*)",
+      "Shell(git commit -F - <<'EOF' feat: enforce percentage disk safety at runtime Co-authored-by: CommandCodeBot <noreply@commandcode.ai> EOF)",
+      "Shell(echo.:*)",
+      "Shell(echo:*)",
+      "Shell(>:*)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

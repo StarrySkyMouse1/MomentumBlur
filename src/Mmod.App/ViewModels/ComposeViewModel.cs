@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -39,18 +40,16 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
     public ComposeViewModel(SettingsViewModel settings)
     {
         _settings = settings;
+        _settings.PropertyChanged += OnSettingsPropertyChanged;
         _tga.Changed += () =>
         {
             System.Windows.Application.Current.Dispatcher.Invoke(() =>
             {
-                StatusText = _tga.Status;
-                TgaMetricsText = $"已喂入 {_tga.FedCount}，待处理 {_tga.PendingCount}";
-                OnPropertyChanged(nameof(IsTgaRunning));
-                OnPropertyChanged(nameof(CanStartTga));
-                OnPropertyChanged(nameof(CanStopTga));
+                RefreshTgaUi();
             });
         };
         RefreshModeSummary();
+        RefreshDiskSpace();
     }
 
     public ObservableCollection<BatchVideoItem> BatchItems { get; } = [];
@@ -62,10 +61,13 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
     private string statusText = "就绪";
 
     [ObservableProperty]
-    private string tgaMetricsText = "已喂入 0，待处理 0";
+    private string tgaMetricsText = "未开始监视";
 
     [ObservableProperty]
     private string batchSummary = "队列：0";
+
+    [ObservableProperty]
+    private string diskSpaceText = "磁盘空间：正在读取…";
 
     [ObservableProperty]
     private bool isObsBusy;
@@ -73,30 +75,125 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
     public bool IsTgaMode => _settings.CaptureMode == CaptureMode.Tga;
     public bool IsObsMode => _settings.CaptureMode == CaptureMode.Obs;
     public bool IsTgaRunning => _tga.IsRunning;
-    public bool CanStartTga => IsTgaMode && !_tga.IsRunning;
-    public bool CanStopTga => IsTgaMode && _tga.IsRunning;
     public bool CanStartObs => IsObsMode && !IsObsBusy && BatchItems.Any(i => i.IsSelected);
 
     public void RefreshModeSummary()
     {
         var s = _settings.Snapshot();
+        var blur = s.MotionBlurWeightMode == MotionBlurWeightMode.ShutterAngle
+            ? $"Shutter {s.ShutterAngle:0}°"
+            : $"Exposure {s.Exposure:0.##}";
+        var processing = VideoProcessingSummary.Build(s.VideoProcessing);
+        var davinci = s.EnableDaVinci4KWorkflowGuide ? " · 后续 4K AI" : string.Empty;
         ModeSummary = s.CaptureMode == CaptureMode.Tga
-            ? $"TGA · N={s.SupersamplingMultiplier} · {s.Exposure:0.##}"
-            : $"OBS · {s.ObsCaptureFramerate}fps · N={s.SupersamplingMultiplier}";
+            ? $"TGA · N={s.SupersamplingMultiplier} · {blur} · 60fps · {processing}{davinci}"
+            : $"OBS · {s.ObsCaptureFramerate}fps · N={s.SupersamplingMultiplier} · {blur} · {processing}{davinci}";
         OnPropertyChanged(nameof(IsTgaMode));
         OnPropertyChanged(nameof(IsObsMode));
-        OnPropertyChanged(nameof(CanStartTga));
-        OnPropertyChanged(nameof(CanStopTga));
+        StartTgaCommand.NotifyCanExecuteChanged();
+        StopTgaCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(CanStartObs));
         UpdateBatchSummary();
+        if (!_tga.IsRunning)
+            TgaMetricsText = BuildIdleTgaMetrics(s);
+        RefreshDiskSpace();
     }
-    [RelayCommand]
+
+    private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(SettingsViewModel.CaptureMode)
+            or nameof(SettingsViewModel.VideoOutputDirectory)
+            or nameof(SettingsViewModel.RamDiskWatchDirectory)
+            or nameof(SettingsViewModel.GameRootPath))
+        {
+            RefreshDiskSpace();
+        }
+    }
+
+    private void RefreshDiskSpace()
+    {
+        try
+        {
+            var directory = ResolveDisplayedDiskDirectory();
+            var driveRoot = Path.GetPathRoot(Path.GetFullPath(directory));
+            if (string.IsNullOrWhiteSpace(driveRoot))
+                throw new IOException("无法确定盘符。");
+
+            var drive = new DriveInfo(driveRoot);
+            var label = IsTgaMode ? "监视盘空间" : "输出盘空间";
+            DiskSpaceText = $"{label}：可用 {FormatGiB(drive.AvailableFreeSpace)} / 共 {FormatGiB(drive.TotalSize)}（{drive.Name.TrimEnd(Path.DirectorySeparatorChar)}）";
+        }
+        catch
+        {
+            DiskSpaceText = IsTgaMode ? "监视盘空间：无法读取" : "输出盘空间：无法读取";
+        }
+    }
+
+    private string ResolveDisplayedDiskDirectory()
+    {
+        if (IsTgaMode)
+        {
+            if (_tga.IsRunning && !string.IsNullOrWhiteSpace(_tga.WatchDirectory))
+                return _tga.WatchDirectory;
+
+            var settings = _settings.Snapshot();
+            return WatchDirectoryHelper.ResolveEffectiveWatchDirectory(settings, settings.GameRootPath);
+        }
+
+        return string.IsNullOrWhiteSpace(_settings.VideoOutputDirectory)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "mmod_record_next")
+            : _settings.VideoOutputDirectory;
+    }
+
+    private static string FormatGiB(long bytes) => $"{bytes / 1024d / 1024d / 1024d:N1} GB";
+
+    private void RefreshTgaUi()
+    {
+        StatusText = _tga.Status;
+        TgaMetricsText = BuildRunningTgaMetrics();
+        RefreshDiskSpace();
+        OnPropertyChanged(nameof(IsTgaRunning));
+        StartTgaCommand.NotifyCanExecuteChanged();
+        StopTgaCommand.NotifyCanExecuteChanged();
+    }
+
+    private string BuildRunningTgaMetrics()
+    {
+        var watch = string.IsNullOrWhiteSpace(_tga.WatchDirectory) ? "（未设置）" : _tga.WatchDirectory;
+        var output = string.IsNullOrWhiteSpace(_tga.OutputPath)
+            ? "（尚未创建）"
+            : Path.GetFileName(_tga.OutputPath);
+        var diag = string.IsNullOrWhiteSpace(_tga.SessionDiagnostics) ? string.Empty : $"\n{_tga.SessionDiagnostics}";
+        return
+            $"监视目录：{watch}\n" +
+            $"已喂入 {_tga.FedCount} 帧，待处理 {_tga.PendingCount}\n" +
+            $"输出：{output}{diag}";
+    }
+
+    private static string BuildIdleTgaMetrics(UserSettings s)
+    {
+        try
+        {
+            var watch = WatchDirectoryHelper.ResolveEffectiveWatchDirectory(s, s.GameRootPath);
+            return $"将监视：{watch}\n已喂入 0 帧，待处理 0";
+        }
+        catch
+        {
+            return "请先在设置中配置 TGA 监视目录与游戏根目录";
+        }
+    }
+
+    private bool CanStartTga() => IsTgaMode && !_tga.IsRunning;
+
+    private bool CanStopTga() => IsTgaMode && _tga.IsRunning;
+
+    [RelayCommand(CanExecute = nameof(CanStartTga))]
     private async Task StartTgaAsync()
     {
         try
         {
             await _tga.StartAsync(_settings.Snapshot());
-            StatusText = _tga.Status;
+            RefreshTgaUi();
             RefreshModeSummary();
         }
         catch (Exception ex)
@@ -105,11 +202,19 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanStopTga))]
     private async Task StopTgaAsync()
     {
-        await _tga.StopAsync();
-        StatusText = _tga.Status;
+        try
+        {
+            await _tga.StopAsync();
+            StatusText = _tga.Status;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"收尾失败：{ex.Message}";
+        }
+        RefreshTgaUi();
         RefreshModeSummary();
     }
 
@@ -161,6 +266,7 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "mmod_record_next")
             : settings.VideoOutputDirectory;
         Directory.CreateDirectory(outputDir);
+        RefreshDiskSpace();
 
         try
         {
@@ -200,6 +306,7 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
                         {
                             item.Status = File.Exists(output) ? $"完成：{Path.GetFileName(output)}" : "完成（无文件？）";
                             item.ProgressPercent = 100;
+                            RefreshDiskSpace();
                         });
                     }
                     catch (OperationCanceledException)
@@ -262,6 +369,7 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _settings.PropertyChanged -= OnSettingsPropertyChanged;
         _obsCts?.Cancel();
         await _tga.DisposeAsync();
     }

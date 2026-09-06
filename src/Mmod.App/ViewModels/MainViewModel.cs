@@ -9,8 +9,10 @@ public sealed class MainViewModel
         var store = new UserSettingsStore();
         Settings = new SettingsViewModel(store);
         Compose = new ComposeViewModel(Settings);
+        Tasks = new TasksViewModel(Settings);
     }
 
     public SettingsViewModel Settings { get; }
     public ComposeViewModel Compose { get; }
+    public TasksViewModel Tasks { get; }
 }

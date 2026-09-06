@@ -1,0 +1,198 @@
+Version 45, 20 March 2026
+---------------------------
+
+* Fixed permanent game audio mute for some users.
+* Fixed standalone log not being reset between studio sessions.
+* Fixed tampering of the default profile causing the studio process to not continue.
+
+Version 44, 16 March 2026
+---------------------------
+
+* Fixed x64 CS:S launch.
+* Fixed x64 CS:S velo.
+* Improved performance when using velo border.
+* Added input display for demos created using SVR Source TV addon.
+* Added interpolation latency compensation to velo and input display.
+* Updated encoder ffmpeg libraries to version 8.
+* Created SVR Studio application for automated rendering of events in demos.
+* Improved startup synchronization with SVR Encoder process.
+* Improved performance when using motion blur.
+* Created SVR Source TV addon for better server demo recordings: 1:1 game tick rate, better position and view angle precision, possibility for input display. This only exists for server operators.
+
+Version 43, 4 June 2024
+---------------------------
+
+* Fixed bug where recording state would be reset if the movie was attempted to be started twice.
+* Fixed crash when using the nowindupd parameter.
+* SVR is now self-learning and should be able to work with most Source engine games automatically.
+* SVR is now modularized and can work with partial functionality if all is not present in the game.
+* Added new game definitions in data/games/ folder that allows creating game profiles, including setting custom start arguments.
+* Installed games are no longer read from Steam.
+* Start parameters are no longer read from Steam.
+* Added a workaround for engine parsing bug if the startmovie command is in a chained sequence of commands, followed by a space.
+* Fixed first frame of video being black.
+* Added support for x64 games, with new x64 variants of all systems and a new launcher.
+
+Version 42, 11 April 2024
+---------------------------
+
+* Fixed potential issue where audio and video could be dropped if the game is significantly faster than the encoding. This would not necessarily have happened in a real world scenario.
+* Small performance improvements.
+* Video time and elapsed real time are now shown in the window title and the task bar.
+* New parameters have been added to the startmovie command, which allows you to control various things about the current rendering.
+* Added a rendering timeout option to the startmovie command, to automatically stop the movie after the video time reaches a certain time (region rendering).
+* Added a progress bar to the game taskbar icon if rendering timeout is enabled.
+* The startmovie command now has a new syntax for optional parameters.
+* Fixed all output being blurry.
+* Added profile inheritance. You now no longer need to copy the default profile, instead you can override individual settings from the default profile.
+
+Version 41, 20 March 2024
+---------------------------
+
+* Added a 64-bit external process that encodes the data from SVR. This comes with a performance boost, but also allows audio and video to be embedded in the same file.
+* Added an option to use the DNxHR video encoder. This codec works a lot better in video editors, and also has slightly better color information through YUV422 over NV12.
+* Changed the default video encoder to use DNxHR.
+* Added an option to select the audio encoder to use. At the moment there is only AAC (through aac_mf).
+* Added an option to use the YUV444 format with x264, selectable through the libx264_444 video encoder in the profile.
+* Velo text is now using the tabular font feature which means text will not jitter for fonts that use varying number widths. This would typically happen with the number 1 which can be thinner in some fonts, causing the text to jitter in width.
+* Changed the default velo font format to a better default.
+* Added velo text opacity.
+* Added velo_anchor option which allows to set the text expansion direction.
+* Velo is now by default in the lower left with an anchor of left.
+* Added velo_length option which allows to set the axes of velocity to show.
+* Fixed motion blur blending working in the wrong color space. Blending is now done in the linear color space. Previously blending was done in a non-linear color space which meant some colors would blend together too dark.
+* Fixed color space issues.
+
+Version 40, 26 October 2022
+---------------------------
+
+Supported games in this release:
+* Counter-Strike: Source
+* Counter-Strike: Global Offensive
+* Team Fortress 2
+* Zombie Panic! Source
+* Half-Life 2
+* Source 2013 mods
+* Black Mesa
+* Half-Life 2: Deathmatch
+* Synergy
+* Hunt Down The Freeman
+* Empires
+
+* Added SVR injector to inject into running games at your own risk. The injector will only find games that are running in insecure mode.
+* Fixed sound address in latest CSGO update (@SmileyAG)
+* New games added (@SmileyAG, @Neoony)
+* Updated FFmpeg binaries to 5.1.2
+
+Version 39, 12 March 2022
+---------------------------
+
+Supported games in this release:
+* Counter-Strike: Source
+* Counter-Strike: Global Offensive
+* Team Fortress 2
+* Zombie Panic! Source
+* Half-Life 2
+* Source 2013 mods
+* Black Mesa
+
+* Fixed issue that could cause unwanted border to be added to velo.
+* Fixed issue where the velo text could jump a tiny bit when the first number changes.
+* Added option to disable audio processing that may increase performance in some circumstances.
+* Fixed issue where startmovie usage did not show.
+
+Version 38, 2 February 2022
+---------------------------
+
+Supported games in this release:
+* Counter-Strike: Source
+* Counter-Strike: Global Offensive
+* Team Fortress 2
+* Zombie Panic! Source
+* Half-Life 2
+* Source 2013 mods
+* Black Mesa
+
+* CSGO now uses a new method for capturing player velo.
+
+Version 37, 12 December 2021
+--------------------------
+
+Supported games in this release:
+* Counter-Strike: Source
+* Counter-Strike: Global Offensive
+* Team Fortress 2
+* Zombie Panic! Source
+* Half-Life 2
+* Source 2013 mods
+* Black Mesa
+
+* Fixed crash in movement games if velo was not enabled and pattern was outdated.
+* Added logging information if a pattern is outdated.
+* Updated patterns for CSGO build 7866056.
+* Added start parameter -svrnoautostop that can be used to disable recording autostop when getting back to the menu. This feature allows you to record multiple demos after each other without the main menu being captured.
+
+Version 36, 17 October 2021
+--------------------------
+
+Supported games in this release:
+* Counter-Strike: Source
+* Counter-Strike: Global Offensive
+* Team Fortress 2
+* Zombie Panic! Source
+* Half-Life 2
+* Source 2013 mods
+* Black Mesa
+
+* Fixed INI and VDF parsing skipping the last line if the file ended without a trailing newline (svr_launch_params.ini mostly).
+* Velo overlay is now restricted to the movement based games CSS, TF2 and CSGO. This is done to increase reach for other games that only want capture.
+* Added games Zombie Panic! Source, Half-Life 2 (and Source 2013 mods), Black Mesa.
+* Velo overlay and motion blur is now default off in default config.
+* Velo minimum font size is now 16.
+* Source 2013 mods can now be started by overriding the -game param.
+* Fixed the launcher not reading more than 2 Steam libraries.
+* Fixed CSGO spec showing the wrong player velo.
+* Fix crash if wanted velo font is not installed.
+* SVR_LOG.txt now uses a lower extension so it can be embedded in Discord (but Windows is not case sensitive).
+* svr_movie_start.cfg must now always exist and be run before movie can be started.
+* Output movies folder is now created if it doesn't exist when movie starts.
+
+Version 35, 10 October 2021
+--------------------------
+
+Supported games in this release:
+* Counter-Strike: Source
+* Counter-Strike: Global Offensive
+* Team Fortress 2
+
+* Steam games are automatically scanned for by the launcher and no manual setup needs to be done.
+* Sound is now included as a new fast technique has been found for all games.
+* Performance has been improved by a lot (20%+).
+* Velocity text performance has been improved by a lot (34%+).
+* More helpful error messages.
+* Profiles are now in a INI style format that allows comments and does not have escaping nonsense and format nonsense as JSON (easily editable).
+* Hardware support is checked in the launcher. SVR cannot be used if the hardware is not supported.
+* Launch parameters to use in the launcher is read from Steam (needs Steam to be running).
+* Logging is now done to SVR_LOG.TXT, and not a hard to use console window (but the launcher still uses it - things are logged to both). This text file can easily be shared and contains useful information.
+* Identifying information about the graphics adapter and HW/OS is now logged for troubleshooting hardware issues.
+* The launcher now stores information about the tested game builds so we can see if the installed game version differs from the tested version (a warning will be logged).
+* Autostarting a game still works the same as before, by using "svr_launcher.exe <app_id>".
+* The profiles have been made simpler and the documentation for each setting is included in the profile file directly.
+* The video pixel format is now chosen from the encoder, and is not settable.
+* The video color range is no longer settable.
+* The number of encoding threads now always matches the number of cores in the system.
+* Multiprocess rendering has been removed as Source works really weird when the same game is launched multiple times with the same game directory.
+* Optional border has been added to velo text.
+* Velo text is now aligned by screen percentages to allow any resolution independent position to be used.
+* Velo character spacing has been removed.
+* Game config and launcher config have both been removed. Launcher config has been replaced by the launcher doing the work automatically. Game config has been replaced by code directly to ease development and reduce scope.
+* Custom launch parameters are now in a file called svr_launch_params.ini.
+* An update.cmd file has been created to easily download the latest version (needs manual unzip).
+* SVR now supports both D3D9Ex and D3D11 games.
+* It's now possible to apply or override user settings when a movie starts or stops recording. These files are svr_movie_start_user.cfg, svr_movie_end_user.cfg, svr_movie_start_<app_id>.cfg, svr_movie_end_<app_id>.cfg.
+* If no extension is written when starting the movie, .mp4 will be set.
+* avi and mov are no longer allowed containers as they are outdated that do not support various encoding features.
+* A big message is now written in the console when SVR is initialized, to show that it has loaded.
+* There is now an SVR API that can be used for direct game integrations (Momentum in the future).
+* Recording will now automatically stop when demo ends or client disconnects.
+* Various other fixes and performance improvements.
