@@ -102,6 +102,12 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
         if (string.IsNullOrWhiteSpace(watchDir))
             throw new InvalidOperationException("请先设置有效的 TGA 监视目录");
 
+        // 严格闸门：链接目录必须已创建且指向内存盘；未链接时禁止在磁盘路径上监视/录制
+        MomentumDirectoryLinkService.EnsureCaptureTargetOnRam(
+            settings.GameRootPath,
+            settings.RamDiskWatchDirectory ?? string.Empty,
+            watchDir);
+
         Directory.CreateDirectory(watchDir);
         if (!Directory.Exists(watchDir))
             throw new InvalidOperationException($"TGA 监视目录不存在：{watchDir}");

@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "MomentumBlur 运行时架构",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/StarrySkyMouse1/MomentumBlur.git",
+      "revision": "46dd6273f322382c60888ac440c6742c50b03cb2"
+    },
+    "viewBox": [1470, 900]
+  },
+  "components": [
+    {
+      "id": "wpf-app",
+      "type": "frontend",
+      "label": "Mmod.App（WPF）",
+      "sublabel": "MVVM · 任务/合成/设置页",
+      "pos": [60, 390],
+      "size": [150, 64],
+      "sources": [{ "path": "src/Mmod.App/ViewModels/MainViewModel.cs", "line": 9 }]
+    },
+    {
+      "id": "task-runner",
+      "type": "backend",
+      "label": "RenderTaskRunner",
+      "sublabel": "NodeExecutionCoordinator · 崩溃恢复",
+      "pos": [300, 390],
+      "size": [170, 64],
+      "sources": [{ "path": "src/Mmod.Core/Services/RenderTaskRunner.cs", "line": 14 }]
+    },
+    {
+      "id": "game-drive",
+      "type": "backend",
+      "label": "MomentumReplaySession",
+      "sublabel": "进程控制 · NetCon strict 命令",
+      "pos": [540, 390],
+      "size": [150, 64],
+      "sources": [{ "path": "src/Mmod.Core/Services/MomentumReplaySession.cs", "line": 68 }]
+    },
+    {
+      "id": "watcher",
+      "type": "backend",
+      "label": "TgaDirectoryWatcher",
+      "sublabel": "prefix 隔离 · 物理静默证明",
+      "pos": [780, 390],
+      "size": [150, 64],
+      "sources": [{ "path": "src/Mmod.Core/Services/TgaPipelineOrchestrator.cs", "line": 150 }]
+    },
+    {
+      "id": "pipeline",
+      "type": "backend",
+      "label": "TgaPipelineOrchestrator",
+      "sublabel": "活动证据 · 冻结配置 · 磁盘安全",
+      "pos": [1020, 390],
+      "size": [150, 64],
+      "sources": [{ "path": "src/Mmod.Core/Services/TgaPipelineOrchestrator.cs", "line": 13 }]
+    },
+    {
+      "id": "native",
+      "type": "backend",
+      "label": "mmod_native.dll（C++）",
+      "sublabel": "D3D11 混合 · 画质处理 · MF H.264",
+      "pos": [1260, 390],
+      "size": [150, 64],
+      "sources": [{ "path": "src/Mmod.Core/Native/NativeSessionFactory.cs", "line": 11 }]
+    },
+    {
+      "id": "game",
+      "type": "external",
+      "label": "Momentum 游戏进程",
+      "sublabel": "startmovie / endmovie · TGA 输出",
+      "pos": [540, 70],
+      "size": [150, 64],
+      "sources": [{ "path": "src/Mmod.Core/Services/MomentumProcessController.cs", "line": 44 }]
+    },
+    {
+      "id": "ramdisk",
+      "type": "external",
+      "label": "ImDisk RAM 盘",
+      "sublabel": "Junction：momentum ↔ 内存盘",
+      "pos": [780, 70],
+      "size": [150, 64],
+      "sources": [{ "path": "src/Mmod.Core/Services/TgaPipelineOrchestrator.cs", "line": 106 }]
+    },
+    {
+      "id": "sqlite",
+      "type": "database",
+      "label": "RenderTaskRepository",
+      "sublabel": "SQLite · 任务/节点/日志",
+      "pos": [300, 620],
+      "size": [170, 64],
+      "sources": [{ "path": "src/Mmod.Core/Services/RenderTaskRepository.cs", "line": 18 }]
+    },
+    {
+      "id": "media-probe",
+      "type": "backend",
+      "label": "MediaProbe + Mp4Merge",
+      "sublabel": "容器/分辨率/fps 校验 · 原子提交",
+      "pos": [1020, 620],
+      "size": [150, 64],
+      "sources": [{ "path": "src/Mmod.Core/Services/MediaProbe.cs", "line": 69 }]
+    },
+    {
+      "id": "obs-batch",
+      "type": "backend",
+      "label": "ObsSynthesisService",
+      "sublabel": "OBS TGA 批量合成 · CPU 参考",
+      "pos": [1260, 620],
+      "size": [150, 64],
+      "sources": [{ "path": "src/Mmod.Core/Services/ObsSynthesisService.cs", "line": 29 }]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Mmod.App 进程（net10.0-windows，含进程内 mmod_native.dll）",
+      "wraps": ["wpf-app", "task-runner", "game-drive", "watcher", "pipeline", "native", "media-probe", "obs-batch", "sqlite"]
+    },
+    {
+      "kind": "region",
+      "label": "外部运行时",
+      "wraps": ["game", "ramdisk"]
+    }
+  ],
+  "connections": [
+    { "id": "wpf-tr", "from": "wpf-app", "to": "task-runner", "label": "创建任务 · 冻结处理配置", "labelAt": [255, 468] },
+    { "id": "tr-drive", "from": "task-runner", "to": "game-drive", "label": "节点 Attempt · 阶段状态机", "labelAt": [505, 486] },
+    { "id": "drive-game", "from": "game-drive", "to": "game", "label": "启动进程 · NetCon 命令", "variant": "emphasis", "labelAt": [615, 200] },
+    { "id": "game-ram", "from": "game", "to": "ramdisk", "label": "写 TGA 帧" },
+    { "id": "ram-watch", "from": "ramdisk", "to": "watcher", "label": "帧监视 · prefix 隔离", "labelAt": [855, 160] },
+    { "id": "watch-pipe", "from": "watcher", "to": "pipeline", "label": "帧队列 · 活动证据", "labelAt": [855, 462] },
+    { "id": "pipe-native", "from": "pipeline", "to": "native", "label": "BlendFrames · 画质处理 · H.264", "variant": "emphasis", "labelAt": [1215, 370] },
+    { "id": "tr-sql", "from": "task-runner", "to": "sqlite", "label": "任务/节点/日志持久化", "labelAt": [385, 462] },
+    { "id": "pipe-probe", "from": "pipeline", "to": "media-probe", "label": "Finish → 媒体校验 → 原子提交", "labelAt": [1095, 486] },
+    { "id": "wpf-obs", "from": "wpf-app", "to": "obs-batch", "label": "OBS 批量合成", "variant": "dashed", "fromSide": "bottom", "toSide": "bottom", "via": [[135, 700], [1335, 700]], "labelAt": [735, 700] },
+    { "id": "obs-native", "from": "obs-batch", "to": "native", "label": "mmod_process_video_file" },
+    { "id": "obs-probe", "from": "obs-batch", "to": "media-probe", "label": "MP4 合并" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "正向证据录制（Recording State Machine）",
+      "items": [
+        "Attempt 独立身份：ID + 会话 + prefix 隔离",
+        "MapReady / 回放活动由探针正向证明",
+        "strict endmovie → 物理静默 → freeze → drain",
+        "MediaProbe 校验 → fsync → 原子提交",
+        "fault 一律 throw，禁止 catch{} 冒充成功"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "运行时保护",
+      "items": [
+        "Junction 强制监视盘在 RAM（ImDisk）",
+        "磁盘安全线 0–50%；Critical 受控收尾",
+        "cleanup 独立 token；Dirty 会话禁同会话重试",
+        "启动时 runner_session PID 身份校验恢复",
+        "真实性能预检：10s 吞吐窗口"
+      ]
+    }
+  ]
+}

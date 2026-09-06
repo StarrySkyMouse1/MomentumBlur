@@ -97,6 +97,72 @@ public static class MomentumDirectoryLinkService
     }
 
     /// <summary>
+    /// 严格校验链接目录：必须已创建（junction）、目标可解析、目标存在、且指向
+    /// 配置的 RAM 监视目录下的 <c>momentum</c>（内存盘）。任一项不满足即抛出
+    /// <see cref="InvalidOperationException"/>。
+    /// 这是「不允许没有链接目录直接向磁盘录制」的硬性闸门。
+    /// </summary>
+    public static void EnsureLinkedToRam(LinkPaths paths)
+    {
+        if (IsDirectoryJunction(paths.LinkPath))
+        {
+            var target = TryGetJunctionTarget(paths.LinkPath);
+            if (string.IsNullOrWhiteSpace(target))
+                throw new InvalidOperationException(
+                    $"链接目录 {paths.LinkPath} 的目标无法解析（内存盘可能已卸载）。请先挂载 ImDisk RAM 盘，再重新「生成链接目录」。");
+
+            if (!Directory.Exists(target))
+                throw new InvalidOperationException(
+                    $"链接目录 {paths.LinkPath} 指向的目标不存在（内存盘可能未挂载）：{target}。禁止直接向磁盘录制，请先挂载 ImDisk RAM 盘。");
+
+            if (!PathsEqual(target, paths.RamMomentumPath))
+                throw new InvalidOperationException(
+                    $"链接目录 {paths.LinkPath} 未指向内存盘目录：当前目标 {target}，应为 {paths.RamMomentumPath}。请先「取消链接」，确认内存盘已挂载后重新「生成链接目录」。");
+
+            return;
+        }
+
+        if (IsBrokenDirectoryJunction(paths.LinkPath))
+            throw new InvalidOperationException(
+                $"链接目录 {paths.LinkPath} 的目标不可达（内存盘可能未挂载）。请先挂载 ImDisk RAM 盘，再重新「生成链接目录」。");
+
+        if (Directory.Exists(paths.LinkPath))
+            throw new InvalidOperationException(
+                $"未创建链接目录：{paths.LinkPath} 是实体目录而非目录链接。禁止直接向磁盘录制，请先执行「生成链接目录」迁移到内存盘。");
+
+        throw new InvalidOperationException(
+            $"未创建链接目录：{paths.LinkPath} 不存在。禁止直接向磁盘录制，请先挂载 ImDisk RAM 盘并在「设置」中执行「生成链接目录」。");
+    }
+
+    /// <summary>
+    /// 捕获前的严格闸门（任务执行 / 回放验证 / 性能预检 / 手动录制共用）：
+    /// 设置了游戏根目录时，必须满足——链接目录已创建且指向内存盘（RAM 监视目录下的
+    /// <c>momentum</c>），并且实际监视目录就是该内存盘目标；否则抛出异常拒绝执行，
+    /// 绝不回退到磁盘路径上监视或录制。
+    /// </summary>
+    public static void EnsureCaptureTargetOnRam(
+        string? gameRoot,
+        string ramWatchDirectory,
+        string effectiveWatchDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(gameRoot))
+        {
+            // 无游戏根目录（纯手动模式）：不存在链接概念，仅信任用户配置的监视目录。
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(ramWatchDirectory))
+            throw new InvalidOperationException("未配置 TGA 监视目录（内存盘）。无法确认链接目标。");
+
+        var paths = ResolvePaths(gameRoot, ramWatchDirectory);
+        EnsureLinkedToRam(paths);
+
+        if (!PathsEqual(effectiveWatchDirectory, paths.RamMomentumPath))
+            throw new InvalidOperationException(
+                $"TGA 监视目录未落在内存盘链接目录上：{effectiveWatchDirectory}（应为 {paths.RamMomentumPath}）。请确认已「生成链接目录」且内存盘已挂载。");
+    }
+
+    /// <summary>
     /// 将 <c>momentum</c> 重命名为 <c>_momentum</c>，复制到 RAM 盘并创建 junction。
     /// </summary>
     public static void CreateLink(LinkPaths paths, bool overwriteRamCopy)
