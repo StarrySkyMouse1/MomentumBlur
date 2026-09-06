@@ -45,6 +45,19 @@
     <CMakeExe Condition="'$(CMakeExe)' == ''">cmake</CMakeExe>
   </PropertyGroup>
 
+  <!-- 若 build 目录中的 CMake 缓存记录的不是当前源码目录（仓库移动/复制后），
+       先清掉整个生成目录，让下方 cmake configure 重新生成，避免 cmake build 报缓存路径不匹配 -->
+  <Target Name="EnsureNativeCacheFresh" BeforeTargets="BuildNativeDll"
+          Condition="Exists('$(NativeBuildDir)\CMakeCache.txt')">
+    <PropertyGroup>
+      <!-- 先规范化（$(NativeRoot) 含 ..\，与 CMake 缓存中的绝对路径不匹配），再统一为 / 比较 -->
+      <_NativeRootFwd>$([System.IO.Path]::GetFullPath('$(NativeRoot)').Replace('\', '/'))</_NativeRootFwd>
+      <_NativeCacheText>$([System.IO.File]::ReadAllText('$(NativeBuildDir)\CMakeCache.txt'))</_NativeCacheText>
+      <_CacheMatchesRoot>$([System.String]::Copy('$(_NativeCacheText)').Contains('$(_NativeRootFwd)'))</_CacheMatchesRoot>
+    </PropertyGroup>
+    <RemoveDir Directories="$(NativeBuildDir)" Condition="'$(_CacheMatchesRoot)' == 'false'" />
+  </Target>
+
   <Target Name="BuildNativeDll" BeforeTargets="BeforeBuild" Condition="'$(SkipNativeBuild)' != 'true'">
     <Error Text="未找到 cmake（已尝试 VS 自带路径）。请安装「使用 C++ 的桌面开发」工作负载，或设置 /p:CMakeExe=完整路径。"
            Condition="'$(CMakeExe)' == 'cmake'" />
