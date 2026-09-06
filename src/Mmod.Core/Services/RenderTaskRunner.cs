@@ -154,7 +154,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                     await _verifyGame.DisposeAsync();
                 _verifyGame = new MomentumProcessController();
                 _verifyGame.NetCon.OutputReceived += line => Log($"« {line.Trim()}");
-                Log("正在启动 Momentum Mod 并连接 NetCon…");
+                Log("正在复用或启动 Momentum Mod 并连接 NetCon…");
                 await _verifyGame.StartAsync(gameRoot, token);
                 Log("NetCon 已连接");
             }
@@ -274,7 +274,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                 if (game is null)
                 {
                     game = new MomentumProcessController();
-                    Status = "正在启动 Momentum Mod 并验证 NetCon"; Changed?.Invoke();
+                    Status = "正在复用或启动 Momentum Mod 并验证 NetCon"; Changed?.Invoke();
                     await game.StartAsync(settings.GameRootPath, token);
                     currentCompatibility = expectedKey;
                 }
@@ -291,8 +291,11 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                     _repository.UpdateTaskElapsed(task.Id, task.ElapsedSeconds + timer.Elapsed.TotalSeconds);
                     if (_pauseAfterNode)
                     {
+                        // 游戏进程保持打开；清掉 runner 会话，使下次「开始/继续」不会
+                        // 被崩溃恢复误杀，而是通过固定 NetCon 凭据直接复用该实例。
                         _repository.UpdateTaskStatus(task.Id, RenderTaskStatus.Paused, "按要求在当前节点完成后暂停。");
-                        Status = "队列已暂停（游戏会话保持，capture 已停止并清理）"; return;
+                        _repository.ClearRunnerSession();
+                        Status = "队列已暂停（游戏会话保持打开；继续时将直接复用，不再新启动游戏）"; return;
                     }
                 }
 
@@ -664,6 +667,13 @@ public sealed class RenderTaskRunner : IAsyncDisposable
     {
         if (!Directory.Exists(s.GameRootPath)) throw new DirectoryNotFoundException("游戏根目录不存在。");
         if (!Directory.Exists(s.WatchDirectory)) throw new DirectoryNotFoundException("TGA 监视目录不存在。");
+
+        // 严格闸门：任务执行前必须确认链接目录已创建且指向内存盘（RAM 监视目录下的 momentum），
+        // 实际监视目录必须是该内存盘目标；不允许未链接时直接在磁盘上执行任务。
+        var attemptUser = ToUserSettingsForAttempt(s);
+        var effectiveWatch = WatchDirectoryHelper.ResolveEffectiveWatchDirectory(attemptUser, attemptUser.GameRootPath);
+        MomentumDirectoryLinkService.EnsureCaptureTargetOnRam(s.GameRootPath, s.WatchDirectory, effectiveWatch);
+
         Directory.CreateDirectory(s.OutputDirectory);
     }
 

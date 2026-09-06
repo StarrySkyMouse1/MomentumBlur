@@ -207,6 +207,20 @@ public sealed class NodeExecutionCoordinator
         if (string.IsNullOrWhiteSpace(ctx.Settings.WatchDirectory) || !Directory.Exists(ctx.Settings.WatchDirectory))
             throw new RecordingStageException(RecordingFailureKind.InvalidInput, "TGA 监视目录不存在。");
 
+        // 严格闸门（每次 attempt 复检）：链接目录必须已创建且指向内存盘，且实际监视
+        // 目录必须是内存盘链接目标；未链接时立即失败，严禁直接在磁盘上进行录制。
+        try
+        {
+            var attemptUser = RenderTaskRunner.ToUserSettingsForAttempt(ctx.Settings);
+            var effectiveWatch = WatchDirectoryHelper.ResolveEffectiveWatchDirectory(attemptUser, attemptUser.GameRootPath);
+            MomentumDirectoryLinkService.EnsureCaptureTargetOnRam(
+                ctx.Settings.GameRootPath, ctx.Settings.WatchDirectory, effectiveWatch);
+        }
+        catch (InvalidOperationException linkEx)
+        {
+            throw new RecordingStageException(RecordingFailureKind.InvalidInput, linkEx.Message, linkEx);
+        }
+
         // Ensure owned game session.
         setStage(NodeExecutionStage.EnsuringGameSession);
         if (!ctx.Game.IsGameRunning)
