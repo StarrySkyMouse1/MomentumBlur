@@ -271,6 +271,26 @@
                                    Command="{Binding BrowseWatchDirectoryCommand}" />
                     </Grid>
 
+                    <TextBlock Margin="0,16,0,6" Text="成片输出目录" />
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox Grid.Column="0"
+                                 Margin="0,0,8,0"
+                                 IsReadOnly="True"
+                                 Text="{Binding VideoOutputDirectory, Mode=TwoWay}" />
+                        <ui:Button Grid.Column="1"
+                                   Content="浏览…"
+                                   Command="{Binding BrowseVideoOutputCommand}" />
+                    </Grid>
+                    <TextBlock Margin="0,4,0,0"
+                               Text="任务成片（最终 mp4）的输出位置。未配置时无法创建任务。"
+                               TextWrapping="Wrap"
+                               Opacity="0.65"
+                               FontSize="11" />
+
                     <TextBlock Margin="0,16,0,6" Text="监视盘剩余空间安全下限（%）" />
                     <ui:NumberBox Value="{Binding DiskSafetyFreePercent, Mode=TwoWay}"
                                   Minimum="0"

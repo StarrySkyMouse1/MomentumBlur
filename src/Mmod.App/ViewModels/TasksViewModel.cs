@@ -112,7 +112,11 @@ public partial class TasksViewModel : ObservableObject
             ReloadTasks();
             StatusText = $"已创建 {count} 个任务并追加到队列。";
         }
-        catch (Exception ex) { StatusText = ex.Message; }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            System.Windows.MessageBox.Show(ex.Message, "创建任务失败", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
+        }
     }
 
     [RelayCommand] private void ReloadTasks()
@@ -313,10 +317,10 @@ public partial class TasksViewModel : ObservableObject
     private static string Safe(string name) => string.Concat(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
     private static void ValidateTaskSettings(UserSettings s)
     {
-        if (s.CaptureMode != CaptureMode.Tga) throw new InvalidOperationException("任务仅在 TGA 模式下可用。");
-        if (string.IsNullOrWhiteSpace(s.GameRootPath) || !Directory.Exists(s.GameRootPath)) throw new InvalidOperationException("游戏根目录不存在。");
-        if (string.IsNullOrWhiteSpace(s.RamDiskWatchDirectory) || !Directory.Exists(s.RamDiskWatchDirectory)) throw new InvalidOperationException("TGA 监视目录未配置或不存在。");
-        if (string.IsNullOrWhiteSpace(s.VideoOutputDirectory)) throw new InvalidOperationException("请配置成片输出目录。");
+        if (s.CaptureMode != CaptureMode.Tga) throw new InvalidOperationException("任务仅在 TGA 模式下可用（请先在「设置」页把捕获模式切换为 TGA）。");
+        if (string.IsNullOrWhiteSpace(s.GameRootPath) || !Directory.Exists(s.GameRootPath)) throw new InvalidOperationException("游戏根目录未配置或不存在（请先在「设置」页配置有效的游戏根目录）。");
+        if (string.IsNullOrWhiteSpace(s.RamDiskWatchDirectory) || !Directory.Exists(s.RamDiskWatchDirectory)) throw new InvalidOperationException("TGA 监视目录未配置或不存在（请先在「设置」页配置监视目录，并确认 ImDisk RAM 盘已挂载）。");
+        if (string.IsNullOrWhiteSpace(s.VideoOutputDirectory)) throw new InvalidOperationException("请先在「设置」页配置成片输出目录。");
         Directory.CreateDirectory(s.VideoOutputDirectory);
     }
 
