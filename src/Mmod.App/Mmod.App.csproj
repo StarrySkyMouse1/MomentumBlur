@@ -33,16 +33,8 @@
     <NativeRoot>$(MSBuildThisFileDirectory)..\Mmod.Native</NativeRoot>
     <NativeBuildDir>$(MSBuildThisFileDirectory)..\Mmod.Native\build</NativeBuildDir>
     <NativeDll>$(MSBuildThisFileDirectory)..\Mmod.Native\build\bin\$(Configuration)\mmod_native.dll</NativeDll>
-    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\18\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
-    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
-    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
-    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
-    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
-    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
-    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('D:\Software\Professionals\vs2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">D:\Software\Professionals\vs2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
-    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('D:\Software\Professionals\vs2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">D:\Software\Professionals\vs2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
-    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('D:\Software\Professionals\vs2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">D:\Software\Professionals\vs2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
-    <CMakeExe Condition="'$(CMakeExe)' == ''">cmake</CMakeExe>
+    <!-- CMakeExe 不在此赋值：由 ResolveCMakeExe 目标按优先级自动探测。
+         外部显式传入的 /p:CMakeExe=完整路径 会被保留（所有探测条件均以 CMakeExe 为空为前提）。 -->
   </PropertyGroup>
 
   <!-- 若 build 目录中的 CMake 缓存记录的不是当前源码目录（仓库移动/复制后），
@@ -58,9 +50,91 @@
     <RemoveDir Directories="$(NativeBuildDir)" Condition="'$(_CacheMatchesRoot)' == 'false'" />
   </Target>
 
+  <!-- CMake 自动发现，按优先级直到拿到可用的 cmake.exe；全部失败才报错：
+       1) 外部 /p:CMakeExe=完整路径（不覆盖）
+       2) PATH 上的 cmake（where cmake）
+       3) 当前 Visual Studio 实际安装路径（$(VsInstallRoot)，VS MSBuild / VS IDE 构建时即当时的 VS 根）
+       4) 由 $(MSBuildToolsPath)（形如 <VS根>\MSBuild\Current\Bin）反推的 VS 根
+       5) vswhere 返回的、装有「用于 Windows 的 C++ CMake 工具」组件的 VS：
+          任意版本 / Edition / 安装位置（含 Insiders 通道、非 C 盘、dotnet CLI 构建）
+       6) 常见安装目录的最后兜底（版本 / Edition 硬编码，仅作最终兼容，新环境优先被 2-5 命中）
+       最后：CMakeExe 为空 = 报错；CMakeExe 不是现存文件时先跑版本检查确认真实可用。 -->
+  <Target Name="ResolveCMakeExe" BeforeTargets="BuildNativeDll" Condition="'$(SkipNativeBuild)' != 'true'">
+    <!-- 2) PATH 上的 cmake -->
+    <Exec Command="where cmake 2>nul" IgnoreExitCode="true" ConsoleToMSBuild="true" StandardOutputImportance="Low"
+          Condition="'$(CMakeExe)' == ''">
+      <Output TaskParameter="ExitCode" PropertyName="_CMakeFoundOnPath" />
+    </Exec>
+    <PropertyGroup Condition="'$(CMakeExe)' == '' and '$(_CMakeFoundOnPath)' == '0'">
+      <CMakeExe>cmake</CMakeExe>
+    </PropertyGroup>
+
+    <!-- 3) 当前 VS 实际安装路径（$(VsInstallRoot) 为空时自动跳过，例如 dotnet CLI 构建） -->
+    <PropertyGroup Condition="'$(CMakeExe)' == '' and '$(VsInstallRoot)' != '' and Exists('$(VsInstallRoot)\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">
+      <CMakeExe>$(VsInstallRoot)\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    </PropertyGroup>
+
+    <!-- 4) 由 MSBuildToolsPath 反推 VS 根（仅当该派生路径下确实存在 VS 自带 cmake） -->
+    <PropertyGroup Condition="'$(CMakeExe)' == '' and Exists('$(MSBuildToolsPath)\..\..\..\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">
+      <CMakeExe>$(MSBuildToolsPath)\..\..\..\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    </PropertyGroup>
+
+    <!-- 5) vswhere 兜底：仅取安装了 CMake 组件的 VS 安装路径 -->
+    <Exec Command="&quot;C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe&quot; -latest -prerelease -products * -requires Microsoft.VisualStudio.Component.VC.CMake.Project -property installationPath"
+          IgnoreExitCode="true" ConsoleToMSBuild="true" StandardOutputImportance="Low"
+          Condition="'$(CMakeExe)' == ''">
+      <Output TaskParameter="ExitCode" PropertyName="_VsWhereExitCode" />
+      <Output TaskParameter="ConsoleOutput" PropertyName="_VsInstallFromVsWhere" />
+    </Exec>
+    <PropertyGroup Condition="'$(CMakeExe)' == '' and '$(_VsWhereExitCode)' == '0' and Exists('$(_VsInstallFromVsWhere.Trim())\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">
+      <CMakeExe>$(_VsInstallFromVsWhere.Trim())\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    </PropertyGroup>
+
+    <!-- 6) 常见安装目录最后兜底（硬编码清单，仅作最终兼容） -->
+    <PropertyGroup Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">
+      <CMakeExe>C:\Program Files\Microsoft Visual Studio\18\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">
+      <CMakeExe>C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">
+      <CMakeExe>C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">
+      <CMakeExe>C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">
+      <CMakeExe>C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">
+      <CMakeExe>C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(CMakeExe)' == '' and Exists('D:\Software\Professionals\vs2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">
+      <CMakeExe>D:\Software\Professionals\vs2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(CMakeExe)' == '' and Exists('D:\Software\Professionals\vs2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">
+      <CMakeExe>D:\Software\Professionals\vs2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    </PropertyGroup>
+    <PropertyGroup Condition="'$(CMakeExe)' == '' and Exists('D:\Software\Professionals\vs2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">
+      <CMakeExe>D:\Software\Professionals\vs2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    </PropertyGroup>
+
+    <!-- 探测完毕仍未找到：给出明确错误，而不是拿一个不存在的命令去执行 -->
+    <Error Condition="'$(CMakeExe)' == ''"
+           Text="未找到 cmake：PATH、当前 Visual Studio（$(VsInstallRoot)）自带路径与常见安装目录中均未找到 cmake.exe。请安装「使用 C++ 的桌面开发」工作负载（含「用于 Windows 的 C++ CMake 工具」组件），或将 CMake 加入 PATH，或设置 /p:CMakeExe=完整路径。" />
+
+    <!-- CMakeExe 不是现存文件（PATH 裸名 / 外部传入的错误路径）时，先跑版本检查确认真实可用 -->
+    <Exec Command="&quot;$(CMakeExe)&quot; --version" IgnoreExitCode="true" StandardOutputImportance="Low"
+          Condition="'$(CMakeExe)' != '' and !Exists('$(CMakeExe)')">
+      <Output TaskParameter="ExitCode" PropertyName="_CMakeProbeExitCode" />
+    </Exec>
+    <Error Condition="'$(CMakeExe)' != '' and !Exists('$(CMakeExe)') and '$(_CMakeProbeExitCode)' != '0'"
+           Text="无法运行 $(CMakeExe)（cmake --version 失败）。请安装 CMake 或设置 /p:CMakeExe=完整路径。" />
+
+    <Message Importance="high" Text="Mmod.App 使用 CMake: $(CMakeExe)" Condition="'$(CMakeExe)' != ''" />
+  </Target>
+
   <Target Name="BuildNativeDll" BeforeTargets="BeforeBuild" Condition="'$(SkipNativeBuild)' != 'true'">
-    <Error Text="未找到 cmake（已尝试 VS 自带路径）。请安装「使用 C++ 的桌面开发」工作负载，或设置 /p:CMakeExe=完整路径。"
-           Condition="'$(CMakeExe)' == 'cmake'" />
     <Exec Command="&quot;$(CMakeExe)&quot; -S &quot;$(NativeRoot)&quot; -B &quot;$(NativeBuildDir)&quot; -G &quot;Visual Studio 18 2026&quot; -A x64"
           Condition="!Exists('$(NativeBuildDir)\mmod_native.vcxproj')" />
     <Exec Command="&quot;$(CMakeExe)&quot; --build &quot;$(NativeBuildDir)&quot; --config $(Configuration)" />
