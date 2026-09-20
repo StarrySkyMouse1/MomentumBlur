@@ -10,16 +10,31 @@ namespace Mmod.App.ViewModels;
 
 public partial class SettingsViewModel : ObservableObject
 {
+    /// <summary>设置页页签索引：仅 OBS 模式可见的页签。</summary>
+    private const int ObsOnlySectionIndex = 4;
+
+    /// <summary>设置页页签索引：仅 TGA 模式可见的页签。</summary>
+    private const int TgaOnlySectionIndex = 3;
+
     private readonly UserSettingsStore _store;
     private UserSettings _settings;
     private bool _loading;
+    private bool _suppressPersist;
 
     public SettingsViewModel(UserSettingsStore store)
     {
         _store = store;
         _settings = _store.Load();
         ApplyFrom(_settings);
+        NormalizeSettingsSectionForMode();
     }
+
+    /// <summary>
+    /// 由壳层注入的只读阻塞原因提供者：返回非空字符串表示当前存在不可安全切换的
+    /// 运行/收尾状态（OBS 批处理、TGA 手工管线、无人值守任务）。返回 null 表示可切换。
+    /// 这里不修改任何录制状态机，只做只读投影。
+    /// </summary>
+    public Func<string?>? CaptureModeSwitchBlocker { get; set; }
 
     [ObservableProperty] private CaptureMode captureMode;
     [ObservableProperty] private int supersamplingMultiplier;
@@ -66,16 +81,121 @@ public partial class SettingsViewModel : ObservableObject
     public bool IsLegacyMode => MotionBlurWeightMode == MotionBlurWeightMode.LegacyGaussianExposure;
     public bool IsDaVinciGuideEnabled => EnableDaVinci4KWorkflowGuide;
 
+    // ---- 设计稿呈现层 ----
+    [ObservableProperty] private bool isCaptureSectionSelected = true;
+    [ObservableProperty] private bool isQualitySectionSelected;
+    [ObservableProperty] private bool isPostSectionSelected;
+    [ObservableProperty] private bool isTgaSectionSelected;
+    [ObservableProperty] private bool isObsSectionSelected;
+    [ObservableProperty] private bool isDiskSectionSelected;
+
+    /// <summary>
+    /// 设置页当前页签索引（对应 <c>ui:TabView.SelectedIndex</c>）。
+    /// 模式切换后若停留在另一模式的专属页签，会被强制回到公共页签，
+    /// 否则折叠的页签会让内容区变空。该值只是 UI 位置，不持久化。
+    /// </summary>
+    [ObservableProperty] private int selectedSettingsSectionIndex;
+
+    /// <summary>滑块刻度中间值「当前 300°」。</summary>
+    public string ShutterCurrentText => $"当前 {ShutterAngle:0}°";
+
+    /// <summary>「自动（估算 ≈ 42 Mbps）」/「自定义 12 Mbps」。</summary>
+    public string BitrateSummaryText => IntermediateTargetBitrate > 0
+        ? $"自定义 {IntermediateTargetBitrate / 1_000_000.0:0.#} Mbps"
+        : "自动（估算 ≈ 42 Mbps）";
+
+    /// <summary>「成片目录 …—— 可从合成页直接打开」。</summary>
+    public string OutputDirectoryText => string.IsNullOrWhiteSpace(VideoOutputDirectory)
+        ? "成片目录未配置 —— 请先在「游戏 TGA」分组中设置"
+        : $"成片目录 {VideoOutputDirectory} —— 可从合成页直接打开";
+
+    /// <summary>
+    /// 顶层工作模式的唯一写入口（标题栏双态开关与设置页共用）。
+    /// 成功 / 同模式点击 / 运行中拒绝 / 保存失败四条路径都要有明确结果，绝不静默改变模式。
+    /// </summary>
+    [RelayCommand] private void SetTgaMode() => TrySwitchCaptureMode(CaptureMode.Tga);
+
+    /// <inheritdoc cref="SetTgaMode"/>
+    [RelayCommand] private void SetObsMode() => TrySwitchCaptureMode(CaptureMode.Obs);
+
+    private void TrySwitchCaptureMode(CaptureMode target)
+    {
+        // 同模式点击：不重复持久化，也不触发导航/菜单重建。
+        if (CaptureMode == target)
+            return;
+
+        var blockReason = CaptureModeSwitchBlocker?.Invoke();
+        if (!string.IsNullOrWhiteSpace(blockReason))
+        {
+            _ = Services.DialogServiceLocator.Current.ShowInfoAsync("无法切换工作模式", blockReason);
+            return;
+        }
+
+        var previous = CaptureMode;
+        try
+        {
+            // 沿用既有保存逻辑：OnCaptureModeChanged → Persist → UserSettingsStore.Save。
+            CaptureMode = target;
+        }
+        catch (Exception ex)
+        {
+            _suppressPersist = true;
+            try
+            {
+                CaptureMode = previous;
+                _settings.CaptureMode = previous;
+            }
+            finally
+            {
+                _suppressPersist = false;
+            }
+
+            // 尽力把原模式写回磁盘，避免重启后落到一次并未真正生效的切换。
+            string persisted;
+            try
+            {
+                _store.Save(_settings);
+                persisted = "settings.json 已保持原有模式。";
+            }
+            catch (Exception saveEx)
+            {
+                persisted = $"settings.json 可能仍记录了未生效的模式，请检查写入权限：{saveEx.Message}";
+            }
+
+            _ = Services.DialogServiceLocator.Current.ShowInfoAsync(
+                "切换工作模式失败",
+                $"模式未能保存：{ex.Message}\n界面已保持原有模式「{DescribeMode(previous)}」。{persisted}");
+        }
+    }
+
+    private static string DescribeMode(CaptureMode mode) =>
+        mode == CaptureMode.Obs ? "OBS" : "TGA";
+
+    private void NormalizeSettingsSectionForMode()
+    {
+        var hiddenSectionIndex = CaptureMode == CaptureMode.Obs ? TgaOnlySectionIndex : ObsOnlySectionIndex;
+        if (SelectedSettingsSectionIndex == hiddenSectionIndex)
+            SelectedSettingsSectionIndex = 0;
+    }
+
+    [RelayCommand] private void SetShutterMode() => MotionBlurWeightMode = MotionBlurWeightMode.ShutterAngle;
+    [RelayCommand] private void SetLegacyMode() => MotionBlurWeightMode = MotionBlurWeightMode.LegacyGaussianExposure;
+
     partial void OnCaptureModeChanged(CaptureMode value)
     {
         OnPropertyChanged(nameof(IsObsMode));
         OnPropertyChanged(nameof(IsTgaMode));
+        NormalizeSettingsSectionForMode();
         Persist();
     }
 
     partial void OnSupersamplingMultiplierChanged(int value) => Persist();
     partial void OnObsCaptureFramerateChanged(int value) => Persist();
-    partial void OnVideoOutputDirectoryChanged(string value) => Persist();
+    partial void OnVideoOutputDirectoryChanged(string value)
+    {
+        OnPropertyChanged(nameof(OutputDirectoryText));
+        Persist();
+    }
     partial void OnRamDiskWatchDirectoryChanged(string value) => Persist();
     partial void OnGameRootPathChanged(string value) => Persist();
     partial void OnMovieSequenceNameChanged(string value) => Persist();
@@ -123,12 +243,14 @@ public partial class SettingsViewModel : ObservableObject
             ShutterAngle = clamped;
             return;
         }
+        OnPropertyChanged(nameof(ShutterCurrentText));
         Persist();
     }
 
     partial void OnIntermediateTargetBitrateChanged(int value)
     {
         IntermediateTargetBitrate = Math.Clamp(value, 0, 120_000_000);
+        OnPropertyChanged(nameof(BitrateSummaryText));
         Persist();
     }
 
@@ -302,7 +424,7 @@ public partial class SettingsViewModel : ObservableObject
 
     private void Persist()
     {
-        if (_loading)
+        if (_loading || _suppressPersist)
             return;
 
         _settings = Snapshot();

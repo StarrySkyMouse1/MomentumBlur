@@ -507,6 +507,36 @@ static std::vector<std::wstring> SplitInputPaths(const wchar_t* value) {
   return paths;
 }
 
+static bool CompatibleH264StreamTypes(IMFMediaType* expected, IMFMediaType* actual) {
+  if (!expected || !actual) return false;
+  GUID expected_major{}, actual_major{}, expected_subtype{}, actual_subtype{};
+  if (FAILED(expected->GetGUID(MF_MT_MAJOR_TYPE, &expected_major)) ||
+      FAILED(actual->GetGUID(MF_MT_MAJOR_TYPE, &actual_major)) ||
+      expected_major != actual_major || expected_major != MFMediaType_Video ||
+      FAILED(expected->GetGUID(MF_MT_SUBTYPE, &expected_subtype)) ||
+      FAILED(actual->GetGUID(MF_MT_SUBTYPE, &actual_subtype)) ||
+      expected_subtype != actual_subtype || expected_subtype != MFVideoFormat_H264) {
+    return false;
+  }
+
+  UINT32 expected_width = 0, expected_height = 0, actual_width = 0, actual_height = 0;
+  UINT32 expected_rate_num = 0, expected_rate_den = 0, actual_rate_num = 0, actual_rate_den = 0;
+  if (FAILED(MFGetAttributeSize(expected, MF_MT_FRAME_SIZE, &expected_width, &expected_height)) ||
+      FAILED(MFGetAttributeSize(actual, MF_MT_FRAME_SIZE, &actual_width, &actual_height)) ||
+      expected_width != actual_width || expected_height != actual_height ||
+      FAILED(MFGetAttributeRatio(expected, MF_MT_FRAME_RATE, &expected_rate_num, &expected_rate_den)) ||
+      FAILED(MFGetAttributeRatio(actual, MF_MT_FRAME_RATE, &actual_rate_num, &actual_rate_den)) ||
+      static_cast<uint64_t>(expected_rate_num) * actual_rate_den !=
+          static_cast<uint64_t>(actual_rate_num) * expected_rate_den) {
+    return false;
+  }
+
+  // IsEqual also compares per-file metadata such as average bitrate and the
+  // MPEG sequence-header blob. Those may legitimately differ between clips
+  // emitted by the same encoder and must not reject a stream-copy concat.
+  return true;
+}
+
 extern "C" MMOD_API int32_t mmod_concat_video_files(const wchar_t* input_paths, const wchar_t* output_path, int32_t* out_error) {
   if (out_error) *out_error = MmodError_Ok;
   const auto paths = SplitInputPaths(input_paths);
@@ -549,9 +579,10 @@ extern "C" MMOD_API int32_t mmod_concat_video_files(const wchar_t* input_paths, 
       if (FAILED(hr)) break;
       writer_started = true;
     } else {
-      DWORD equal_flags = 0;
-      hr = expected_type->IsEqual(type.Get(), &equal_flags);
-      if (hr != S_OK) { hr = MF_E_INVALIDMEDIATYPE; break; }
+      if (!CompatibleH264StreamTypes(expected_type.Get(), type.Get())) {
+        hr = MF_E_INVALIDMEDIATYPE;
+        break;
+      }
     }
 
     LONGLONG input_first = -1;

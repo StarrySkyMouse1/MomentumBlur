@@ -1,0 +1,5 @@
+interface:
+  display_name: "Mmod Record 工作流"
+  short_description: "每轮先判阶段，默认单执行 AI，并保护录制链路与工作区"
+  default_prompt: "先使用 $mmod-record-workflow，读取 AGENTS、README 和相关设计，判断 Direct、Relay 或 Discovery 后再行动。"
+

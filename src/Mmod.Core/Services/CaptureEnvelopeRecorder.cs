@@ -81,21 +81,49 @@ public static class CaptureEnvelopeRecorder
 
             // 2. Start movie with the unique session prefix (strict, failure patterns).
             Stage(NodeExecutionStage.StartingMovie, "StartMovie", "开始 startmovie");
-            await MomentumReplaySession.ExecuteStartMovieAsync(netCon, user.MovieSequenceName, timeouts, phase, token);
+            try
+            {
+                await MomentumReplaySession.ExecuteStartMovieAsync(netCon, user.MovieSequenceName, timeouts, phase, token);
+            }
+            catch (Exception ex) when (ex is TimeoutException or InvalidOperationException)
+            {
+                throw new RecordingStageException(RecordingFailureKind.CaptureStartFailed, ex.Message, ex);
+            }
 
             // 3. CaptureReady evidence: the current session is actually producing TGA.
             Stage(NodeExecutionStage.WaitingCaptureReady, "WaitingCaptureReady", "等待 CaptureReady");
-            await pipeline.WaitUntilFedAsync(CaptureReadyMinFrames, timeouts.CaptureReadyTimeout, token);
+            try
+            {
+                await pipeline.WaitUntilFedAsync(CaptureReadyMinFrames, timeouts.CaptureReadyTimeout, token);
+            }
+            catch (TimeoutException ex)
+            {
+                throw new RecordingStageException(RecordingFailureKind.CaptureStartFailed, ex.Message, ex);
+            }
             phase?.Invoke($"WaitingCaptureReady：已确认 {pipeline.FedCount} 帧 TGA");
             pipeline.ResetActivityTracking();
 
             // 4. Start replay watch (typed result).
             Stage(NodeExecutionStage.StartingReplay, "StartingReplay", "发送 replay watch");
-            await MomentumReplaySession.StartWatchAsync(netCon, gameRelativeReplayPath, phase, token, timeouts);
+            try
+            {
+                await MomentumReplaySession.StartWatchAsync(netCon, gameRelativeReplayPath, phase, token, timeouts);
+            }
+            catch (Exception ex) when (ex is TimeoutException or InvalidOperationException)
+            {
+                throw new RecordingStageException(RecordingFailureKind.ReplayRejected, ex.Message, ex);
+            }
 
             // 5. Playback evidence (robust visual probe; no hash-only anchor).
             Stage(NodeExecutionStage.WaitingPlaybackEvidence, "WaitingPlaybackEvidence", "等待播放证据");
-            await pipeline.WaitUntilActivityAsync(timeouts.PlaybackEvidenceTimeout, token);
+            try
+            {
+                await pipeline.WaitUntilActivityAsync(timeouts.PlaybackEvidenceTimeout, token);
+            }
+            catch (TimeoutException ex)
+            {
+                throw new RecordingStageException(RecordingFailureKind.PlaybackEvidenceTimeout, ex.Message, ex);
+            }
             var anchor = pipeline.ActivityAnchorFrame
                 ?? throw new InvalidOperationException("PlaybackEvidence anchor 未建立。");
             phase?.Invoke($"PlaybackEvidenceConfirmed @ Anchor={anchor}");
@@ -177,7 +205,9 @@ public static class CaptureEnvelopeRecorder
                 }
                 else if (DateTime.UtcNow - lastFedAt > timeouts.NoPhysicalTgaProgressTimeout)
                 {
-                    throw new TimeoutException("TGA 帧连续无增长（Recording Stall）。");
+                    throw new RecordingStageException(
+                        RecordingFailureKind.TgaWriteStalled,
+                        "TGA 帧连续无增长（Recording Stall）。");
                 }
 
                 phase?.Invoke($"Recording：{pipeline.FedCount}/{safeEnd}");
@@ -209,10 +239,7 @@ public static class CaptureEnvelopeRecorder
                 }
 
                 Stage(NodeExecutionStage.WaitingCaptureQuiescence, "DiskPressureQuiescence", "等待 TGA 物理静默");
-                await pipeline.Watcher.WaitForQuiescenceAsync(
-                    timeouts.TgaQuiescenceQuietWindow,
-                    timeouts.TgaQuiescenceHardTimeout,
-                    token);
+                await WaitForQuiescenceAsync(pipeline, timeouts, token);
 
                 // FinalizeAsync performs freeze → drain → native Finish; advance
                 // the state machine through the same stages so no transition is
@@ -252,12 +279,14 @@ public static class CaptureEnvelopeRecorder
 
             // 8. Physical TGA quiescence: proof the writer actually stopped.
             Stage(NodeExecutionStage.WaitingCaptureQuiescence, "Quiescence", "等待 TGA 物理静默");
-            await pipeline.Watcher.WaitForQuiescenceAsync(
-                timeouts.TgaQuiescenceQuietWindow,
-                timeouts.TgaQuiescenceHardTimeout,
-                token);
+            await WaitForQuiescenceAsync(pipeline, timeouts, token);
 
-            // 9. Finalize: freeze → drain → native Finish; faults propagate.
+            // 9. FinalizeAsync performs freeze → drain → native Finish. Keep
+            // the persisted state machine aligned with those real boundaries;
+            // otherwise a successful capture is rejected as the illegal jump
+            // WaitingCaptureQuiescence → FinalizingEncoder.
+            Stage(NodeExecutionStage.FreezingWatcher, "Freeze", "冻结 watcher");
+            Stage(NodeExecutionStage.DrainingFrames, "Drain", "排空已稳定帧");
             Stage(NodeExecutionStage.FinalizingEncoder, "Finalize", "Native Finish");
             var result = await pipeline.FinalizeAsync(timeouts, token);
 
@@ -265,8 +294,10 @@ public static class CaptureEnvelopeRecorder
             if (pipeline.ActivityAnchorFrame is null || !pipeline.HasVisualChange)
                 throw new InvalidOperationException("成片校验失败：录制过程中未建立 PlaybackEvidence。");
 
-            Stage(NodeExecutionStage.Completed, "Completed",
-                $"Fed={result.SubmittedFrames} Out={result.ProducedFrames} 输出={result.OutputPath}");
+            // Do not mark the attempt Completed here. The coordinator still
+            // has to positively validate the media and atomically commit it:
+            // FinalizingEncoder → ValidatingClip → CommittingClip → Completed.
+            phase?.Invoke($"FinalizeCompleted：Fed={result.SubmittedFrames} Out={result.ProducedFrames} 输出={result.OutputPath}");
             return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -276,91 +307,31 @@ public static class CaptureEnvelopeRecorder
         }
     }
 
-    /// <summary>
-    /// Mini envelope for「验证回放」: CaptureReady → watch → evidence → strict stop
-    /// → quiescence. Does not record a full run.
-    /// </summary>
-    public static async Task<PerformanceSnapshot> VerifyActivityAsync(
-        INetConClient netCon,
-        ICapturePipeline pipeline,
-        UserSettings user,
-        string gameRelativeReplayPath,
-        Action<string>? phase,
-        CancellationToken token,
-        RecordingTimeoutPolicy? timeouts = null,
-        Action<NodeExecutionStage>? onStage = null,
-        TimeSpan? observationWindow = null)
-    {
-        timeouts ??= RecordingTimeoutPolicy.Default;
-        void Stage(NodeExecutionStage stage) => onStage?.Invoke(stage);
-        try
-        {
-            phase?.Invoke("PreparingCapture");
-            Stage(NodeExecutionStage.PreparingCaptureBaseline);
-            var baselineStop = await MomentumReplaySession.ExecuteEndMovieAsync(netCon, timeouts, phase, token);
-            if (baselineStop is not StopMovieResult.CommandAcked and not StopMovieResult.KnownAlreadyStopped)
-                throw new CaptureStopUnconfirmedException($"准备阶段 endmovie 未确认（{baselineStop}）。");
-
-            Stage(NodeExecutionStage.StartingMovie);
-            await MomentumReplaySession.ExecuteStartMovieAsync(netCon, user.MovieSequenceName, timeouts, phase, token);
-
-            phase?.Invoke("WaitingCaptureReady");
-            Stage(NodeExecutionStage.WaitingCaptureReady);
-            await pipeline.WaitUntilFedAsync(CaptureReadyMinFrames, timeouts.CaptureReadyTimeout, token);
-            phase?.Invoke($"WaitingCaptureReady：已确认 {pipeline.FedCount} 帧");
-            pipeline.ResetActivityTracking();
-
-            phase?.Invoke("StartingReplay");
-            Stage(NodeExecutionStage.StartingReplay);
-            await MomentumReplaySession.StartWatchAsync(netCon, gameRelativeReplayPath, phase, token, timeouts);
-
-            phase?.Invoke("WaitingReplayActivity");
-            Stage(NodeExecutionStage.WaitingPlaybackEvidence);
-            await pipeline.WaitUntilActivityAsync(timeouts.PlaybackEvidenceTimeout, token);
-            phase?.Invoke($"WaitingReplayActivity：ActivityAnchorFrame={pipeline.ActivityAnchorFrame}");
-
-            var observe = observationWindow.GetValueOrDefault();
-            if (observe > TimeSpan.Zero)
-            {
-                var deadline = DateTime.UtcNow + observe;
-                phase?.Invoke($"PerformancePreflight：采集 {observe.TotalSeconds:0} 秒真实吞吐窗口");
-                while (DateTime.UtcNow < deadline)
-                {
-                    token.ThrowIfCancellationRequested();
-                    ThrowIfFaulted(pipeline);
-                    await Task.WhenAny(Task.Delay(TimeSpan.FromMilliseconds(200), token), pipeline.Completion);
-                    ThrowIfFaulted(pipeline);
-                }
-            }
-
-            phase?.Invoke("StoppingCapture");
-            Stage(NodeExecutionStage.RequestingMovieStop);
-            var stop = await MomentumReplaySession.ExecuteEndMovieAsync(netCon, timeouts, phase, token);
-            if (stop is not StopMovieResult.CommandAcked and not StopMovieResult.KnownAlreadyStopped)
-                throw new CaptureStopUnconfirmedException($"endmovie 未确认（{stop}）。");
-
-            Stage(NodeExecutionStage.WaitingCaptureQuiescence);
-            await pipeline.Watcher.WaitForQuiescenceAsync(
-                timeouts.TgaQuiescenceQuietWindow,
-                timeouts.TgaQuiescenceHardTimeout,
-                token);
-
-            Stage(NodeExecutionStage.FinalizingEncoder);
-            await pipeline.FinalizeAsync(timeouts, token);
-            phase?.Invoke("VerifyingCapture：回放可被自动拉起（已建立 PlaybackEvidence）");
-            return pipeline.Performance;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            phase?.Invoke($"StoppingCapture（失败清理）：{ex.Message}");
-            throw;
-        }
-    }
-
     private static void ThrowIfFaulted(ICapturePipeline pipeline)
     {
         if (pipeline.IsFaulted)
             throw new PipelineFaultException(pipeline.Fault?.Message ?? "pipeline fault", pipeline.Fault ?? new Exception("unknown"));
+    }
+
+    private static async Task WaitForQuiescenceAsync(
+        ICapturePipeline pipeline,
+        RecordingTimeoutPolicy timeouts,
+        CancellationToken token)
+    {
+        try
+        {
+            await pipeline.Watcher.WaitForQuiescenceAsync(
+                timeouts.TgaQuiescenceQuietWindow,
+                timeouts.TgaQuiescenceHardTimeout,
+                token);
+        }
+        catch (TimeoutException ex)
+        {
+            throw new RecordingStageException(
+                RecordingFailureKind.TgaQuiescenceTimeout,
+                ex.Message,
+                ex);
+        }
     }
 
     private static double ToGiB(long bytes) => bytes / 1024d / 1024d / 1024d;

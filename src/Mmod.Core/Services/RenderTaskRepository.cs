@@ -182,17 +182,6 @@ public sealed class RenderTaskRepository
         command.ExecuteNonQuery();
     }
 
-    public void UpdatePendingTaskSettings(string taskId, RenderSettingsSnapshot settings)
-    {
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = "UPDATE render_tasks SET settings_json=$settings WHERE id=$id AND status=$pending;";
-        command.Parameters.AddWithValue("$settings", JsonSerializer.Serialize(settings));
-        command.Parameters.AddWithValue("$id", taskId);
-        command.Parameters.AddWithValue("$pending", (int)RenderTaskStatus.Pending);
-        command.ExecuteNonQuery();
-    }
-
     // ---- render_attempts (fine-grained state machine persistence) ----
 
     public string CreateAttempt(RenderAttemptRecord attempt)

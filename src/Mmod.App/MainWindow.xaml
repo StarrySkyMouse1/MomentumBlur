@@ -3,37 +3,104 @@
                  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                  xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
                  xmlns:pages="clr-namespace:Mmod.App.Views.Pages"
+                 xmlns:conv="clr-namespace:Mmod.App.Converters"
                  xmlns:models="clr-namespace:Mmod.Core.Models;assembly=Mmod.Core"
                  Title="{x:Static models:ProjectConstants.ApplicationDisplayName}"
                  Height="720"
                  Width="960"
                  MinHeight="600"
-                 MinWidth="780"
+                 MinWidth="880"
                  ExtendsContentIntoTitleBar="True"
                  WindowBackdropType="Mica"
                  WindowStartupLocation="CenterScreen">
+    <ui:FluentWindow.Resources>
+        <!-- 标题栏顶层模式开关：选中态用受控填充 + 强调色文字，不占用主操作 Primary 层级 -->
+        <conv:BooleanToControlAppearanceConverter x:Key="TitleModeAppearance" />
+        <conv:BooleanToThemeBrushConverter x:Key="TitleModeForeground" />
+    </ui:FluentWindow.Resources>
     <Grid>
         <ui:NavigationView x:Name="RootNavigation"
-                           Padding="28,0,28,0"
+                           Padding="0"
                            TitleBar="{Binding ElementName=TitleBar}"
                            IsBackButtonVisible="Collapsed"
-                           OpenPaneLength="200"
+                           OpenPaneLength="176"
+                           CompactPaneLength="44"
                            PaneDisplayMode="Left"
-                           FrameMargin="0,0,0,12">
+                           IsPaneToggleVisible="True"
+                           FrameMargin="0,0,0,8">
+            <!--
+                导航图标沿用设计稿：录制与处理 = Video24、任务 = Clock24、设置 = Settings24。
+                仅当菜单项在 4.3.0 的 SymbolRegular 全量枚举中存在时才可写（编译期不校验，运行时才解析）。
+
+                顶层模式只显示各自的有效菜单：OBS = 录制与处理 + 设置，TGA = 任务 + 设置。
+                三项目都是「常驻实例」，MainWindow 只按模式增删集合成员，
+                不新建 NavigationViewItem（框架按 TargetPageType 登记的字典不会为同名新实例刷新）。
+            -->
             <ui:NavigationView.MenuItems>
-                <ui:NavigationViewItem Content="合成"
+                <ui:NavigationViewItem x:Name="ComposeNavigationItem"
+                                       Content="录制与处理"
                                        Icon="{ui:SymbolIcon Video24}"
                                        TargetPageType="{x:Type pages:ComposePage}" />
-                <ui:NavigationViewItem Content="设置"
-                                       Icon="{ui:SymbolIcon Settings24}"
-                                       TargetPageType="{x:Type pages:SettingsPage}" />
-                <ui:NavigationViewItem Content="任务"
+                <ui:NavigationViewItem x:Name="TasksNavigationItem"
+                                       Content="任务"
                                        Icon="{ui:SymbolIcon Clock24}"
                                        TargetPageType="{x:Type pages:TasksPage}" />
+                <ui:NavigationViewItem x:Name="SettingsNavigationItem"
+                                       Content="设置"
+                                       Icon="{ui:SymbolIcon Settings24}"
+                                       TargetPageType="{x:Type pages:SettingsPage}" />
             </ui:NavigationView.MenuItems>
         </ui:NavigationView>
+        <!--
+            标题栏：应用名与 OBS / TGA 顶层模式开关都放在 ui:TitleBar.Header 这一
+            公开的可交互内容槽内，不覆盖 TitleBar 的 ControlTemplate。
+            自定义 Header 会替换框架默认标题文本块，因此应用名在此处重新呈现。
+            应用名与分隔线显式 IsHitTestVisible="False"：框架的 WM_NCHITTEST 逻辑对
+            Panel 型 Header 会查找「鼠标下第一个子元素」的可命中性，二者不可命中时
+            该区域仍按 HTCAPTION 处理，于是应用名区域与空白标题栏一样可以拖动、
+            双击最大化；只有开关按钮本身是可交互的命中目标。
+        -->
         <ui:TitleBar x:Name="TitleBar"
                      Title="{x:Static models:ProjectConstants.ApplicationDisplayName}"
-                     CloseWindowByDoubleClickOnIcon="True" />
+                     CloseWindowByDoubleClickOnIcon="True">
+            <ui:TitleBar.Header>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <ui:TextBlock VerticalAlignment="Center"
+                                  IsHitTestVisible="False"
+                                  Text="{x:Static models:ProjectConstants.ApplicationDisplayName}" />
+
+                    <Border Width="1" Height="16" Margin="12,0,0,0"
+                            VerticalAlignment="Center"
+                            IsHitTestVisible="False"
+                            Background="{DynamicResource DividerStrokeColorDefaultBrush}" />
+
+                    <ui:Button Content="OBS"
+                               Style="{StaticResource AppTitleModeSegmentButton}"
+                               Appearance="{Binding Settings.IsObsMode, Converter={StaticResource TitleModeAppearance}, ConverterParameter=titlebar}"
+                               Foreground="{Binding Settings.IsObsMode, Converter={StaticResource TitleModeForeground}, ConverterParameter=AccentTextFillColorPrimaryBrush|TextFillColorSecondaryBrush}"
+                               Command="{Binding Settings.SetObsModeCommand}"
+                               ToolTip="顶层工作模式：OBS（录制与处理 / 设置）。运行中的批处理会阻止切换。"
+                               AutomationProperties.Name="OBS 模式"
+                               AutomationProperties.HelpText="切换到 OBS 顶层工作模式" />
+                    <ui:Button Content="TGA"
+                               Style="{StaticResource AppTitleModeSegmentButton}"
+                               Appearance="{Binding Settings.IsTgaMode, Converter={StaticResource TitleModeAppearance}, ConverterParameter=titlebar}"
+                               Foreground="{Binding Settings.IsTgaMode, Converter={StaticResource TitleModeForeground}, ConverterParameter=AccentTextFillColorPrimaryBrush|TextFillColorSecondaryBrush}"
+                               Command="{Binding Settings.SetTgaModeCommand}"
+                               ToolTip="顶层工作模式：TGA（任务 / 设置）。运行中的任务或捕获收尾会阻止切换。"
+                               AutomationProperties.Name="TGA 模式"
+                               AutomationProperties.HelpText="切换到 TGA 顶层工作模式" />
+                </StackPanel>
+            </ui:TitleBar.Header>
+        </ui:TitleBar>
+        <!--
+            弹层与轻量通知宿主：全局各一个，由 MainWindow.OnLoaded 经 DialogService.Attach 注入。
+            SnackbarPresenter 贴右下；定位与层级交给 ui:NavigationView 之上的这一层 Grid，不改控件模板。
+        -->
+        <ui:SnackbarPresenter x:Name="SnackbarPresenter"
+                              VerticalAlignment="Bottom"
+                              HorizontalAlignment="Right"
+                              Margin="0,0,24,24" />
+        <ui:ContentDialogHost x:Name="RootContentDialog" />
     </Grid>
 </ui:FluentWindow>

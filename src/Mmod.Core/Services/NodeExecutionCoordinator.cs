@@ -43,6 +43,9 @@ public sealed class NodeExecutionFailedException : Exception
 public sealed class NodeExecutionCoordinator
 {
     private ICapturePipeline? _activePipeline;
+    private string? _readyGameSessionId;
+    private string? _readyMap;
+    private bool _forceMapReload;
 
     public async Task<string> ExecuteNodeAsync(NodeExecutionContext ctx, CancellationToken token)
     {
@@ -51,11 +54,16 @@ public sealed class NodeExecutionCoordinator
         var nodeDir = Path.Combine(ctx.WorkDirectory, $"node_{ctx.Node.Sequence + 1:D3}");
         Directory.CreateDirectory(nodeDir);
 
+        // attempt_number is an audit sequence across the lifetime of the node,
+        // while MaxAttempts is the budget for this explicit execution/resume.
+        // Using the lifetime count as the loop bound made a failed node with
+        // three historical attempts impossible to retry from “开始 / 继续”.
         var attemptNumber = ctx.Repository.GetAttemptsForNode(taskId, nodeId).Count + 1;
+        var attemptIndex = 1;
         string? lastError = null;
         RecordingFailureKind? lastKind = null;
 
-        while (attemptNumber <= ctx.Timeouts.MaxAttempts)
+        while (attemptIndex <= ctx.Timeouts.MaxAttempts)
         {
             var captureSession = CaptureSessionInfo.Create(taskId, ctx.Node.Sequence, attemptNumber);
             var attemptId = Guid.NewGuid().ToString("N");
@@ -163,7 +171,7 @@ public sealed class NodeExecutionCoordinator
                     ctx.Log("Warning", $"清理次级错误：{secondary}");
 
                 var decision = RecordingRetryPolicy.Decide(
-                    lastKind.Value, attemptNumber, ctx.Timeouts.MaxAttempts,
+                    lastKind.Value, attemptIndex, ctx.Timeouts.MaxAttempts,
                     cleanup.CleanupState == CaptureCleanupState.Clean);
 
                 ctx.Log("Warning",
@@ -180,6 +188,7 @@ public sealed class NodeExecutionCoordinator
                 await RecoverAsync(ctx, decision, token);
                 TryDelete(tempClip);
                 attemptNumber++;
+                attemptIndex++;
             }
         }
 
@@ -237,11 +246,48 @@ public sealed class NodeExecutionCoordinator
         if (!ctx.Game.NetCon.IsConnected)
             throw new RecordingStageException(RecordingFailureKind.NetConLost, "NetCon 未连接。");
 
-        // Positive map readiness.
+        // Positive map readiness. Map loading is a session transition, not a
+        // per-node ritual: consecutive nodes on the same map reuse the proven
+        // ready session. A changed/restarted session or an explicit ReloadMap
+        // retry invalidates that proof and performs a real map transition.
+        var gameSessionChanged = !string.Equals(
+            _readyGameSessionId,
+            ctx.Game.GameSessionId,
+            StringComparison.Ordinal);
+        var mapChanged = !string.Equals(_readyMap, ctx.Task.MapName, StringComparison.OrdinalIgnoreCase);
+        // Keep the persisted state-machine path explicit even when the gate
+        // reuses an already-proven map; these stages mean "resolve/confirm map
+        // readiness", not necessarily "always issue a map command".
         setStage(NodeExecutionStage.ChangingMap);
         setStage(NodeExecutionStage.WaitingMapReady);
-        await MomentumReplaySession.ChangeMapAsync(ctx.Game.NetCon, ctx.Task.MapName, l => ctx.Log("Info", l), token, timeouts: timeouts);
-        ctx.Log("Info", $"MapReady：{ctx.Task.MapName}");
+        if (gameSessionChanged || mapChanged || _forceMapReload)
+        {
+            try
+            {
+                await MomentumReplaySession.ChangeMapAsync(
+                    ctx.Game.NetCon,
+                    ctx.Task.MapName,
+                    l => ctx.Log("Info", l),
+                    token,
+                    timeouts: timeouts);
+            }
+            catch (TimeoutException ex)
+            {
+                throw new RecordingStageException(
+                    RecordingFailureKind.MapReadinessTimeout,
+                    ex.Message,
+                    ex);
+            }
+
+            _readyGameSessionId = ctx.Game.GameSessionId;
+            _readyMap = ctx.Task.MapName;
+            _forceMapReload = false;
+            ctx.Log("Info", $"MapReady：{ctx.Task.MapName}");
+        }
+        else
+        {
+            ctx.Log("Info", $"MapReadyReuse：复用当前游戏会话中的地图 {ctx.Task.MapName}，不重复执行 map。");
+        }
 
         // Build per-attempt user settings (prefix applied by the pipeline).
         var user = RenderTaskRunner.ToUserSettingsForAttempt(ctx.Settings);
@@ -441,7 +487,7 @@ public sealed class NodeExecutionCoordinator
                 break;
 
             case RetryAction.ReloadMapRetry:
-                // Map will be re-probed by the next attempt's ChangeMapAsync.
+                _forceMapReload = true;
                 break;
 
             case RetryAction.RestartGameRetry:
@@ -450,6 +496,9 @@ public sealed class NodeExecutionCoordinator
                     if (ctx.Game.OwnsProcess)
                         await ctx.Game.ShutdownOwnedProcessAsync(ctx.Timeouts, cleanupCts.Token);
                 }
+                _readyGameSessionId = null;
+                _readyMap = null;
+                _forceMapReload = false;
                 ctx.Log("Info", "游戏会话已销毁，下一 Attempt 将启动全新会话。");
                 break;
         }

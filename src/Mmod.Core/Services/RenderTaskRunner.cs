@@ -20,10 +20,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
     private readonly NodeExecutionCoordinator _coordinator = new();
     private CancellationTokenSource? _cts;
     private bool _pauseAfterNode;
-    private MomentumProcessController? _verifyGame;
     public bool IsRunning { get; private set; }
-    public bool IsVerifying { get; private set; }
-    public bool IsPreflighting { get; private set; }
     public string Status { get; private set; } = "空闲";
     public CaptureRuntimeSnapshot RuntimeSnapshot { get; private set; } = CaptureRuntimeSnapshot.Empty;
     public event Action? Changed;
@@ -32,7 +29,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
 
     public Task StartAsync()
     {
-        if (IsRunning || IsVerifying || IsPreflighting) return Task.CompletedTask;
+        if (IsRunning) return Task.CompletedTask;
         _pauseAfterNode = false;
         _cts = new CancellationTokenSource();
         IsRunning = true;
@@ -41,199 +38,8 @@ public sealed class RenderTaskRunner : IAsyncDisposable
         return Task.CompletedTask;
     }
 
-    /// <summary>
-    /// Mini Capture Envelope：map Ready → TEMP startmovie → CaptureReady → watch → Evidence → endmovie.
-    /// </summary>
-    public async Task VerifyReplayAsync(UserSettings settings, string mapName, string replayFilePath)
-    {
-        if (IsRunning || IsVerifying || IsPreflighting)
-            throw new InvalidOperationException("已有任务或验证在进行中，请先点「立即停止」。");
-
-        _cts = new CancellationTokenSource();
-        IsVerifying = true;
-        Status = "正在验证回放（Capture Envelope）…";
-        Changed?.Invoke();
-        try
-        {
-            await RunDiagnosticCaptureAsync(settings, mapName, replayFilePath, TimeSpan.Zero, _cts.Token);
-        }
-        finally
-        {
-            IsVerifying = false;
-            _cts?.Dispose();
-            _cts = null;
-            Changed?.Invoke();
-        }
-    }
-
-    public async Task<PerformancePreflightResult> RunPerformancePreflightAsync(string taskId)
-    {
-        if (IsRunning || IsVerifying || IsPreflighting)
-            throw new InvalidOperationException("已有任务、验证或性能预检正在进行。");
-
-        var task = _repository.GetTasks().SingleOrDefault(x => x.Id == taskId)
-            ?? throw new InvalidOperationException("任务不存在。");
-        if (task.Status != RenderTaskStatus.Pending)
-            throw new InvalidOperationException("只有待执行任务可以进行性能预检。");
-        var node = _repository.GetNodes(task.Id)
-            .Where(x => x.Status == RenderNodeStatus.Pending)
-            .OrderBy(x => x.Sequence)
-            .FirstOrDefault() ?? throw new InvalidOperationException("任务没有可预检的待执行节点。");
-        var snapshot = Deserialize(task);
-        Validate(snapshot);
-
-        _cts = new CancellationTokenSource();
-        IsPreflighting = true;
-        Status = "正在进行真实性能预检…";
-        Changed?.Invoke();
-        try
-        {
-            var user = ToUserSettingsForAttempt(snapshot);
-            var diagnostic = await RunDiagnosticCaptureAsync(
-                user, task.MapName, node.ReplayPath, TimeSpan.FromSeconds(10), _cts.Token);
-            var result = PerformancePreflightEvaluator.Evaluate(
-                diagnostic.Performance,
-                hasSufficientWindow: true,
-                diagnostic.HasPendingReadFailure);
-            Status = $"性能预检完成：{result.Rating}，消费比 {result.ConsumptionRatio:P1}";
-            return result;
-        }
-        finally
-        {
-            IsPreflighting = false;
-            _cts?.Dispose();
-            _cts = null;
-            Changed?.Invoke();
-        }
-    }
-
     public void PauseAfterCurrentNode() { _pauseAfterNode = true; Status = "将在当前节点完成后暂停"; Changed?.Invoke(); }
     public void StopImmediately() { Status = "正在立即停止"; _cts?.Cancel(); Changed?.Invoke(); }
-
-    private async Task<(PerformanceSnapshot Performance, bool HasPendingReadFailure)> RunDiagnosticCaptureAsync(
-        UserSettings settings,
-        string mapName,
-        string replayFilePath,
-        TimeSpan observationWindow,
-        CancellationToken token)
-    {
-        var logLines = new List<string>();
-        void Log(string line)
-        {
-            logLines.Add($"{DateTime.Now:HH:mm:ss} {line}");
-            Status = string.Join("\n", logLines.TakeLast(40));
-            Changed?.Invoke();
-        }
-
-        var gameRoot = settings.GameRootPath?.Trim() ?? string.Empty;
-        var tempClip = Path.Combine(
-            Path.GetTempPath(),
-            "mmod_record_verify",
-            $"verify_{DateTime.Now:yyyyMMdd_HHmmss}.mp4");
-        Directory.CreateDirectory(Path.GetDirectoryName(tempClip)!);
-
-        try
-        {
-            if (!Directory.Exists(gameRoot))
-                throw new DirectoryNotFoundException("游戏根目录不存在。");
-            if (!File.Exists(replayFilePath))
-                throw new FileNotFoundException("回放文件不存在。", replayFilePath);
-
-            var metadata = MtvReplayParser.Parse(replayFilePath);
-            if (!metadata.IsCompatible)
-                throw new NotSupportedException($"回放格式不兼容：{metadata.CompatibilityIssue}");
-
-            var relative = MomentumReplaySession.BuildGameRelativeReplayPath(gameRoot, replayFilePath);
-            Log($"地图={mapName}");
-            Log($"文件={Path.GetFileName(replayFilePath)}");
-            Log($"相对路径={relative}");
-
-            if (_verifyGame is null || _verifyGame.Process is null || _verifyGame.Process.HasExited)
-            {
-                if (_verifyGame is not null)
-                    await _verifyGame.DisposeAsync();
-                _verifyGame = new MomentumProcessController();
-                _verifyGame.NetCon.OutputReceived += line => Log($"« {line.Trim()}");
-                Log("正在复用或启动 Momentum Mod 并连接 NetCon…");
-                await _verifyGame.StartAsync(gameRoot, token);
-                Log("NetCon 已连接");
-            }
-            else
-            {
-                Log("复用已打开的游戏实例");
-            }
-
-            await MomentumReplaySession.ChangeMapAsync(_verifyGame.NetCon, mapName, Log, token);
-
-            var verifySettings = CloneForVerify(settings);
-            var hostFps = verifySettings.SupersamplingMultiplier * ProjectConstants.FinalOutputFramerate;
-            Log($"配置 host_framerate {hostFps}");
-            await _verifyGame.NetCon.ExecuteAsync(
-                $"sv_cheats 1; host_framerate {hostFps}",
-                TimeSpan.FromSeconds(30),
-                token);
-
-            await using var pipeline = new TgaPipelineOrchestrator(_timeouts);
-            pipeline.Changed += () =>
-            {
-                Status = string.Join("\n", logLines.TakeLast(36).Append($"Fed={pipeline.FedCount} Anchor={pipeline.ActivityAnchorFrame}"));
-                Changed?.Invoke();
-            };
-
-            var session = CaptureSessionInfo.Create("verify", 0, 0);
-            await pipeline.StartAsync(verifySettings, tempClip, session, acceptPreSessionFiles: false);
-
-            var performance = await CaptureEnvelopeRecorder.VerifyActivityAsync(
-                _verifyGame.NetCon,
-                pipeline,
-                verifySettings,
-                relative,
-                Log,
-                token,
-                observationWindow: observationWindow);
-
-            Log("验证成功：回放可被自动拉起（已建立 PlaybackEvidence）。");
-            Status = string.Join("\n", logLines.TakeLast(40));
-            return (performance, pipeline.Watcher.GetBacklogSnapshot().HasReadFailure);
-        }
-        catch (OperationCanceledException)
-        {
-            Log("回放验证已取消");
-            await ShutdownVerifyGameAsync();
-            throw;
-        }
-        catch (Exception ex)
-        {
-            Log("失败：" + ex.Message);
-            await ShutdownVerifyGameAsync();
-            throw new InvalidOperationException(string.Join("\n", logLines.TakeLast(20)), ex);
-        }
-        finally
-        {
-            TryDelete(tempClip);
-            try
-            {
-                var dir = Path.GetDirectoryName(tempClip);
-                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any())
-                    Directory.Delete(dir);
-            }
-            catch { /* ignore */ }
-        }
-    }
-
-    private async Task ShutdownVerifyGameAsync()
-    {
-        if (_verifyGame is null)
-            return;
-        try
-        {
-            if (_verifyGame.OwnsProcess)
-                await _verifyGame.ShutdownOwnedProcessAsync(_timeouts, CancellationToken.None);
-        }
-        catch { /* secondary */ }
-        await _verifyGame.DisposeAsync();
-        _verifyGame = null;
-    }
 
     private async Task RunQueueAsync(CancellationToken token)
     {
@@ -640,24 +446,6 @@ public sealed class RenderTaskRunner : IAsyncDisposable
             throw new InvalidDataException($"最终输出媒体校验失败：{result.Error}");
     }
 
-    private static UserSettings CloneForVerify(UserSettings settings) => new()
-    {
-        CaptureMode = CaptureMode.Tga,
-        SupersamplingMultiplier = Math.Max(1, settings.SupersamplingMultiplier),
-        Exposure = settings.Exposure,
-        RamDiskWatchDirectory = settings.RamDiskWatchDirectory,
-        RamDiskDriveLetter = settings.RamDiskDriveLetter,
-        VideoOutputDirectory = settings.VideoOutputDirectory,
-        GameRootPath = settings.GameRootPath,
-        HideHudInCfg = settings.HideHudInCfg,
-        MovieSequenceName = "mmod_verify",
-        MotionBlurWeightMode = settings.MotionBlurWeightMode,
-        ShutterAngle = settings.ShutterAngle,
-        IntermediateTargetBitrate = settings.IntermediateTargetBitrate,
-        VideoProcessing = settings.VideoProcessing?.Clone(),
-        DiskSafetyFreePercent = DiskSafetyPolicy.NormalizeSafetyPercent(settings.DiskSafetyFreePercent),
-    };
-
     private static RenderSettingsSnapshot Deserialize(RenderTaskRecord task) =>
         SettingsMigration.NormalizeSnapshot(
             JsonSerializer.Deserialize<RenderSettingsSnapshot>(task.SettingsJson)
@@ -712,12 +500,10 @@ public sealed class RenderTaskRunner : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (IsRunning || IsVerifying || IsPreflighting)
+        if (IsRunning)
         {
             StopImmediately();
-            while (IsRunning || IsVerifying || IsPreflighting) await Task.Delay(50);
+            while (IsRunning) await Task.Delay(50);
         }
-
-        await ShutdownVerifyGameAsync();
     }
 }

@@ -1,115 +1,37 @@
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Threading;
 using Mmod.App.ViewModels;
 
 namespace Mmod.App.Views.Pages;
 
 public partial class SettingsPage : Page
 {
-    private Window? _hostWindow;
-
     public SettingsPage()
     {
         InitializeComponent();
         Loaded += OnLoaded;
-        Unloaded += OnUnloaded;
-        SizeChanged += (_, _) => UpdateViewport();
+    }
+
+    /// <summary>
+    /// ui:NumberBox.Value 是可空 double：清空输入框后失焦，控件会把 Value 置为 null
+    /// （见 NumberBox.ValidateInput 的 SetCurrentValue(ValueProperty, null)）。
+    /// 本页数值绑定源都是不可空 int/double，null 回写会失败，控件便停在空白、源保持旧值，
+    /// 两边永久不一致 —— 表现就是「数字输不进去、框一直是空的」。
+    /// 控件自身的 NumberBoxValidationMode 在 WPF-UI 4.3.0 里只注册了属性、没有实现，
+    /// 因此这里在出现空白值时重新从绑定源拉取值，把输入框恢复成有效值。
+    /// </summary>
+    private void OnNumberBoxValueChanged(object sender, Wpf.Ui.Controls.NumberBoxValueChangedEventArgs e)
+    {
+        if (e.NewValue is not null)
+            return;
+
+        if (sender is Wpf.Ui.Controls.NumberBox box)
+            box.GetBindingExpression(Wpf.Ui.Controls.NumberBox.ValueProperty)?.UpdateTarget();
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         if (Window.GetWindow(this) is MainWindow main)
             DataContext = main.ViewModel.Settings;
-
-        _hostWindow = Window.GetWindow(this);
-        if (_hostWindow is not null)
-        {
-            _hostWindow.PreviewMouseWheel -= OnHostPreviewMouseWheel;
-            _hostWindow.PreviewMouseWheel += OnHostPreviewMouseWheel;
-            _hostWindow.SizeChanged -= OnHostSizeChanged;
-            _hostWindow.SizeChanged += OnHostSizeChanged;
-        }
-
-        UpdateViewport();
-        Dispatcher.BeginInvoke(UpdateViewport, DispatcherPriority.Loaded);
-        Dispatcher.BeginInvoke(UpdateViewport, DispatcherPriority.ContextIdle);
-    }
-
-    private void OnUnloaded(object sender, RoutedEventArgs e)
-    {
-        if (_hostWindow is not null)
-        {
-            _hostWindow.PreviewMouseWheel -= OnHostPreviewMouseWheel;
-            _hostWindow.SizeChanged -= OnHostSizeChanged;
-            _hostWindow = null;
-        }
-    }
-
-    private void OnHostSizeChanged(object sender, SizeChangedEventArgs e) => UpdateViewport();
-
-    private void UpdateViewport()
-    {
-        var height = ResolveViewportHeight();
-        if (height <= 0)
-            return;
-
-        RootScroll.Height = height;
-        RootScroll.MaxHeight = height;
-    }
-
-    private double ResolveViewportHeight()
-    {
-        for (var d = VisualTreeHelper.GetParent(this) as DependencyObject;
-             d is not null;
-             d = VisualTreeHelper.GetParent(d))
-        {
-            if (d is Frame frame && frame.ActualHeight > 32)
-                return Math.Max(0, frame.ActualHeight - 8);
-
-            if (d is FrameworkElement fe &&
-                fe.ActualHeight > 32 &&
-                fe.GetType().Name.Contains("NavigationViewContent", StringComparison.Ordinal))
-                return Math.Max(0, fe.ActualHeight - 8);
-        }
-
-        if (_hostWindow is { ActualHeight: > 160 })
-            return Math.Max(200, _hostWindow.ActualHeight - 140);
-
-        return 0;
-    }
-
-    private void OnHostPreviewMouseWheel(object sender, MouseWheelEventArgs e)
-    {
-        if (!IsVisible || !IsLoaded || e.Delta == 0)
-            return;
-
-        if (!IsMouseOverPage())
-            return;
-
-        if (RootScroll.ScrollableHeight <= 0)
-            UpdateViewport();
-
-        if (RootScroll.ScrollableHeight <= 0)
-            return;
-
-        RootScroll.ScrollToVerticalOffset(RootScroll.VerticalOffset - e.Delta);
-        e.Handled = true;
-    }
-
-    private bool IsMouseOverPage()
-    {
-        if (IsMouseOver || RootScroll.IsMouseOver)
-            return true;
-
-        if (_hostWindow is null)
-            return false;
-
-        var pos = Mouse.GetPosition(RootScroll);
-        return pos.X >= 0 && pos.Y >= 0 &&
-               pos.X <= RootScroll.ActualWidth &&
-               pos.Y <= RootScroll.ActualHeight;
     }
 }

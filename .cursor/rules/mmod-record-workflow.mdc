@@ -1,0 +1,11 @@
+---
+description: Mmod Record 每轮阶段判断、工程边界与执行计划工作流
+alwaysApply: true
+---
+
+每轮处理本仓库需求时，读取并遵守：
+
+- `.cursor/skills/mmod-record-workflow/SKILL.md`
+- 根目录 `AGENTS.md`
+
+先判断 Direct / Relay / Discovery；执行计划默认 Standard Relay，只有用户明确要求并行时才进入 Parallel Relay。保护工作区已有修改，并遵守 Mmod Record 的 WPF、Native、录制链路和验证边界。

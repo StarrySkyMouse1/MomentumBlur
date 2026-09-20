@@ -32,11 +32,15 @@ public sealed partial class QualityParameterViewModel : ObservableObject
     public double Step => Parameter.Step;
     public string? UnitLabel => string.IsNullOrWhiteSpace(Parameter.Unit) ? null : Parameter.Unit;
 
+    /// <summary>设计稿样式的数值呈现：「0.60」而非编号框。</summary>
+    public string DisplayValue => Value.ToString("0.###");
+
     [ObservableProperty]
     private double value;
 
     partial void OnValueChanged(double value)
     {
+        OnPropertyChanged(nameof(DisplayValue));
         if (_loading)
             return;
         var clamped = Math.Clamp(value, Parameter.Min, Parameter.Max);
@@ -91,6 +95,11 @@ public sealed partial class QualityModuleViewModel : ObservableObject
     public string DisplayName => Definition.DisplayName;
     public string Description => Definition.Description;
     public string RiskDescription => Definition.RiskDescription;
+    public bool HasRiskText => !string.IsNullOrWhiteSpace(Definition.RiskDescription);
+
+    /// <summary>关闭态模块的说明文字（设计稿「未启用。…」）。</summary>
+    public string ModuleHint => IsEnabled ? string.Empty : $"未启用。{Definition.Description}";
+    public bool HasModuleHint => !IsEnabled && !string.IsNullOrWhiteSpace(Definition.Description);
     public ObservableCollection<QualityParameterViewModel> Parameters { get; } = [];
 
     [ObservableProperty]
@@ -98,6 +107,8 @@ public sealed partial class QualityModuleViewModel : ObservableObject
 
     partial void OnIsEnabledChanged(bool value)
     {
+        OnPropertyChanged(nameof(ModuleHint));
+        OnPropertyChanged(nameof(HasModuleHint));
         if (_loading)
             return;
         _config.Enabled = value;

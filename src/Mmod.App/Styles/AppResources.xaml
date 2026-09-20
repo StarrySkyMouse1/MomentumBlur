@@ -1,0 +1,352 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml">
+
+    <!--
+        应用级共享样式（对齐 WPF-UI 4.3.0）
+
+        硬性规则：
+          1. 【零自绘】本文件中不允许出现 ControlTemplate。所有交互控件必须使用
+             WPF-UI 现成组件。
+             WPF-UI 4.3.0 的控件分两类：
+               (a) 有独立 C# 类的 → 必须写 ui: 前缀，如 ui:Button / ui:Card /
+                   ui:ListView / ui:TreeViewItem / ui:TextBox / ui:NumberBox /
+                   ui:ToggleSwitch / ui:InfoBadge / ui:TabView。
+               (b) 只有无键隐式样式的 → 直接用原生标签即得 Fluent 视觉，
+                   如 CheckBox / ComboBox / Separator / TreeView / Slider /
+                   ProgressBar / StatusBar / ToolBar / Menu。
+             判断依据：reference/WPFUI/src/Wpf.Ui/Controls/<Name>/ 下是否有 .cs。
+          1b. 【BasedOn 强制】本文件中任何 TargetType 为框架控件的 Style，只要
+             WPF-UI 提供了带键 Default 样式，就必须 BasedOn 继承它；否则会整体
+             替换框架的无键隐式样式（含 ControlTemplate），控件退化为原生外观。
+             可引用的框架键：
+               ui:Button      -> DefaultUiButtonStyle
+               ui:TextBox     -> DefaultUiTextBoxStyle
+               TreeView       -> DefaultTreeViewStyle
+               TreeViewItem   -> DefaultTreeViewItemStyle
+               CheckBox       -> DefaultCheckBoxStyle
+             无带键 Default 样式的（ui:ListView / ui:ListViewItem / ui:Card /
+             ui:CardControl / ui:NumberBox 等）不要用 Style 引用，改为在使用处
+             直接设置局部属性，避免覆盖隐式样式。
+          2. 颜色一律 DynamicResource 主题资源键，禁止硬编码十六进制。
+          3. 主色使用系统强调色（AccentFillColor* / AccentTextFillColor*），不自定义品牌色。
+          4. 卡片层级只用 1px 描边 + 背景差一档，不使用投影。
+          5. 纯装饰性容器（Border / Grid / StackPanel / UniformGrid / DockPanel）属于
+             布局原语，不受规则 1 约束；但"看起来像卡片"的容器必须用 ui:CardControl / ui:Card。
+        -->
+
+    <!-- ==================================================================
+         布局度量（960×720 基准）
+         可用内容宽度 = 960 - 导航栏 176 - padding 2×16 = 752px
+         ================================================================== -->
+    <Thickness x:Key="AppPagePadding">16,12,16,12</Thickness>
+    <CornerRadius x:Key="AppCardRadius">8</CornerRadius>
+
+    <!-- ==================================================================
+         页头
+         ================================================================== -->
+    <Style x:Key="AppPageTitle" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="TitleLarge" />
+        <Setter Property="Appearance" Value="Primary" />
+    </Style>
+
+    <Style x:Key="AppPageSubtitle" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Body" />
+        <Setter Property="Appearance" Value="Secondary" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Margin" Value="0,2,0,0" />
+    </Style>
+
+    <!-- ==================================================================
+         卡片标题 / 区块标题
+         ================================================================== -->
+    <Style x:Key="AppCardTitle" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="BodyStrong" />
+        <Setter Property="Appearance" Value="Primary" />
+    </Style>
+
+    <Style x:Key="AppSectionLabel" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="BodyStrong" />
+        <Setter Property="Appearance" Value="Primary" />
+        <Setter Property="Margin" Value="0,0,0,6" />
+    </Style>
+
+    <Style x:Key="AppSectionTitle" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Subtitle" />
+        <Setter Property="Appearance" Value="Primary" />
+        <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+
+    <!-- ==================================================================
+         正文层级（全部走 FontTypography + Appearance，不硬编码 FontSize）
+         ================================================================== -->
+    <Style x:Key="AppBodyText" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Body" />
+        <Setter Property="Appearance" Value="Primary" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <Style x:Key="AppBodyTextStrong" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="BodyStrong" />
+        <Setter Property="Appearance" Value="Primary" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <Style x:Key="AppHelperText" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Caption" />
+        <Setter Property="Appearance" Value="Secondary" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Margin" Value="0,2,0,0" />
+    </Style>
+
+    <Style x:Key="AppCaptionMuted" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Caption" />
+        <Setter Property="Appearance" Value="Tertiary" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Margin" Value="0,2,0,0" />
+    </Style>
+
+    <Style x:Key="AppLogLine" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Caption" />
+        <Setter Property="Appearance" Value="Secondary" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Margin" Value="0,1,0,0" />
+    </Style>
+
+    <Style x:Key="AppRiskText" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Caption" />
+        <Setter Property="Appearance" Value="Primary" />
+        <Setter Property="Foreground" Value="{DynamicResource SystemFillColorCautionBrush}" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Margin" Value="0,4,0,0" />
+    </Style>
+
+    <!-- ==================================================================
+         等宽（数值 / 路径 / 时间戳 / 键名）
+         字体族是显式允许项：JetBrains Mono 为本项目设计稿指定字体
+         ================================================================== -->
+    <Style x:Key="AppMonoText" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontFamily" Value="JetBrains Mono, Consolas, monospace" />
+        <Setter Property="FontTypography" Value="Body" />
+        <Setter Property="Appearance" Value="Primary" />
+    </Style>
+
+    <Style x:Key="AppMonoMuted" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontFamily" Value="JetBrains Mono, Consolas, monospace" />
+        <Setter Property="FontTypography" Value="Caption" />
+        <Setter Property="Appearance" Value="Tertiary" />
+    </Style>
+
+    <Style x:Key="AppKeyText" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontFamily" Value="JetBrains Mono, Consolas, monospace" />
+        <Setter Property="FontTypography" Value="Caption" />
+        <Setter Property="Appearance" Value="Secondary" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style x:Key="AppValueText" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Body" />
+        <Setter Property="Appearance" Value="Primary" />
+        <Setter Property="HorizontalAlignment" Value="Right" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <!-- ==================================================================
+         指标块文字
+         ================================================================== -->
+    <Style x:Key="AppMetricNumber" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontFamily" Value="JetBrains Mono, Consolas, monospace" />
+        <Setter Property="FontTypography" Value="Subtitle" />
+        <Setter Property="Appearance" Value="Primary" />
+        <Setter Property="Margin" Value="0,2,0,0" />
+    </Style>
+
+    <Style x:Key="AppMetricLabel" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Caption" />
+        <Setter Property="Appearance" Value="Secondary" />
+    </Style>
+
+    <Style x:Key="AppMetricSub" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Caption" />
+        <Setter Property="Appearance" Value="Tertiary" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Margin" Value="0,2,0,0" />
+    </Style>
+
+    <!-- ==================================================================
+         表单字段
+         ================================================================== -->
+    <Style x:Key="AppFieldLabel" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Caption" />
+        <Setter Property="Appearance" Value="Secondary" />
+        <Setter Property="Margin" Value="0,0,0,4" />
+    </Style>
+
+    <Style x:Key="AppFieldHint" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Caption" />
+        <Setter Property="Appearance" Value="Tertiary" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="Margin" Value="0,4,0,0" />
+    </Style>
+
+    <!-- ==================================================================
+         区块分隔线
+         WPF-UI 的 Separator 隐式样式是 BorderThickness="1,1,0,0"，
+         在垂直 StackPanel 中只渲染出 1px 顶边、视觉上几乎不可见。
+         这里统一显式给高度与描边色，保证在任何容器里都可见。
+         ================================================================== -->
+    <Style x:Key="AppDivider" TargetType="{x:Type Border}">
+        <Setter Property="Height" Value="1" />
+        <Setter Property="Margin" Value="0,14,0,12" />
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="Background" Value="{DynamicResource DividerStrokeColorDefaultBrush}" />
+    </Style>
+
+    <Style x:Key="AppDividerTight" TargetType="{x:Type Border}"
+           BasedOn="{StaticResource AppDivider}">
+        <Setter Property="Margin" Value="0,10,0,10" />
+    </Style>
+
+    <!-- ==================================================================
+         空态占位（画板 04 · ③）
+         设计稿要求「暂无回放记录 / 启动合成后，完成的片段会出现在这里」这类占位。
+         图标 + 主文案 + 说明，居中。用原语布局，无自绘模板。
+         ================================================================== -->
+    <Style x:Key="AppEmptyStateIcon" TargetType="{x:Type ui:SymbolIcon}">
+        <Setter Property="Symbol" Value="DocumentDismiss24" />
+        <Setter Property="FontSize" Value="28" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="Foreground" Value="{DynamicResource TextFillColorTertiaryBrush}" />
+    </Style>
+
+    <Style x:Key="AppEmptyStateTitle" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="BodyStrong" />
+        <Setter Property="Appearance" Value="Secondary" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="Margin" Value="0,10,0,0" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <Style x:Key="AppEmptyStateHint" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Caption" />
+        <Setter Property="Appearance" Value="Tertiary" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="Margin" Value="0,4,0,0" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <!-- ==================================================================
+         单位后缀（数值右边的「帧」「fps」「GB」等）
+         与数值同基线，Appearance 降一级，避免和主数值争夺注意力。
+         ================================================================== -->
+    <Style x:Key="AppMetricUnit" TargetType="{x:Type ui:TextBlock}">
+        <Setter Property="FontTypography" Value="Caption" />
+        <Setter Property="Appearance" Value="Secondary" />
+        <Setter Property="VerticalAlignment" Value="Bottom" />
+        <Setter Property="Margin" Value="4,0,0,2" />
+    </Style>
+
+    <!-- ==================================================================
+         右对齐数值控件的字段行：标签左侧居中，控件右侧
+         ================================================================== -->
+    <Style x:Key="AppFieldRow" TargetType="{x:Type Grid}">
+        <Setter Property="Margin" Value="0,14,0,0" />
+    </Style>
+
+    <!-- ==================================================================
+         表格列表头：ui:DataGrid 的隐式样式已给 Fluent 视觉，
+         这里只降一级字色，表达「列头不是正文」。
+         列头样式有带键默认值 DefaultUiDataGridColumnHeaderStyle，必须 BasedOn。
+         ================================================================== -->
+    <Style x:Key="AppGridColumnHeader" TargetType="{x:Type DataGridColumnHeader}"
+           BasedOn="{StaticResource DefaultUiDataGridColumnHeaderStyle}">
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
+    </Style>
+
+    <!-- ==================================================================
+         只读指令块（CFG / 路径 / 步骤）
+         用 ui:TextBox（框架版）而非原生 TextBox
+         ================================================================== -->
+    <Style x:Key="AppCodeBlock" TargetType="{x:Type ui:TextBox}"
+           BasedOn="{StaticResource DefaultUiTextBoxStyle}">
+        <Setter Property="IsReadOnly" Value="True" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="AcceptsReturn" Value="True" />
+        <Setter Property="FontFamily" Value="JetBrains Mono, Consolas, monospace" />
+        <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
+        <Setter Property="HorizontalScrollBarVisibility" Value="Disabled" />
+    </Style>
+
+    <!-- ==================================================================
+         工具条按钮（只设间距，视觉全部交给 ui:Button 的 Appearance）
+         BasedOn 继承 DefaultUiButtonStyle，保留 Fluent 模板与交互视觉
+         ================================================================== -->
+    <Style x:Key="AppToolbarButton" TargetType="{x:Type ui:Button}"
+           BasedOn="{StaticResource DefaultUiButtonStyle}">
+        <Setter Property="Margin" Value="0,0,6,0" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style x:Key="AppToolbarButtonLast" TargetType="{x:Type ui:Button}"
+           BasedOn="{StaticResource DefaultUiButtonStyle}">
+        <Setter Property="Margin" Value="0" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <!-- ==================================================================
+         分段器（Segmented Control）
+         WPF-UI 4.3.0 无此组件 → 用 ui:Button 的 Appearance 表达选中态。
+         选中态用 ControlAppearance 布尔选择器（见 Converters 中的
+         BooleanToControlAppearanceConverter），不写 ControlTemplate。
+         BasedOn 必须保留，否则按钮会退化成原生 WPF 方框。
+         ================================================================== -->
+    <Style x:Key="AppSegmentButton" TargetType="{x:Type ui:Button}"
+           BasedOn="{StaticResource DefaultUiButtonStyle}">
+        <Setter Property="Margin" Value="0" />
+        <Setter Property="MinWidth" Value="96" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+    </Style>
+
+    <!-- ==================================================================
+         标题栏顶层模式开关（OBS / TGA）
+         位于 ui:TitleBar.Header 这一可交互内容槽内，不覆盖 TitleBar 的
+         ControlTemplate。度量收窄以适配标题栏高度；选中态由
+         BooleanToControlAppearanceConverter(ConverterParameter='titlebar')
+         与 BooleanToThemeBrushConverter 表达，颜色全部来自主题/强调色资源。
+         ================================================================== -->
+    <Style x:Key="AppTitleModeSegmentButton" TargetType="{x:Type ui:Button}"
+           BasedOn="{StaticResource DefaultUiButtonStyle}">
+        <Setter Property="Margin" Value="4,0,0,0" />
+        <Setter Property="MinWidth" Value="56" />
+        <Setter Property="Padding" Value="10,2,10,2" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+    </Style>
+
+    <!-- ==================================================================
+         列表 / 树 容器：只设内边距，模板由框架隐式样式提供
+         注意：TreeView / CheckBox / Separator / ComboBox 在 WPF-UI 4.3.0 中
+         只有隐式样式、没有 ui: 前缀类，因此这里必须用原生标签类型。
+         BasedOn 继承框架 Default 样式，避免覆盖 Fluent 模板。
+         ================================================================== -->
+    <Style x:Key="AppTreeView" TargetType="{x:Type TreeView}"
+           BasedOn="{StaticResource DefaultTreeViewStyle}">
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Margin" Value="0" />
+    </Style>
+
+    <!-- ==================================================================
+         回放树记录行（选中态由 TreeViewItem 的选中视觉表达，
+         此处仅压制记录行内部 CheckBox 区域的间距）
+         CheckBox 在 WPF-UI 中仅有隐式样式，故用原生类型。
+         ================================================================== -->
+    <Style x:Key="AppReplayRowCheckBox" TargetType="{x:Type CheckBox}"
+           BasedOn="{StaticResource DefaultCheckBoxStyle}">
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Margin" Value="0,0,6,0" />
+    </Style>
+
+</ResourceDictionary>

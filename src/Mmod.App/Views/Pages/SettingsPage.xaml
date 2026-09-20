@@ -3,362 +3,574 @@
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
       xmlns:vm="clr-namespace:Mmod.App.ViewModels"
+      xmlns:conv="clr-namespace:Mmod.App.Converters"
       Title="设置"
-      VerticalAlignment="Stretch">
+      VerticalAlignment="Stretch"
+      ScrollViewer.CanContentScroll="False">
     <Page.Resources>
-        <BooleanToVisibilityConverter x:Key="BoolToVis" />
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+        <conv:BooleanToControlAppearanceConverter x:Key="SegmentAppearance"/>
+
+        <!-- 画质参数行：标签居左、数值居右；ui:Card 的模板会把内容撑满，行宽即容器宽 -->
         <DataTemplate x:Key="QualityParameterTemplate" DataType="{x:Type vm:QualityParameterViewModel}">
-            <StackPanel Margin="0,4,0,0">
-                <DockPanel LastChildFill="True">
-                    <TextBlock DockPanel.Dock="Left"
-                               Text="{Binding DisplayName}"
-                               VerticalAlignment="Center"
-                               MinWidth="120" />
-                    <ui:NumberBox Value="{Binding Value, Mode=TwoWay}"
-                                  Minimum="{Binding Minimum}"
-                                  Maximum="{Binding Maximum}"
-                                  SmallChange="{Binding Step}"
-                                  SpinButtonPlacementMode="Inline"
-                                  Width="140"
-                                  HorizontalAlignment="Right" />
-                    <TextBlock DockPanel.Dock="Right"
-                               Text="{Binding UnitLabel}"
-                               VerticalAlignment="Center"
-                               Margin="6,0,0,0"
-                               Opacity="0.6" />
-                </DockPanel>
-                <TextBlock Text="{Binding Description}"
-                           TextWrapping="Wrap"
-                           Opacity="0.55"
-                           FontSize="11"
-                           Margin="0,2,0,0" />
-            </StackPanel>
-        </DataTemplate>
-        <DataTemplate x:Key="QualityModuleTemplate" DataType="{x:Type vm:QualityModuleViewModel}">
-            <Border Margin="0,0,0,10"
-                    Padding="12"
-                    BorderBrush="{DynamicResource ControlElevationBorderBrush}"
-                    BorderThickness="1"
-                    CornerRadius="8">
-                <StackPanel>
-                    <DockPanel LastChildFill="True">
-                        <CheckBox DockPanel.Dock="Left"
-                                  IsChecked="{Binding IsEnabled, Mode=TwoWay}"
+            <ui:Card Margin="0,0,0,6" Padding="10,8,10,8">
+                <Grid>
+                    <ui:TextBlock HorizontalAlignment="Left"
                                   VerticalAlignment="Center"
-                                  Margin="0,0,8,0" />
-                        <ui:Button DockPanel.Dock="Right"
-                                   Content="恢复默认值"
-                                   Command="{Binding RestoreDefaultsCommand}"
-                                   VerticalAlignment="Center"
-                                   Margin="8,0,0,0"
-                                   Padding="10,4" />
-                        <StackPanel>
-                            <TextBlock Text="{Binding DisplayName}"
-                                       FontWeight="SemiBold"
-                                       TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding Description}"
-                                       TextWrapping="Wrap"
-                                       Opacity="0.75"
-                                       FontSize="12"
-                                       Margin="0,2,0,0" />
-                        </StackPanel>
-                    </DockPanel>
-                    <StackPanel Visibility="{Binding IsEnabled, Converter={StaticResource BoolToVis}}"
-                                Margin="28,8,0,0">
-                        <ItemsControl ItemsSource="{Binding Parameters}"
-                                      ItemTemplate="{StaticResource QualityParameterTemplate}" />
-                        <TextBlock Text="{Binding RiskDescription}"
-                                   TextWrapping="Wrap"
-                                   Opacity="0.6"
-                                   FontSize="11"
-                                   Foreground="#C8A45C"
-                                   Margin="0,6,0,0" />
+                                  Style="{StaticResource AppFieldLabel}"
+                                  Margin="0"
+                                  Text="{Binding DisplayName}"/>
+                    <ui:TextBlock HorizontalAlignment="Right"
+                                  VerticalAlignment="Center"
+                                  Style="{StaticResource AppMonoText}"
+                                  Text="{Binding DisplayValue}"/>
+                </Grid>
+            </ui:Card>
+        </DataTemplate>
+
+        <!--
+            画质模块卡：左右结构
+              左列：启用开关 + 模块名 + 风险/说明 + 恢复默认值
+              右列：参数行，撑满剩余宽度
+            容器用 ui:Card 而不是 ui:CardControl：
+              CardControl 的模板是 [Icon][Header(*）][Content(Auto)] 三列，Content 落在末尾
+              Auto 列，会按「内容的自然宽度」右对齐并溢出卡片（在无限宽度下测量，
+              TextWrapping 文本也不会换行）；ui:Card 的 ContentPresenter 是 Stretch，
+              内容才真正 100% 宽。CardControl 的语义是「左标题 + 右侧单个控件」的行，
+              不适合承载整块内容。
+        -->
+        <DataTemplate x:Key="QualityModuleTemplate" DataType="{x:Type vm:QualityModuleViewModel}">
+            <ui:Card Margin="0,0,0,10" Padding="14">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="300"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0" Margin="0,0,18,0" VerticalAlignment="Top">
+                        <ui:ToggleSwitch HorizontalAlignment="Left"
+                                         IsChecked="{Binding IsEnabled, Mode=TwoWay}"
+                                         OnContent="{Binding DisplayName}"
+                                         OffContent="{Binding DisplayName}"/>
+
+                        <ui:TextBlock Margin="0,8,0,0"
+                                      Style="{StaticResource AppRiskText}"
+                                      Text="{Binding RiskDescription}"
+                                      Visibility="{Binding HasRiskText, Converter={StaticResource BoolToVis}}"/>
+
+                        <ui:TextBlock Margin="0,6,0,0"
+                                      Style="{StaticResource AppCaptionMuted}"
+                                      Text="{Binding ModuleHint}"
+                                      Visibility="{Binding HasModuleHint, Converter={StaticResource BoolToVis}}"/>
+
+                        <ui:HyperlinkButton Margin="0,8,0,0"
+                                            HorizontalAlignment="Left"
+                                            Content="恢复默认值"
+                                            Command="{Binding RestoreDefaultsCommand}"/>
                     </StackPanel>
-                </StackPanel>
-            </Border>
+
+                    <ItemsControl Grid.Column="1"
+                                  VerticalAlignment="Top"
+                                  HorizontalAlignment="Stretch"
+                                  ItemsSource="{Binding Parameters}"
+                                  ItemTemplate="{StaticResource QualityParameterTemplate}"/>
+                </Grid>
+            </ui:Card>
         </DataTemplate>
     </Page.Resources>
 
-    <Grid Margin="0,0,0,8">
-        <ScrollViewer x:Name="RootScroll"
-                      Background="Transparent"
-                      Focusable="True"
-                      VerticalScrollBarVisibility="Visible"
-                      HorizontalScrollBarVisibility="Disabled"
-                      CanContentScroll="False"
-                      PanningMode="VerticalOnly"
-                      Padding="8,16,16,32">
-            <StackPanel MaxWidth="720">
-                <TextBlock FontSize="22" FontWeight="SemiBold" Text="设置" />
+    <Grid Margin="{StaticResource AppPagePadding}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
 
-                <Grid Margin="0,20,0,0">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="16" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
+        <!-- 页头 -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,6">
+            <ui:TextBlock Style="{StaticResource AppPageTitle}" Text="设置"/>
+            <ui:TextBlock Style="{StaticResource AppPageSubtitle}"
+                          Text="改动即时生效并写入 settings.json，不需要保存按钮；新建任务时冻结为快照"/>
+        </StackPanel>
 
-                    <StackPanel Grid.Row="0" Grid.Column="0">
-                        <TextBlock Margin="0,0,0,6" Text="捕获模式" />
-                        <ComboBox ItemsSource="{Binding CaptureModeOptions}"
-                                  SelectedItem="{Binding CaptureMode, Mode=TwoWay}" />
+        <!--
+            横向页签导航
+            用 ui:TabView（框架组件）；页签头面板由框架模板提供（TabPanel Margin=0），
+            960px 下页签自然换行排布，不裁切、不挤压。
+            公共页签两模式常显；「游戏 TGA」/「OBS 模式」是模式专属页签，
+            由 IsTgaMode / IsObsMode 控制显隐（ui:TabView 与 ui:TabViewItem 是
+            TabControl / TabItem 的空派生，Collapsed 会同时隐藏页签头与内容，
+            且不造成索引位移）。SelectedIndex 绑定到 VM，切换模式时若停留在
+            另一模式的专属页签，会被强制回到公共页签。
+        -->
+        <ui:TabView Grid.Row="1"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    Padding="0"
+                    SelectedIndex="{Binding SelectedSettingsSectionIndex, Mode=TwoWay}">
+
+            <!-- 页签一：捕获与合成 -->
+            <ui:TabViewItem>
+                <ui:TabViewItem.Header>
+                    <StackPanel Orientation="Horizontal">
+                        <ui:SymbolIcon Symbol="Video24" Margin="0,0,6,0"/>
+                        <TextBlock Text="捕获与合成" VerticalAlignment="Center"/>
                     </StackPanel>
+                </ui:TabViewItem.Header>
 
-                    <StackPanel Grid.Row="0" Grid.Column="2">
-                        <TextBlock Margin="0,0,0,6" Text="超采样 N" />
-                        <ui:NumberBox Value="{Binding SupersamplingMultiplier, Mode=TwoWay}"
-                                      Minimum="1"
-                                      Maximum="64"
-                                      SpinButtonPlacementMode="Inline" />
-                    </StackPanel>
-
-                    <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,16,0,0">
-                        <TextBlock Margin="0,0,0,6" Text="Motion Blur 模式" />
-                        <ComboBox ItemsSource="{Binding MotionBlurModeOptions}"
-                                  SelectedItem="{Binding MotionBlurWeightMode, Mode=TwoWay}" />
-                    </StackPanel>
-
-                    <StackPanel Grid.Row="1" Grid.Column="2" Margin="0,16,0,0"
-                                Visibility="{Binding IsLegacyMode, Converter={StaticResource BoolToVis}}">
-                        <TextBlock Margin="0,0,0,6" Text="Exposure（Legacy Gaussian 宽度）" />
-                        <ui:NumberBox Value="{Binding Exposure, Mode=TwoWay}"
-                                      Minimum="0.05"
-                                      Maximum="1"
-                                      SmallChange="0.05"
-                                      SpinButtonPlacementMode="Inline" />
-                    </StackPanel>
-
-                    <StackPanel Grid.Row="2" Grid.Column="0" Margin="0,16,0,0"
-                                Visibility="{Binding IsShutterMode, Converter={StaticResource BoolToVis}}">
-                        <TextBlock Margin="0,0,0,6" Text="Shutter Angle（180°~360°）" />
-                        <ui:NumberBox Value="{Binding ShutterAngle, Mode=TwoWay}"
-                                      Minimum="180"
-                                      Maximum="360"
-                                      SmallChange="10"
-                                      SpinButtonPlacementMode="Inline" />
-                    </StackPanel>
-
-                    <StackPanel Grid.Row="2" Grid.Column="2" Margin="0,16,0,0">
-                        <TextBlock Margin="0,0,0,6" Text="中间母版码率（Mbps，0 = 自动）" />
-                        <ui:NumberBox Value="{Binding IntermediateTargetBitrate, Mode=TwoWay}"
-                                      Minimum="0"
-                                      Maximum="120000000"
-                                      SmallChange="1000000"
-                                      SpinButtonPlacementMode="Compact" />
-                    </StackPanel>
-                </Grid>
-
-                <TextBlock Margin="0,8,0,0"
-                           Text="兼顾 4K60 上传与 1080p30 低码率档观看：建议先 AB 测试 300°~360° 的 Shutter Angle，不硬编码唯一最佳值。"
-                           TextWrapping="Wrap"
-                           Opacity="0.6"
-                           FontSize="11" />
-
-                <!-- 画质处理 -->
-                <TextBlock Margin="0,28,0,6" FontSize="18" FontWeight="SemiBold" Text="画质处理" />
-                <TextBlock Margin="0,0,0,8"
-                           Text="这些处理发生在 1080p60 中间母版阶段，目标是提升平台低码率转码后的高速运动观感，而不是让暂停截图尽可能锐利。全部可独立勾选关闭，关闭时保持旧版输出行为。"
-                           TextWrapping="Wrap"
-                           Opacity="0.75" />
-
-                <StackPanel Orientation="Horizontal" Margin="0,4,0,10">
-                    <TextBlock Text="预设：" VerticalAlignment="Center" Margin="0,0,8,0" />
-                    <ComboBox Width="240"
-                              ItemsSource="{Binding PresetOptions}"
-                              DisplayMemberPath="DisplayName"
-                              SelectedValuePath="Id"
-                              SelectedValue="{Binding SelectedPresetId, Mode=TwoWay}" />
-                    <ui:Button Content="全部恢复默认"
-                               Command="{Binding RestoreAllQualityDefaultsCommand}"
-                               Margin="8,0,0,0"
-                               Padding="10,4" />
-                </StackPanel>
-
-                <TextBlock Text="{Binding ProcessingSummary}"
-                           FontWeight="SemiBold"
-                           Margin="0,0,0,8"
-                           TextWrapping="Wrap" />
-
-                <ItemsControl ItemsSource="{Binding QualityModules}"
-                              ItemTemplate="{StaticResource QualityModuleTemplate}" />
-
-                <!-- 后期 / 4K 工作流 -->
-                <TextBlock Margin="0,24,0,6" FontSize="18" FontWeight="SemiBold" Text="后期 / 4K 工作流" />
-                <CheckBox Content="DaVinci 4K AI 后处理指引"
-                          IsChecked="{Binding EnableDaVinci4KWorkflowGuide, Mode=TwoWay}"
-                          Margin="0,0,0,6" />
-                <TextBlock Text="本工具不会执行 AI 放大。这里仅生成 DaVinci Resolve Studio 中的操作步骤（Super Scale 2x Enhanced 属 Studio 功能）。"
-                           TextWrapping="Wrap"
-                           Opacity="0.7"
-                           Margin="0,0,0,8" />
-
-                <StackPanel Visibility="{Binding IsDaVinciGuideEnabled, Converter={StaticResource BoolToVis}}">
-                    <WrapPanel Margin="0,0,0,8">
-                        <ui:Button Content="复制 DaVinci 操作步骤"
-                                   Command="{Binding CopyDaVinciStepsCommand}"
-                                   Margin="0,0,8,8" />
-                        <ui:Button Content="复制 Bilibili 导出建议"
-                                   Command="{Binding CopyBilibiliExportCommand}"
-                                   Margin="0,0,8,8" />
-                    </WrapPanel>
-                    <TextBox IsReadOnly="True"
-                             Text="{Binding DavinciGuideText}"
-                             TextWrapping="Wrap"
-                             AcceptsReturn="True"
-                             MinHeight="220"
-                             FontFamily="Consolas"
-                             FontSize="12" />
-                </StackPanel>
-
-                <StackPanel Visibility="{Binding IsObsMode, Converter={StaticResource BoolToVis}}">
-                    <TextBlock Margin="0,24,0,6" FontWeight="SemiBold" Text="OBS 模式" />
-
-                    <TextBlock Margin="0,8,0,6" Text="OBS 源帧率" />
-                    <ComboBox ItemsSource="{Binding ObsCaptureFramerateOptions}"
-                              SelectedItem="{Binding ObsCaptureFramerate, Mode=TwoWay}" />
-
-                    <TextBlock Margin="0,16,0,6" Text="OBS 并行路数" />
-                    <ui:NumberBox Value="{Binding MaxParallelJobs, Mode=TwoWay}"
-                                  Minimum="1"
-                                  SpinButtonPlacementMode="Inline" />
-
-                    <TextBlock Margin="0,16,0,6" FontWeight="SemiBold" Text="游戏慢放指令" />
-                    <CheckBox Margin="0,0,0,8"
-                              Content="隐藏 HUD（cl_drawhud）"
-                              IsChecked="{Binding HideHudInCfg, Mode=TwoWay}" />
-                    <TextBox IsReadOnly="True"
-                             Text="{Binding SlowMotionBlock}"
-                             TextWrapping="Wrap"
-                             AcceptsReturn="True"
-                             MinHeight="90" />
-                    <TextBox Margin="0,8,0,0"
-                             IsReadOnly="True"
-                             Text="{Binding RestoreBlock}"
-                             TextWrapping="Wrap"
-                             AcceptsReturn="True"
-                             MinHeight="70" />
-
-                    <WrapPanel Margin="0,16,0,0">
-                        <ui:Button Content="复制慢放指令"
-                                   Command="{Binding CopySlowMotionCommand}"
-                                   Margin="0,0,8,8" />
-                        <ui:Button Content="复制恢复指令"
-                                   Command="{Binding CopyRestoreCommand}"
-                                   Margin="0,0,8,8" />
-                    </WrapPanel>
-                </StackPanel>
-
-                <StackPanel Visibility="{Binding IsTgaMode, Converter={StaticResource BoolToVis}}">
-                    <TextBlock Margin="0,24,0,6" FontWeight="SemiBold" Text="游戏 TGA 模式" />
-
-                    <TextBlock Margin="0,8,0,6" Text="TGA 监视目录" />
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <TextBox Grid.Column="0"
-                                 Margin="0,0,8,0"
-                                 IsReadOnly="True"
-                                 Text="{Binding RamDiskWatchDirectory, Mode=TwoWay}" />
-                        <ui:Button Grid.Column="1"
-                                   Content="浏览…"
-                                   Command="{Binding BrowseWatchDirectoryCommand}" />
-                    </Grid>
-
-                    <TextBlock Margin="0,16,0,6" Text="监视盘剩余空间安全下限（%）" />
-                    <ui:NumberBox Value="{Binding DiskSafetyFreePercent, Mode=TwoWay}"
-                                  Minimum="0"
-                                  Maximum="50"
-                                  SmallChange="1"
-                                  SpinButtonPlacementMode="Inline" />
-                    <TextBlock Margin="0,4,0,0"
-                               Text="{Binding DiskSafetySummary}"
-                               TextWrapping="Wrap"
-                               Opacity="0.65"
-                               FontSize="11" />
-
-                    <TextBlock Margin="0,16,0,6" Text="游戏根目录" />
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <TextBox Grid.Column="0"
-                                 Margin="0,0,8,0"
-                                 IsReadOnly="True"
-                                 Text="{Binding GameRootPath, Mode=TwoWay}" />
-                        <ui:Button Grid.Column="1"
-                                   Content="浏览…"
-                                   Command="{Binding BrowseGameRootCommand}" />
-                    </Grid>
-
-                    <TextBlock Margin="0,16,0,6" Text="startmovie 序列名" />
-                    <TextBox Text="{Binding MovieSequenceName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-
-                    <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
-                        <StackPanel Margin="0,0,16,0">
-                            <TextBlock Text="开始快捷键" />
-                            <TextBox Width="80"
-                                     Text="{Binding StartMovieHotkey, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                        </StackPanel>
+                <ScrollViewer Padding="0,12,8,16"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              CanContentScroll="False"
+                              PanningMode="VerticalOnly"
+                              Focusable="True">
+                    <ui:Card Padding="14">
                         <StackPanel>
-                            <TextBlock Text="结束快捷键" />
-                            <TextBox Width="80"
-                                     Text="{Binding EndMovieHotkey, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <ui:TextBlock Style="{StaticResource AppCardTitle}"
+                                          Margin="0,0,0,12"
+                                          Text="运动模糊与超采样"/>
+
+                            <ui:TextBlock Style="{StaticResource AppHelperText}"
+                                          Text="顶层工作模式在标题栏切换；本页只显示当前模式的专属设置。以下超采样、运动模糊与画质参数为两种模式共用的同一份配置。"/>
+
+                            <Grid Style="{StaticResource AppFieldRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="120"/>
+                                </Grid.ColumnDefinitions>
+                                <ui:TextBlock Grid.Column="0"
+                                              VerticalAlignment="Center"
+                                              Style="{StaticResource AppFieldLabel}"
+                                              Margin="0"
+                                              Text="超采样 N（1–64）"/>
+                                <ui:NumberBox Grid.Column="1"
+                                              Value="{Binding SupersamplingMultiplier, Mode=TwoWay}"
+                                              ValueChanged="OnNumberBoxValueChanged"
+                                              Minimum="1"
+                                              Maximum="64"
+                                              SmallChange="1"
+                                              SpinButtonPlacementMode="Inline"/>
+                            </Grid>
+
+                            <Border Style="{StaticResource AppDivider}"/>
+
+                            <ui:TextBlock Style="{StaticResource AppFieldLabel}"
+                                          Margin="0,0,0,8"
+                                          Text="Motion Blur 模式"/>
+                            <WrapPanel>
+                                <ui:Button Content="Shutter Angle（推荐）"
+                                           Appearance="{Binding IsShutterMode, Converter={StaticResource SegmentAppearance}}"
+                                           Style="{StaticResource AppSegmentButton}"
+                                           Command="{Binding SetShutterModeCommand}"
+                                           Margin="0,0,6,6"/>
+                                <ui:Button Content="Legacy Gaussian"
+                                           Appearance="{Binding IsLegacyMode, Converter={StaticResource SegmentAppearance}}"
+                                           Style="{StaticResource AppSegmentButton}"
+                                           Command="{Binding SetLegacyModeCommand}"
+                                           Margin="0,0,6,6"/>
+                            </WrapPanel>
+
+                            <!-- Shutter Angle 滑块 -->
+                            <StackPanel Margin="0,14,0,0"
+                                        Visibility="{Binding IsShutterMode, Converter={StaticResource BoolToVis}}">
+                                <ui:TextBlock Style="{StaticResource AppFieldLabel}" Text="Shutter Angle"/>
+                                <Slider Minimum="180" Maximum="360"
+                                        SmallChange="5" LargeChange="30"
+                                        TickFrequency="30"
+                                        Value="{Binding ShutterAngle, Mode=TwoWay}"
+                                        Margin="0,2,0,0"/>
+                                <Grid Margin="0,2,0,0">
+                                    <ui:TextBlock HorizontalAlignment="Left"
+                                                  Style="{StaticResource AppMonoMuted}"
+                                                  Text="180°"/>
+                                    <ui:TextBlock HorizontalAlignment="Center"
+                                                  FontFamily="JetBrains Mono, Consolas, monospace"
+                                                  FontTypography="Caption"
+                                                  Text="{Binding ShutterCurrentText}"
+                                                  Foreground="{DynamicResource AccentTextFillColorPrimaryBrush}"/>
+                                    <ui:TextBlock HorizontalAlignment="Right"
+                                                  Style="{StaticResource AppMonoMuted}"
+                                                  Text="360°"/>
+                                </Grid>
+                            </StackPanel>
+
+                            <!-- Legacy Exposure -->
+                            <Grid Style="{StaticResource AppFieldRow}"
+                                  Visibility="{Binding IsLegacyMode, Converter={StaticResource BoolToVis}}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="120"/>
+                                </Grid.ColumnDefinitions>
+                                <ui:TextBlock Grid.Column="0"
+                                              VerticalAlignment="Center"
+                                              Style="{StaticResource AppFieldLabel}"
+                                              Margin="0"
+                                              Text="Exposure（Legacy Gaussian 宽度）"/>
+                                <ui:NumberBox Grid.Column="1"
+                                              Value="{Binding Exposure, Mode=TwoWay}"
+                                              ValueChanged="OnNumberBoxValueChanged"
+                                              Minimum="0.05"
+                                              Maximum="1"
+                                              SmallChange="0.05"
+                                              SpinButtonPlacementMode="Inline"/>
+                            </Grid>
+
+                            <ui:TextBlock Margin="0,12,0,0"
+                                          Style="{StaticResource AppHelperText}"
+                                          Text="Exposure 是 Legacy Gaussian 的权重分布宽度；Shutter Angle 为推荐模式，有效样本 ≈ N × angle / 360。兼顾 4K60 上传与 1080p30 观看，建议先 AB 测试 300°–360°。"/>
                         </StackPanel>
+                    </ui:Card>
+                </ScrollViewer>
+            </ui:TabViewItem>
+
+            <!-- 页签二：画质处理 -->
+            <ui:TabViewItem>
+                <ui:TabViewItem.Header>
+                    <StackPanel Orientation="Horizontal">
+                        <ui:SymbolIcon Symbol="Wand24" Margin="0,0,6,0"/>
+                        <TextBlock Text="画质处理" VerticalAlignment="Center"/>
                     </StackPanel>
+                </ui:TabViewItem.Header>
 
-                    <CheckBox Margin="0,12,0,0"
-                              Content="CFG 中隐藏 HUD（cl_drawhud 0）"
-                              IsChecked="{Binding HideHudInCfg, Mode=TwoWay}" />
+                <ScrollViewer Padding="0,12,8,16"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              CanContentScroll="False"
+                              PanningMode="VerticalOnly"
+                              Focusable="True">
+                    <StackPanel>
+                        <!-- 概览卡：左右结构 —— 左侧标题与说明，右侧唯一控件（预设下拉） -->
+                        <ui:Card Margin="0,0,0,12" Padding="14">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
 
-                    <TextBlock Margin="0,16,0,6" Text="执行 CFG 指令（进图后在控制台执行）" />
-                    <TextBox IsReadOnly="True"
-                             Text="{Binding CfgCommandBlock}"
-                             TextWrapping="Wrap"
-                             AcceptsReturn="True"
-                             MinHeight="48" />
+                                <StackPanel Grid.Column="0" Margin="0,0,18,0">
+                                    <ui:TextBlock Style="{StaticResource AppCardTitle}" Text="画质处理"/>
+                                    <ui:TextBlock Margin="0,6,0,0"
+                                                  Style="{StaticResource AppHelperText}"
+                                                  Text="处理发生在 1080p60 中间母版阶段，目标是提升平台低码率转码后的高速运动观感，不是暂停截图的锐度。全部可独立关闭，关闭时保持旧版输出。"/>
+                                    <ui:TextBlock Margin="0,10,0,0"
+                                                  Style="{StaticResource AppBodyTextStrong}"
+                                                  Text="{Binding ProcessingSummary}"/>
+                                </StackPanel>
 
-                    <TextBlock Margin="0,12,0,6" Text="还原指令（停止录制、恢复设置并关闭作弊）" />
-                    <TextBox IsReadOnly="True"
-                             Text="{Binding CfgRestoreCommandBlock}"
-                             TextWrapping="Wrap"
-                             AcceptsReturn="True"
-                             MinHeight="64" />
+                                <StackPanel Grid.Column="1" VerticalAlignment="Top">
+                                    <ui:TextBlock Style="{StaticResource AppFieldLabel}"
+                                                  Margin="0,0,0,4"
+                                                  Text="预设"/>
+                                    <ComboBox Width="220"
+                                              ItemsSource="{Binding PresetOptions}"
+                                              DisplayMemberPath="DisplayName"
+                                              SelectedValuePath="Id"
+                                              SelectedValue="{Binding SelectedPresetId, Mode=TwoWay}"/>
+                                </StackPanel>
+                            </Grid>
+                        </ui:Card>
 
-                    <WrapPanel Margin="0,16,0,0">
-                        <ui:Button Content="创建并生成 CFG"
-                                   Command="{Binding CreateJunctionCommand}"
-                                   Margin="0,0,8,8" />
-                        <ui:Button Content="复制 CFG 指令"
-                                   Command="{Binding CopyCfgCommandCommand}"
-                                   Margin="0,0,8,8" />
-                        <ui:Button Content="复制还原指令"
-                                   Command="{Binding CopyCfgRestoreCommandCommand}"
-                                   Margin="0,0,8,8" />
-                        <ui:Button Content="取消 Junction"
-                                   Command="{Binding RemoveJunctionCommand}"
-                                   Margin="0,0,8,8" />
-                        <ui:Button Content="打开 ImDisk"
-                                   Command="{Binding OpenImDiskCommand}"
-                                   Margin="0,0,8,8" />
-                    </WrapPanel>
+                        <ItemsControl ItemsSource="{Binding QualityModules}"
+                                      ItemTemplate="{StaticResource QualityModuleTemplate}"/>
+                    </StackPanel>
+                </ScrollViewer>
+            </ui:TabViewItem>
 
-                    <TextBlock Margin="0,8,0,0"
-                               Text="{Binding JunctionState}"
-                               TextWrapping="Wrap" />
-                </StackPanel>
+            <!-- 页签三：后期 / 4K 工作流 -->
+            <ui:TabViewItem>
+                <ui:TabViewItem.Header>
+                    <StackPanel Orientation="Horizontal">
+                        <ui:SymbolIcon Symbol="ArrowDownload24" Margin="0,0,6,0"/>
+                        <TextBlock Text="后期 / 4K" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </ui:TabViewItem.Header>
 
-                <TextBlock Margin="0,16,0,24"
-                           Text="{Binding StatusText}"
-                           TextWrapping="Wrap" />
-            </StackPanel>
-        </ScrollViewer>
+                <ScrollViewer Padding="0,12,8,16"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              CanContentScroll="False"
+                              PanningMode="VerticalOnly"
+                              Focusable="True">
+                    <StackPanel>
+                        <ui:Card Margin="0,0,0,12" Padding="14">
+                            <StackPanel>
+                                <ui:TextBlock Style="{StaticResource AppCardTitle}"
+                                              Margin="0,0,0,12"
+                                              Text="输出"/>
+                                <ui:TextBlock Style="{StaticResource AppHelperText}"
+                                              Text="{Binding OutputDirectoryText}"/>
+                                <ui:TextBlock Margin="0,6,0,0"
+                                              Style="{StaticResource AppHelperText}"
+                                              Text="1920×1080 / 60fps · 命名 地图_玩家_时间戳.mp4"/>
+                                <ui:TextBlock Margin="0,6,0,0"
+                                              Style="{StaticResource AppCaptionMuted}"
+                                              Text="本工具只输出画面；音频（48kHz AAC ≈320kbps）在 DaVinci 中加入"/>
+                            </StackPanel>
+                        </ui:Card>
+
+                        <ui:Card Padding="14">
+                            <StackPanel>
+                                <ui:TextBlock Style="{StaticResource AppCardTitle}"
+                                              Margin="0,0,0,12"
+                                              Text="4K 工作流"/>
+                                <ui:ToggleSwitch IsChecked="{Binding EnableDaVinci4KWorkflowGuide, Mode=TwoWay}"
+                                                 OnContent="DaVinci 4K AI 后处理指引"
+                                                 OffContent="DaVinci 4K AI 后处理指引"/>
+                                <ui:TextBlock Margin="0,8,0,0"
+                                              Style="{StaticResource AppCaptionMuted}"
+                                              Text="本工具不会执行 AI 放大。这里仅生成 DaVinci Resolve Studio 中的操作步骤（Super Scale 2x Enhanced 属 Studio 功能）。"/>
+                                <StackPanel Margin="0,12,0,0"
+                                            Visibility="{Binding IsDaVinciGuideEnabled, Converter={StaticResource BoolToVis}}">
+                                    <WrapPanel Margin="0,0,0,8">
+                                        <ui:Button Content="复制 DaVinci 操作步骤"
+                                                   Icon="{ui:SymbolIcon Copy24}"
+                                                   Command="{Binding CopyDaVinciStepsCommand}"
+                                                   Margin="0,0,8,8"/>
+                                        <ui:Button Content="复制 Bilibili 导出建议"
+                                                   Icon="{ui:SymbolIcon Copy24}"
+                                                   Command="{Binding CopyBilibiliExportCommand}"
+                                                   Margin="0,0,8,8"/>
+                                    </WrapPanel>
+                                    <ui:TextBox Style="{StaticResource AppCodeBlock}"
+                                                Text="{Binding DavinciGuideText}"
+                                                MinHeight="200"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </ui:Card>
+                    </StackPanel>
+                </ScrollViewer>
+            </ui:TabViewItem>
+
+            <!-- 页签四：游戏 TGA（页签索引 3，仅 TGA 模式显示）
+                 索引与 SettingsViewModel.TgaOnlySectionIndex 一一对应；
+                 调整页签顺序时必须同步该常量。 -->
+            <ui:TabViewItem Visibility="{Binding IsTgaMode, Converter={StaticResource BoolToVis}}">
+                <ui:TabViewItem.Header>
+                    <StackPanel Orientation="Horizontal">
+                        <ui:SymbolIcon Symbol="Map24" Margin="0,0,6,0"/>
+                        <TextBlock Text="游戏 TGA" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </ui:TabViewItem.Header>
+
+                <ScrollViewer Padding="0,12,8,16"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              CanContentScroll="False"
+                              PanningMode="VerticalOnly"
+                              Focusable="True">
+                    <ui:Card Padding="14">
+                        <StackPanel>
+                            <ui:TextBlock Style="{StaticResource AppCardTitle}"
+                                          Margin="0,0,0,12"
+                                          Text="游戏 TGA 模式"/>
+
+                            <ui:TextBlock Style="{StaticResource AppFieldLabel}" Text="TGA 监视目录"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <ui:TextBox Grid.Column="0" Margin="0,0,8,0" IsReadOnly="True"
+                                            Text="{Binding RamDiskWatchDirectory, Mode=TwoWay}"/>
+                                <ui:Button Grid.Column="1" Content="浏览…"
+                                           Icon="{ui:SymbolIcon FolderOpen24}"
+                                           Command="{Binding BrowseWatchDirectoryCommand}"/>
+                            </Grid>
+
+                            <ui:TextBlock Style="{StaticResource AppFieldLabel}" Margin="0,14,0,6"
+                                          Text="监视盘剩余空间安全下限（%）"/>
+                            <ui:NumberBox Value="{Binding DiskSafetyFreePercent, Mode=TwoWay}"
+                                          ValueChanged="OnNumberBoxValueChanged"
+                                          Minimum="0" Maximum="50" SmallChange="1"
+                                          HorizontalAlignment="Left" Width="160"
+                                          SpinButtonPlacementMode="Inline"/>
+                            <!-- 画板 05 底部黄色警示条：阈值摘要走 ui:InfoBar（Warning=黄色警示；InfoBarSeverity 无 Caution，勿与 InfoBadgeSeverity 混用） -->
+                            <ui:InfoBar Margin="0,8,0,0"
+                                        Severity="Warning"
+                                        Title="磁盘安全"
+                                        Message="{Binding DiskSafetySummary}"
+                                        IsClosable="False"
+                                        IsOpen="True"/>
+
+                            <ui:TextBlock Style="{StaticResource AppFieldLabel}" Margin="0,14,0,6"
+                                          Text="游戏根目录"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <ui:TextBox Grid.Column="0" Margin="0,0,8,0" IsReadOnly="True"
+                                            Text="{Binding GameRootPath, Mode=TwoWay}"/>
+                                <ui:Button Grid.Column="1" Content="浏览…"
+                                           Icon="{ui:SymbolIcon FolderOpen24}"
+                                           Command="{Binding BrowseGameRootCommand}"/>
+                            </Grid>
+
+                            <Border Style="{StaticResource AppDivider}"/>
+
+                            <ui:TextBlock Style="{StaticResource AppFieldLabel}"
+                                          Margin="0,0,0,6"
+                                          Text="startmovie 序列名"/>
+                            <ui:TextBox Text="{Binding MovieSequenceName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                <StackPanel Margin="0,0,16,0">
+                                    <ui:TextBlock Style="{StaticResource AppFieldLabel}" Text="开始快捷键"/>
+                                    <ui:TextBox Width="80" Text="{Binding StartMovieHotkey, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                                </StackPanel>
+                                <StackPanel>
+                                    <ui:TextBlock Style="{StaticResource AppFieldLabel}" Text="结束快捷键"/>
+                                    <ui:TextBox Width="80" Text="{Binding EndMovieHotkey, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                                </StackPanel>
+                            </StackPanel>
+
+                            <ui:ToggleSwitch Margin="0,12,0,0"
+                                             IsChecked="{Binding HideHudInCfg, Mode=TwoWay}"
+                                             OnContent="CFG 中隐藏 HUD（cl_drawhud 0）"
+                                             OffContent="CFG 中隐藏 HUD（cl_drawhud 0）"/>
+
+                            <Border Style="{StaticResource AppDivider}"/>
+
+                            <ui:TextBlock Style="{StaticResource AppFieldLabel}"
+                                          Margin="0,0,0,6"
+                                          Text="执行 CFG 指令（进图后在控制台执行）"/>
+                            <ui:TextBox Style="{StaticResource AppCodeBlock}" Text="{Binding CfgCommandBlock}" MinHeight="48"/>
+
+                            <ui:TextBlock Style="{StaticResource AppFieldLabel}" Margin="0,12,0,6"
+                                          Text="还原指令（停止录制、恢复设置并关闭作弊）"/>
+                            <ui:TextBox Style="{StaticResource AppCodeBlock}" Text="{Binding CfgRestoreCommandBlock}" MinHeight="64"/>
+
+                            <WrapPanel Margin="0,14,0,0">
+                                <ui:Button Content="创建并生成 CFG" Appearance="Primary"
+                                           Icon="{ui:SymbolIcon DocumentAdd24}"
+                                           Command="{Binding CreateJunctionCommand}" Margin="0,0,8,8"/>
+                                <ui:Button Content="复制 CFG 指令"
+                                           Command="{Binding CopyCfgCommandCommand}" Margin="0,0,8,8"/>
+                                <ui:Button Content="复制还原指令"
+                                           Command="{Binding CopyCfgRestoreCommandCommand}" Margin="0,0,8,8"/>
+                                <ui:Button Content="取消 Junction" Appearance="Danger"
+                                           Icon="{ui:SymbolIcon LinkDismiss24}"
+                                           Command="{Binding RemoveJunctionCommand}" Margin="0,0,8,8"/>
+                                <ui:Button Content="打开 ImDisk"
+                                           Icon="{ui:SymbolIcon HardDrive24}"
+                                           Command="{Binding OpenImDiskCommand}" Margin="0,0,8,8"/>
+                            </WrapPanel>
+
+                            <ui:TextBlock Margin="0,4,0,0"
+                                          Style="{StaticResource AppCaptionMuted}"
+                                          Text="{Binding JunctionState}"/>
+                        </StackPanel>
+                    </ui:Card>
+                </ScrollViewer>
+            </ui:TabViewItem>
+
+            <!-- 页签五：OBS 模式（页签索引 4，仅 OBS 模式显示）
+                 索引与 SettingsViewModel.ObsOnlySectionIndex 一一对应；
+                 调整页签顺序时必须同步该常量。 -->
+            <ui:TabViewItem Visibility="{Binding IsObsMode, Converter={StaticResource BoolToVis}}">
+                <ui:TabViewItem.Header>
+                    <StackPanel Orientation="Horizontal">
+                        <ui:SymbolIcon Symbol="Record24" Margin="0,0,6,0"/>
+                        <TextBlock Text="OBS 模式" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </ui:TabViewItem.Header>
+
+                <ScrollViewer Padding="0,12,8,16"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              CanContentScroll="False"
+                              PanningMode="VerticalOnly"
+                              Focusable="True">
+                    <StackPanel>
+                        <ui:Card Margin="0,0,0,12" Padding="14">
+                            <StackPanel>
+                                <ui:TextBlock Style="{StaticResource AppCardTitle}"
+                                              Margin="0,0,0,12"
+                                              Text="OBS 捕获"/>
+                                <ui:TextBlock Style="{StaticResource AppFieldLabel}" Text="OBS 源帧率"/>
+                                <ComboBox HorizontalAlignment="Left" Width="200"
+                                             ItemsSource="{Binding ObsCaptureFramerateOptions}"
+                                             SelectedItem="{Binding ObsCaptureFramerate, Mode=TwoWay}"/>
+
+                                <ui:TextBlock Style="{StaticResource AppFieldLabel}" Margin="0,14,0,6" Text="OBS 并行路数"/>
+                                <ui:NumberBox Value="{Binding MaxParallelJobs, Mode=TwoWay}"
+                                              ValueChanged="OnNumberBoxValueChanged"
+                                              Minimum="1" Maximum="8" SmallChange="1"
+                                              HorizontalAlignment="Left" Width="160"
+                                              SpinButtonPlacementMode="Inline"/>
+                            </StackPanel>
+                        </ui:Card>
+
+                        <ui:Card Padding="14">
+                            <StackPanel>
+                                <ui:TextBlock Style="{StaticResource AppCardTitle}"
+                                              Margin="0,0,0,10"
+                                              Text="游戏慢放指令"/>
+                                <ui:ToggleSwitch Margin="0,0,0,8"
+                                                 IsChecked="{Binding HideHudInCfg, Mode=TwoWay}"
+                                                 OnContent="隐藏 HUD（cl_drawhud）"
+                                                 OffContent="隐藏 HUD（cl_drawhud）"/>
+                                <ui:TextBox Style="{StaticResource AppCodeBlock}" Text="{Binding SlowMotionBlock}" MinHeight="90"/>
+                                <ui:TextBox Style="{StaticResource AppCodeBlock}" Margin="0,8,0,0" Text="{Binding RestoreBlock}" MinHeight="70"/>
+
+                                <WrapPanel Margin="0,14,0,0">
+                                    <ui:Button Content="复制慢放指令" Icon="{ui:SymbolIcon Copy24}"
+                                               Command="{Binding CopySlowMotionCommand}" Margin="0,0,8,8"/>
+                                    <ui:Button Content="复制恢复指令" Icon="{ui:SymbolIcon Copy24}"
+                                               Command="{Binding CopyRestoreCommand}" Margin="0,0,8,8"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </ui:Card>
+                    </StackPanel>
+                </ScrollViewer>
+            </ui:TabViewItem>
+
+            <!-- 页签六：编码（公共）—— 中间母版码率；监视盘安全下限属于 TGA 专属，见「游戏 TGA」页签 -->
+            <ui:TabViewItem>
+                <ui:TabViewItem.Header>
+                    <StackPanel Orientation="Horizontal">
+                        <ui:SymbolIcon Symbol="Code24" Margin="0,0,6,0"/>
+                        <TextBlock Text="编码" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </ui:TabViewItem.Header>
+
+                <ScrollViewer Padding="0,12,8,16"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              CanContentScroll="False"
+                              PanningMode="VerticalOnly"
+                              Focusable="True">
+                    <ui:Card Padding="14">
+                        <StackPanel>
+                            <ui:TextBlock Style="{StaticResource AppCardTitle}"
+                                          Margin="0,0,0,12"
+                                          Text="中间母版码率"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="200"/>
+                                </Grid.ColumnDefinitions>
+                                <ui:TextBlock Grid.Column="0"
+                                              VerticalAlignment="Center"
+                                              Style="{StaticResource AppKeyText}"
+                                              Text="TargetBitrate"/>
+                                <ui:NumberBox Grid.Column="1"
+                                              Value="{Binding IntermediateTargetBitrate, Mode=TwoWay}"
+                                              ValueChanged="OnNumberBoxValueChanged"
+                                              Minimum="0"
+                                              Maximum="120000000"
+                                              SmallChange="1000000"
+                                              SpinButtonPlacementMode="Compact"/>
+                            </Grid>
+                            <ui:TextBlock Margin="0,8,0,0"
+                                          Style="{StaticResource AppCaptionMuted}"
+                                          Text="{Binding BitrateSummaryText}"/>
+                            <ui:TextBlock Margin="0,4,0,0"
+                                          Style="{StaticResource AppCaptionMuted}"
+                                          Text="0 = 自动估算；填入的数值会真正传给 MF 编码器作为中间母版码率。两种模式共用同一份设置。"/>
+                        </StackPanel>
+                    </ui:Card>
+                </ScrollViewer>
+            </ui:TabViewItem>
+        </ui:TabView>
     </Grid>
 </Page>
