@@ -18,6 +18,7 @@ public sealed class VisualPlaybackEvidenceProbe : IPlaybackEvidenceProbe
     private readonly double _changedBlockDelta;
     private readonly int _requiredConsecutive;
     private readonly int _maxHistory;
+    private readonly object _stateLock = new();
     private float[]? _previousBlocks;
     private int _gridWidth;
     private int _gridHeight;
@@ -34,26 +35,43 @@ public sealed class VisualPlaybackEvidenceProbe : IPlaybackEvidenceProbe
     }
 
     public int RequiredConsecutive => _requiredConsecutive;
-    public int ConsecutiveSignificantCount => _consecutive;
-    public bool IsPlaybackStarted => _consecutive >= _requiredConsecutive;
+    public int ConsecutiveSignificantCount
+    {
+        get
+        {
+            lock (_stateLock)
+                return _consecutive;
+        }
+    }
+
+    public bool IsPlaybackStarted
+    {
+        get
+        {
+            lock (_stateLock)
+                return _consecutive >= _requiredConsecutive;
+        }
+    }
 
     /// <summary>Clears the baseline and history (used before replay watch).</summary>
     public void Reset()
     {
-        _previousBlocks = null;
-        _consecutive = 0;
-        _gridWidth = 0;
-        _gridHeight = 0;
+        lock (_stateLock)
+        {
+            _previousBlocks = null;
+            _consecutive = 0;
+            _gridWidth = 0;
+            _gridHeight = 0;
+        }
     }
 
     public void SetBaseline(ReadOnlySpan<byte> bgra, int width, int height)
     {
         if (width <= 0 || height <= 0 || bgra.Length < width * height * 4)
             return;
-        _gridWidth = (width + _blockSize - 1) / _blockSize;
-        _gridHeight = (height + _blockSize - 1) / _blockSize;
-        _previousBlocks = ComputeBlockLuma(bgra, width, height);
-        _consecutive = 0;
+
+        lock (_stateLock)
+            SetBaselineCore(bgra, width, height);
     }
 
     public PlaybackEvidenceSample Sample(ReadOnlySpan<byte> bgra, int width, int height)
@@ -61,37 +79,51 @@ public sealed class VisualPlaybackEvidenceProbe : IPlaybackEvidenceProbe
         if (width <= 0 || height <= 0 || bgra.Length < width * height * 4)
             return new PlaybackEvidenceSample(0, 0, false, 0, 0);
 
-        var gridW = (width + _blockSize - 1) / _blockSize;
-        var gridH = (height + _blockSize - 1) / _blockSize;
-
-        // First sample after baseline: compare against the baseline frame.
-        if (_previousBlocks is null || _previousBlocks.Length != gridW * gridH)
+        lock (_stateLock)
         {
-            SetBaseline(bgra, width, height);
-            return new PlaybackEvidenceSample(0, 0, false, 0, gridW * gridH);
+            var gridW = (width + _blockSize - 1) / _blockSize;
+            var gridH = (height + _blockSize - 1) / _blockSize;
+
+            // ResetActivityTracking can run on the recording-control thread while
+            // the TGA loop samples a frame. Keep the baseline check, comparison,
+            // and replacement atomic so Reset cannot clear it between those steps.
+            if (_previousBlocks is null || _previousBlocks.Length != gridW * gridH)
+            {
+                SetBaselineCore(bgra, width, height);
+                return new PlaybackEvidenceSample(0, 0, false, 0, gridW * gridH);
+            }
+
+            var current = ComputeBlockLuma(bgra, width, height);
+            var previous = _previousBlocks;
+            var total = gridW * gridH;
+            var changed = 0;
+            double sumDelta = 0;
+
+            for (var i = 0; i < total; i++)
+            {
+                var delta = Math.Abs(current[i] - previous[i]);
+                sumDelta += delta;
+                if (delta >= _changedBlockDelta)
+                    changed++;
+            }
+
+            var ratio = total == 0 ? 0 : changed / (double)total;
+            var meanDelta = total == 0 ? 0 : sumDelta / total;
+            var significant = ratio >= _ratioThreshold && meanDelta >= _meanDeltaThreshold;
+
+            _consecutive = significant ? Math.Min(_consecutive + 1, _maxHistory) : 0;
+            _previousBlocks = current;
+
+            return new PlaybackEvidenceSample(ratio, meanDelta, significant, changed, total);
         }
+    }
 
-        var current = ComputeBlockLuma(bgra, width, height);
-        var total = gridW * gridH;
-        var changed = 0;
-        double sumDelta = 0;
-
-        for (var i = 0; i < total; i++)
-        {
-            var delta = Math.Abs(current[i] - _previousBlocks[i]);
-            sumDelta += delta;
-            if (delta >= _changedBlockDelta)
-                changed++;
-        }
-
-        var ratio = total == 0 ? 0 : changed / (double)total;
-        var meanDelta = total == 0 ? 0 : sumDelta / total;
-        var significant = ratio >= _ratioThreshold && meanDelta >= _meanDeltaThreshold;
-
-        _consecutive = significant ? Math.Min(_consecutive + 1, _maxHistory) : 0;
-        _previousBlocks = current;
-
-        return new PlaybackEvidenceSample(ratio, meanDelta, significant, changed, total);
+    private void SetBaselineCore(ReadOnlySpan<byte> bgra, int width, int height)
+    {
+        _gridWidth = (width + _blockSize - 1) / _blockSize;
+        _gridHeight = (height + _blockSize - 1) / _blockSize;
+        _previousBlocks = ComputeBlockLuma(bgra, width, height);
+        _consecutive = 0;
     }
 
     /// <summary>

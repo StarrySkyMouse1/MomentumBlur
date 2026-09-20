@@ -23,6 +23,7 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
     private long _fed;
     private long _submittedInputFrames;
     private long _outputFrames;
+    private int _lastVisualChangeFrame = -1;
     private ProcessingBackend _processingBackend = ProcessingBackend.Unknown;
     private EncoderBackend _encoderBackend = EncoderBackend.Unknown;
     private int _firstFrameWidth;
@@ -81,7 +82,14 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
     /// <summary>FedCount of the first frame that established playback evidence.</summary>
     public int? ActivityAnchorFrame { get; private set; }
     /// <summary>FedCount of the most recent frame with significant scene activity.</summary>
-    public int? LastVisualChangeFrame { get; private set; }
+    public int? LastVisualChangeFrame
+    {
+        get
+        {
+            var frame = Volatile.Read(ref _lastVisualChangeFrame);
+            return frame < 0 ? null : frame;
+        }
+    }
 
     public Task StartAsync(UserSettings settings) => StartAsync(settings, null, null, true);
 
@@ -140,7 +148,7 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
         _performanceTracker.Reset();
         HasVisualChange = false;
         ActivityAnchorFrame = null;
-        LastVisualChangeFrame = null;
+        Volatile.Write(ref _lastVisualChangeFrame, -1);
         _fault = null;
         _nextFrame = 0;
         _state = PipelineState.Watching;
@@ -199,7 +207,7 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
     {
         HasVisualChange = false;
         ActivityAnchorFrame = null;
-        LastVisualChangeFrame = null;
+        Volatile.Write(ref _lastVisualChangeFrame, -1);
         _evidenceProbe.Reset(); // force re-baseline on next frame
         Changed?.Invoke();
     }
@@ -423,8 +431,17 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
         if (_evidenceProbe.IsPlaybackStarted)
         {
             ActivityAnchorFrame ??= (int)_fed;
-            LastVisualChangeFrame = (int)_fed;
             HasVisualChange = true;
+        }
+
+        // Once playback has been established, remember every frame with an
+        // actual block-level visual change. The recorder uses the distance
+        // from this frame as positive replay-end evidence when subsequent
+        // frames stay visually identical for a bounded window.
+        if (HasVisualChange &&
+            (sample.ChangedBlockCount > 0 || sample.MeanLumaDelta > 0.01))
+        {
+            Volatile.Write(ref _lastVisualChangeFrame, (int)_fed);
         }
     }
 

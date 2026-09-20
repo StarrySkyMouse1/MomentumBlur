@@ -20,6 +20,11 @@ public sealed record RecordingTimeoutPolicy
     public TimeSpan ReplayWatchTimeout { get; init; } = TimeSpan.FromMinutes(2);
     public TimeSpan PlaybackEvidenceTimeout { get; init; } = TimeSpan.FromSeconds(15);
     public TimeSpan ReplayWatchSettle { get; init; } = TimeSpan.FromMilliseconds(800);
+    /// <summary>
+    /// After playback has been positively established, this much continuous
+    /// visual stillness is treated as replay-end evidence.
+    /// </summary>
+    public TimeSpan ReplayEndStaticWindow { get; init; } = TimeSpan.FromSeconds(1);
 
     public TimeSpan NoPhysicalTgaProgressTimeout { get; init; } = TimeSpan.FromMinutes(2);
     public TimeSpan NoPipelineProgressTimeout { get; init; } = TimeSpan.FromSeconds(30);

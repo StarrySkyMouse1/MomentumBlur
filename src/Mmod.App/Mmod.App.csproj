@@ -33,6 +33,17 @@
     <NativeRoot>$(MSBuildThisFileDirectory)..\Mmod.Native</NativeRoot>
     <NativeBuildDir>$(MSBuildThisFileDirectory)..\Mmod.Native\build</NativeBuildDir>
     <NativeDll>$(MSBuildThisFileDirectory)..\Mmod.Native\build\bin\$(Configuration)\mmod_native.dll</NativeDll>
+    <!-- Inside Visual Studio, resolve the CMake bundled with the current VS instance.
+         This works for custom install roots and Preview/Insiders editions on every machine. -->
+    <_VsBundledCMakeFromDevEnv>$(DevEnvDir)CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</_VsBundledCMakeFromDevEnv>
+    <_VsBundledCMake>$(VSINSTALLDIR)Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</_VsBundledCMake>
+    <!-- VS-hosted MSBuild does not always expose VSINSTALLDIR. MSBuildToolsPath is under
+         <VS root>\MSBuild\Current\Bin, so it provides a location-independent fallback. -->
+    <_VsRootFromMSBuild>$([System.IO.Path]::GetFullPath('$(MSBuildToolsPath)\..\..\..\'))</_VsRootFromMSBuild>
+    <_VsBundledCMakeFromMSBuild>$(_VsRootFromMSBuild)Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</_VsBundledCMakeFromMSBuild>
+    <CMakeExe Condition="'$(CMakeExe)' == '' and '$(DevEnvDir)' != '' and Exists('$(_VsBundledCMakeFromDevEnv)')">$(_VsBundledCMakeFromDevEnv)</CMakeExe>
+    <CMakeExe Condition="'$(CMakeExe)' == '' and '$(VSINSTALLDIR)' != '' and Exists('$(_VsBundledCMake)')">$(_VsBundledCMake)</CMakeExe>
+    <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('$(_VsBundledCMakeFromMSBuild)')">$(_VsBundledCMakeFromMSBuild)</CMakeExe>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\18\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
@@ -42,7 +53,10 @@
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('D:\Software\Professionals\vs2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">D:\Software\Professionals\vs2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('D:\Software\Professionals\vs2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">D:\Software\Professionals\vs2022\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
     <CMakeExe Condition="'$(CMakeExe)' == '' and Exists('D:\Software\Professionals\vs2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe')">D:\Software\Professionals\vs2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe</CMakeExe>
+    <!-- Command-line builds may provide CMake through PATH. Do not reject that valid setup. -->
     <CMakeExe Condition="'$(CMakeExe)' == ''">cmake</CMakeExe>
+    <CMakeGenerator Condition="'$(CMakeGenerator)' == '' and $([System.String]::Copy('$(VisualStudioVersion)').StartsWith('18.'))">Visual Studio 18 2026</CMakeGenerator>
+    <CMakeGenerator Condition="'$(CMakeGenerator)' == '' and $([System.String]::Copy('$(VisualStudioVersion)').StartsWith('17.'))">Visual Studio 17 2022</CMakeGenerator>
   </PropertyGroup>
 
   <!-- 若 build 目录中的 CMake 缓存记录的不是当前源码目录（仓库移动/复制后），
@@ -59,10 +73,10 @@
   </Target>
 
   <Target Name="BuildNativeDll" BeforeTargets="BeforeBuild" Condition="'$(SkipNativeBuild)' != 'true'">
-    <Error Text="未找到 cmake（已尝试 VS 自带路径）。请安装「使用 C++ 的桌面开发」工作负载，或设置 /p:CMakeExe=完整路径。"
-           Condition="'$(CMakeExe)' == 'cmake'" />
-    <Exec Command="&quot;$(CMakeExe)&quot; -S &quot;$(NativeRoot)&quot; -B &quot;$(NativeBuildDir)&quot; -G &quot;Visual Studio 18 2026&quot; -A x64"
-          Condition="!Exists('$(NativeBuildDir)\mmod_native.vcxproj')" />
+    <Exec Command="&quot;$(CMakeExe)&quot; -S &quot;$(NativeRoot)&quot; -B &quot;$(NativeBuildDir)&quot; -G &quot;$(CMakeGenerator)&quot; -A x64"
+          Condition="!Exists('$(NativeBuildDir)\mmod_native.vcxproj') and '$(CMakeGenerator)' != ''" />
+    <Exec Command="&quot;$(CMakeExe)&quot; -S &quot;$(NativeRoot)&quot; -B &quot;$(NativeBuildDir)&quot; -A x64"
+          Condition="!Exists('$(NativeBuildDir)\mmod_native.vcxproj') and '$(CMakeGenerator)' == ''" />
     <Exec Command="&quot;$(CMakeExe)&quot; --build &quot;$(NativeBuildDir)&quot; --config $(Configuration)" />
   </Target>
 

@@ -17,7 +17,7 @@ dotnet run --project src\Mmod.App\Mmod.App.csproj -c Release
 
 解决方案：`MomentumBlur.slnx`（含 C# + `mmod_native`）。若解决方案里看不到 C++ 项目，说明还没跑过上面的 `cmake -S ...`（会生成 `src\Mmod.Native\build\mmod_native.vcxproj`），配置后再重新打开解决方案即可。
 
-在 VS 里按 F5 / 生成 `Mmod.App` 时，会**自动**调用 cmake 增量编译 `mmod_native` 并复制 dll 到输出目录。仅改 C#、想跳过 Native 时可加：`/p:SkipNativeBuild=true`。
+在 VS 里按 F5 / 生成 `Mmod.App` 时，会从**当前 Visual Studio 实例的安装目录**自动发现其内置 CMake，增量编译 `mmod_native` 并复制 dll 到输出目录；因此支持默认目录、自定义目录以及 Preview/Insiders 版本，不依赖某台电脑的固定盘符。命令行构建会继续从标准 VS 目录或 `PATH` 查找 CMake，也可显式传入 `/p:CMakeExe=完整路径`。仅改 C#、想跳过 Native 时可加：`/p:SkipNativeBuild=true`。
 
 ## 功能清单（交测）
 
@@ -103,7 +103,8 @@ AB 对比重点：高速 ramp 边缘、高频贴图 / 远处细线 shimmer、HUD
     “仅引擎响应”并显式标记 `Degraded`，绝不用 echo + 固定 sleep 冒充 MapReady。
   - Replay 开始：`VisualPlaybackEvidenceProbe` 用低分辨率 block-grid 计算 changed-block ratio +
     mean luma delta，要求连续 N 帧显著才建立 anchor（HUD 微变、单帧噪点不会触发）。
-  - 停止：`endmovie` 走 strict 命令（ACK + 失败 pattern），随后用 watcher 的**物理静默**
+  - 回放结束：已经建立 PlaybackEvidence 后，连续 1 秒画面没有 block 级变化即建立 ReplayEndEvidence；预计时长仅作为最大上限兜底。
+  - 停止：建立 ReplayEndEvidence 或达到预计时长上限后，`endmovie` 走 strict 命令（ACK + 失败 pattern），随后用 watcher 的**物理静默**
     （无新写入 + 候选清空 + 最终全量扫描后保持安静）证明写盘真的停止。
 - **Fault 必须传播**：pipeline 后台异常、Native Finish 失败、encoder flush 失败一律 throw，
   禁止 `catch {}` 后仅凭 `File.Exists && Length > 0` 判定成功。

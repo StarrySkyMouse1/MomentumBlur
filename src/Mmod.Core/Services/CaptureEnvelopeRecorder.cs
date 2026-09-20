@@ -14,6 +14,7 @@ public static class CaptureEnvelopeRecorder
     public const int CaptureReadyMinFrames = 3;
     public const double PreSafetySeconds = 2.0;
     public const double TailSafetySeconds = 2.5;
+    private const long CaptureStartMinimumFreeBytes = 64L * 1024 * 1024;
 
     /// <summary>Frames after ActivityAnchor: RunTime + PreSafety + TailSafety at capture FPS.</summary>
     public static int ComputeEnvelopeFrameCount(double runTimeSeconds, int supersamplingMultiplier)
@@ -71,6 +72,49 @@ public static class CaptureEnvelopeRecorder
 
         try
         {
+            // Refuse to start a new TGA stream when the watch volume is already
+            // unsafe. Without this gate, startmovie can create only a zero-byte
+            // frame on a full RAM disk and the workflow misleadingly stalls in
+            // WaitingCaptureReady before the regular capture-loop sampling runs.
+            if (health is not null)
+            {
+                var preflightDisk = health.GetWatchDiskHealth(user.DiskSafetyFreePercent);
+                if (preflightDisk.State is not DiskSafetyState.Disabled and not DiskSafetyState.Unavailable &&
+                    preflightDisk.FreeBytes < CaptureStartMinimumFreeBytes)
+                {
+                    throw new DiskPressureException(
+                        $"开始录制前磁盘可用空间不足：监视盘 {FormatDriveRoot(preflightDisk.DriveRoot)} " +
+                        $"仅剩 {ToGiB(preflightDisk.FreeBytes):0.00} GiB，至少需要 " +
+                        $"{ToGiB(CaptureStartMinimumFreeBytes):0.00} GiB 才能建立 CaptureReady。",
+                        preflightDisk);
+                }
+
+                switch (preflightDisk.State)
+                {
+                    case DiskSafetyState.Critical:
+                        // Enough absolute space exists to establish CaptureReady.
+                        // Preserve the existing controlled-stop path so a verified
+                        // partial can still be finalized under percentage pressure.
+                        phase?.Invoke(
+                            $"磁盘压力：开始录制前监视盘 {FormatDriveRoot(preflightDisk.DriveRoot)} " +
+                            $"剩余 {preflightDisk.FreePercent:0.0}%，CaptureReady 后将受控收尾。");
+                        break;
+                    case DiskSafetyState.Unavailable:
+                        // Preserve the existing transient-sampling contract:
+                        // one unavailable read is not proof of an unsafe disk.
+                        // The capture loop still fails closed after the configured
+                        // number of consecutive unavailable samples.
+                        phase?.Invoke(
+                            $"磁盘采样暂不可用：开始录制前无法读取监视盘 {FormatDriveRoot(preflightDisk.DriveRoot)} 的空间状态。");
+                        break;
+                    case DiskSafetyState.Warning:
+                        phase?.Invoke(
+                            $"磁盘警告：开始录制前监视盘 {FormatDriveRoot(preflightDisk.DriveRoot)} " +
+                            $"剩余 {preflightDisk.FreePercent:0.0}%（警告线 {preflightDisk.WarningPercent}%）");
+                        break;
+                }
+            }
+
             // 1. Clean baseline: no active startmovie from a previous session.
             Stage(NodeExecutionStage.PreparingCaptureBaseline, "Begin", "开始录制 Envelope");
             var baselineStop = await MomentumReplaySession.ExecuteEndMovieAsync(netCon, timeouts, phase, token);
@@ -129,12 +173,19 @@ public static class CaptureEnvelopeRecorder
             phase?.Invoke($"PlaybackEvidenceConfirmed @ Anchor={anchor}");
 
             var safeEnd = ComputeSafeEndFrame(anchor, runTimeSeconds, user.SupersamplingMultiplier);
+            var captureFps = Math.Max(1, user.SupersamplingMultiplier) * ProjectConstants.FinalOutputFramerate;
+            var tailFrames = Math.Max(1, (int)Math.Ceiling(TailSafetySeconds * captureFps));
+            var tailStart = Math.Max(anchor, safeEnd - tailFrames);
+            var staticEndFrames = Math.Max(
+                1,
+                (int)Math.Ceiling(timeouts.ReplayEndStaticWindow.TotalSeconds * captureFps));
             phase?.Invoke($"Recording：SafeEndFrame={safeEnd}（Anchor={anchor} + RunTime/Pre/Tail）");
             Stage(NodeExecutionStage.Capturing, "Capturing", $"目标 SafeEnd={safeEnd}");
 
             // 6. Capturing loop: race user cancellation / pipeline fault / game exit /
-            //    expected progress / stage timeout. A static frame only lowers
-            //    confidence — it is never treated as replay-finished. Disk health
+            //    visual replay-end evidence / expected-progress fallback / stage timeout.
+            //    Static end detection is armed only after PlaybackEvidence, and
+            //    requires a bounded consecutive window rather than a single frame. Disk health
             //    is sampled once immediately, then at most once per
             //    DiskHealthSampleInterval (time-throttled, never per frame).
             var lastFed = pipeline.FedCount;
@@ -198,6 +249,16 @@ public static class CaptureEnvelopeRecorder
                 if (pressureSnapshot is not null)
                     break; // controlled stop; do not keep waiting for SafeEnd
 
+                if (pipeline.HasVisualChange &&
+                    pipeline.LastVisualChangeFrame is { } lastVisualChange &&
+                    pipeline.FedCount - lastVisualChange >= staticEndFrames)
+                {
+                    phase?.Invoke(
+                        $"ReplayEndEvidence：画面连续静止 {timeouts.ReplayEndStaticWindow.TotalSeconds:0.##}s，" +
+                        $"结束于帧 {pipeline.FedCount}");
+                    break;
+                }
+
                 if (pipeline.FedCount != lastFed)
                 {
                     lastFed = pipeline.FedCount;
@@ -210,7 +271,9 @@ public static class CaptureEnvelopeRecorder
                         "TGA 帧连续无增长（Recording Stall）。");
                 }
 
-                phase?.Invoke($"Recording：{pipeline.FedCount}/{safeEnd}");
+                phase?.Invoke(pipeline.FedCount >= tailStart
+                    ? $"Recording：尾帧收集 {pipeline.FedCount}/{safeEnd}"
+                    : $"Recording：{pipeline.FedCount}/{safeEnd}");
                 telemetry?.Invoke(latestDiskSnapshot, pipeline.Performance);
                 await Task.WhenAny(
                     Task.Delay(timeouts.ProgressSampleInterval, token),

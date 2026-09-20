@@ -36,7 +36,7 @@ cmake -S . -B build -G "Visual Studio 18 2026" -A x64
 cmake --build build --config Release
 ```
 
-若生成器名不同，可用 `cmake -G` 列出。产物：`build\bin\Release\mmod_native.dll`。
+若生成器名不同，可用 `cmake -G` 列出。通过 `Mmod.App` 在 VS 内构建时，会自动使用当前 VS 实例内置的 CMake，并按 VS 版本选择生成器，无需依赖固定安装路径。产物：`build\bin\Release\mmod_native.dll`。
 
 配置完成后，主解决方案 `MomentumBlur.slnx` 会加载 `build\mmod_native.vcxproj`，可在同一 VS 里改 C++ / C#。
 
