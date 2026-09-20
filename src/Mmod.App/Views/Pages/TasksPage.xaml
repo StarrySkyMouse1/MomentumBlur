@@ -103,7 +103,7 @@
                                                  Height="7"
                                                  Margin="0,0,10,0"
                                                  Minimum="0" Maximum="1"
-                                                 Value="{Binding ProgressRatio}"
+                                                 Value="{Binding ProgressRatio, Mode=OneWay}"
                                                  IsIndeterminate="{Binding IsRunning}"
                                                  Background="{DynamicResource ControlFillColorTertiaryBrush}"
                                                  Foreground="{Binding State, Converter={StaticResource ProgressBrush}}"
