@@ -12,10 +12,14 @@ namespace Mmod.Core.Services;
 /// </summary>
 public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
 {
+    private const int DecodeWorkerLimit = 3;
+    private const int DecodeLookAheadLimit = 8;
     private readonly VisualPlaybackEvidenceProbe _evidenceProbe;
     private readonly CapturePerformanceTracker _performanceTracker = new();
+    private readonly CaptureMotionDiagnostics _motionDiagnostics = new();
     private CancellationTokenSource? _cts;
     private Task? _loop;
+    private TaskCompletionSource _loopReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private TaskCompletionSource _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private TgaDirectoryWatcher? _watcher;
     private NativeBlendSession? _session;
@@ -32,10 +36,12 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
     private PipelineState _state = PipelineState.Created;
     private string? _sessionDiagnostics;
     private bool _finishSucceeded;
+    private readonly int? _blendOverride;
 
-    public TgaPipelineOrchestrator(RecordingTimeoutPolicy? timeouts = null)
+    public TgaPipelineOrchestrator(RecordingTimeoutPolicy? timeouts = null, int? blendOverride = null)
     {
         Timeouts = timeouts ?? RecordingTimeoutPolicy.Default;
+        _blendOverride = blendOverride is > 0 ? blendOverride : null;
         _evidenceProbe = new VisualPlaybackEvidenceProbe(Timeouts);
     }
 
@@ -54,6 +60,7 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
     public string? OutputPath { get; private set; }
     public string? WatchDirectory { get; private set; }
     public string? SessionDiagnostics => _sessionDiagnostics;
+    public string MotionDiagnosticsSummary => _motionDiagnostics.BuildSummary();
     public string Status { get; private set; } = "空闲";
 
     /// <summary>
@@ -153,6 +160,7 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
         _nextFrame = 0;
         _state = PipelineState.Watching;
         _completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _loopReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _cts = new CancellationTokenSource();
 
         _watcher = new TgaDirectoryWatcher(watchDir, effectiveSession.SequencePrefix);
@@ -162,10 +170,13 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
         Status = $"监视中：{watchDir}（prefix={effectiveSession.SequencePrefix}）";
         Changed?.Invoke();
 
-        var blend = Math.Max(1, settings.SupersamplingMultiplier);
+        var blend = _blendOverride ?? Math.Max(1, settings.SupersamplingMultiplier);
         var token = _cts.Token;
-        _loop = Task.Run(() => RunLoop(settings, blend, token), token);
-        await Task.CompletedTask;
+        _loop = Task.Run(() => RunLoopAsync(settings, blend, token), token);
+        // Do not let startmovie begin until the consumer thread has actually
+        // entered its loop. At high supersampling the producer can fill a RAM
+        // disk quickly, so merely scheduling Task.Run is not a readiness proof.
+        await _loopReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     public async Task WaitUntilFedAsync(int minimumFed, TimeSpan timeout, CancellationToken token)
@@ -270,7 +281,11 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
                 throw new TimeoutException($"TGA drain 超时（{timeouts.DrainTimeout.TotalSeconds:0}s），剩余 {watcher.PendingCount} 帧。");
             if (!watcher.TryTake(min, out var path))
                 continue;
+            if (min != _nextFrame)
+                throw new InvalidDataException(
+                    $"TGA 帧序列不连续：期望 {_nextFrame}，实际最小待处理帧为 {min}。为避免乱序或画面抖动，已停止合成。");
             SubmitFile(path);
+            _nextFrame = min + 1;
         }
 
         // Assert nothing is left unmanaged (P0-07 fail-safe).
@@ -307,58 +322,76 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
         await FinalizeAsync(Timeouts, CancellationToken.None);
     }
 
-    private void RunLoop(UserSettings settings, int blend, CancellationToken token)
+    private async Task RunLoopAsync(UserSettings settings, int blend, CancellationToken token)
     {
+        var inFlight = new SortedDictionary<int, PreparedFrameWork>();
+        using var decodeSlots = new SemaphoreSlim(
+            Math.Max(1, Math.Min(DecodeWorkerLimit, Environment.ProcessorCount - 1)));
         try
         {
-            while (!token.IsCancellationRequested)
+            _loopReady.TrySetResult();
+            var nextToAcquire = _nextFrame;
+            while (!token.IsCancellationRequested || inFlight.Count > 0)
             {
                 if (_watcher is null)
                     break;
 
-                if (!_watcher.TryGetMinPendingFrameIndex(out var frameIndex))
+                // Reading and TGA expansion are independent per frame, so keep
+                // a small bounded look-ahead window busy. The watcher retains
+                // ownership and backlog accounting until exact-order commit.
+                while (!token.IsCancellationRequested
+                    && inFlight.Count < DecodeLookAheadLimit
+                    && _watcher.TryGetPendingPath(nextToAcquire, out var path))
                 {
-                    Thread.Sleep(30);
+                    var work = new PreparedFrameWork(
+                        nextToAcquire,
+                        path,
+                        DecodeFrameAsync(nextToAcquire, path, decodeSlots));
+                    inFlight.Add(nextToAcquire, work);
+                    nextToAcquire++;
+                }
+
+                if (inFlight.Count == 0)
+                {
+                    await Task.Delay(10).ConfigureAwait(false);
                     continue;
                 }
 
-                if (!_watcher.TryTake(frameIndex, out var path))
+                var first = inFlight.First();
+                if (first.Key != _nextFrame)
+                    throw new InvalidDataException(
+                        $"TGA 提交顺序异常：期望 {_nextFrame}，预解码队首为 {first.Key}。");
+
+                var prepared = await first.Value.DecodeTask.ConfigureAwait(false);
+                if (!_watcher.TryTake(first.Key, out var committedPath)
+                    || !string.Equals(committedPath, first.Value.Path, StringComparison.OrdinalIgnoreCase))
                 {
-                    Thread.Sleep(20);
-                    continue;
+                    throw new InvalidDataException(
+                        $"TGA 帧 {first.Key} 在预解码后失去 watcher 所有权，已停止以避免重复或乱序提交。");
                 }
+                SubmitPreparedFrame(prepared, settings, blend);
+                inFlight.Remove(first.Key);
+                _nextFrame = first.Key + 1;
 
-                _nextFrame = frameIndex + 1;
-
-                if (!File.Exists(path) || !TgaFrameReader.TryReadBgra(path, out var width, out var height, out var bgra))
-                {
-                    try { File.Delete(path); } catch { /* ignore */ }
-                    Status = $"合成中：已喂入 {_fed} 帧，待处理 {_watcher.PendingCount}";
-                    Changed?.Invoke();
-                    continue;
-                }
-
-                _session ??= CreateSession(settings, width, height, blend);
-                if (_firstFrameWidth == 0)
-                {
-                    _firstFrameWidth = width;
-                    _firstFrameHeight = height;
-                }
-                _session.SubmitBgra(bgra, width * 4);
-                _submittedInputFrames++;
-                _fed++;
-                _outputFrames = _session.GetProgress().Done;
-                TrackPlaybackEvidence(bgra, width, height);
-                SamplePerformance();
-
-                Status = $"合成中：已喂入 {_fed} 帧，待处理 {_watcher.PendingCount}";
-                Changed?.Invoke();
-
-                try { File.Delete(path); } catch { /* ignore */ }
+                // Source deletion is the commit marker. Never delete a frame
+                // merely because decoding finished; Native submit must first
+                // have succeeded.
+                try { File.Delete(committedPath); } catch { /* cleanup barrier owns leftovers */ }
             }
         }
         catch (Exception ex)
         {
+            // Decode work is deliberately non-cancellable once a file lease is
+            // taken. Observe every task before exposing the fault so cleanup
+            // cannot race a worker still reading the attempt's files.
+            try
+            {
+                await Task.WhenAll(inFlight.Values.Select(static work => work.DecodeTask)).ConfigureAwait(false);
+            }
+            catch
+            {
+                // The primary exception below remains authoritative.
+            }
             _fault = ex;
             _state = PipelineState.Faulted;
             Status = $"错误：{ex.Message}";
@@ -369,6 +402,59 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
 
         if (_fault is null)
             _completion.TrySetResult();
+    }
+
+    private static async Task<PreparedFrame> DecodeFrameAsync(
+        int frameIndex,
+        string path,
+        SemaphoreSlim decodeSlots)
+    {
+        await decodeSlots.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            return await Task.Run(() =>
+            {
+                if (!File.Exists(path)
+                    || !TgaFrameReader.TryReadBgra(path, out var width, out var height, out var bgra))
+                {
+                    throw new InvalidDataException($"无法读取完整 TGA 帧 {frameIndex}：{path}");
+                }
+
+                return new PreparedFrame(frameIndex, width, height, bgra);
+            }).ConfigureAwait(false);
+        }
+        finally
+        {
+            decodeSlots.Release();
+        }
+    }
+
+    private void SubmitPreparedFrame(PreparedFrame frame, UserSettings settings, int blend)
+    {
+        _session ??= CreateSession(settings, frame.Width, frame.Height, blend);
+        if (_firstFrameWidth == 0)
+        {
+            _firstFrameWidth = frame.Width;
+            _firstFrameHeight = frame.Height;
+        }
+        else if (frame.Width != _firstFrameWidth || frame.Height != _firstFrameHeight)
+        {
+            throw new InvalidDataException(
+                $"TGA 分辨率在序列中发生变化：期望 {_firstFrameWidth}x{_firstFrameHeight}，" +
+                $"帧 {frame.FrameIndex} 为 {frame.Width}x{frame.Height}。");
+        }
+
+        _session.SubmitBgra(frame.Bgra, frame.Width * 4);
+        _submittedInputFrames++;
+        _fed++;
+        _outputFrames = _session.GetProgress().Done;
+        if (_submittedInputFrames % Math.Max(1, blend) == 0)
+            _motionDiagnostics.Sample(frame.Bgra, frame.Width, frame.Height);
+        TrackPlaybackEvidence(frame.Bgra, frame.Width, frame.Height);
+        SamplePerformance();
+
+        Status = $"合成中：已喂入 {_fed} 帧，待处理 {_watcher?.PendingCount ?? 0}";
+        Changed?.Invoke();
     }
 
     private NativeBlendSession CreateSession(UserSettings settings, int width, int height, int blend)
@@ -405,6 +491,10 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
         _outputFrames = _session.GetProgress().Done;
         try { File.Delete(path); } catch { /* ignore */ }
     }
+
+    private sealed record PreparedFrameWork(int FrameIndex, string Path, Task<PreparedFrame> DecodeTask);
+
+    private sealed record PreparedFrame(int FrameIndex, int Width, int Height, byte[] Bgra);
 
     /// <summary>
     /// Samples the rolling performance windows from real counters. Produced is

@@ -23,6 +23,7 @@ public sealed class MomentumProcessController : IGameProcessController, IAsyncDi
     /// </summary>
     public const int DefaultNetConPort = 29071;
     public const string DefaultNetConPassword = "mmod_record_local";
+    public const string DefaultLanguage = "schinese";
 
     /// <summary>复用探测时每个候选凭据等待 NetCon 连接的最长时间（避免无 NetCon 服务的实例拖慢启动）。</summary>
     private static readonly TimeSpan AttachConnectTimeout = TimeSpan.FromSeconds(5);
@@ -65,7 +66,7 @@ public sealed class MomentumProcessController : IGameProcessController, IAsyncDi
         if (!File.Exists(exe)) throw new FileNotFoundException("未找到 Momentum Mod 可执行文件。", exe);
         var startInfo = new ProcessStartInfo(
             exe,
-            $"-console -novid -netconport {DefaultNetConPort} -netconpassword {DefaultNetConPassword}")
+            $"-console -novid -language {DefaultLanguage} -netconport {DefaultNetConPort} -netconpassword {DefaultNetConPassword}")
         {
             WorkingDirectory = gameRoot,
             UseShellExecute = true,

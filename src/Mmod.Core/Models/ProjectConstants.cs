@@ -10,6 +10,8 @@ public static class ProjectConstants
     public const string AppDataFolderName = "mmod_record_next";
 
     public const int FinalOutputFramerate = 60;
+    public const int DefaultForegroundCaptureFpsLimit = 90;
+    public const int MaxForegroundCaptureFpsLimit = 1000;
     public const int ObsFramerateStep = 60;
     public const int MaxObsCaptureFramerate = 480;
 

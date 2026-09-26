@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.IO;
 
 namespace Mmod.Core.Services;
@@ -5,6 +6,13 @@ namespace Mmod.Core.Services;
 public static class TgaFrameReader
 {
     private const int HeaderSize = 18;
+    private static readonly ParallelOptions ConversionParallelism = new()
+    {
+        // Conversion is the only CPU-parallel portion of the ordered pipeline.
+        // Keep capacity for the game, UI and Media Foundation encoder instead
+        // of saturating every logical processor.
+        MaxDegreeOfParallelism = Math.Max(1, Math.Min(4, Environment.ProcessorCount - 1)),
+    };
 
     public static bool TryReadBgra(
         string path,
@@ -18,13 +26,18 @@ public static class TgaFrameReader
 
         try
         {
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                bufferSize: 64 * 1024,
+                FileOptions.SequentialScan);
             if (stream.Length < HeaderSize)
                 return false;
 
             Span<byte> header = stackalloc byte[HeaderSize];
-            if (stream.Read(header) < HeaderSize)
-                return false;
+            stream.ReadExactly(header);
 
             if (header[2] != 2)
                 return false;
@@ -45,24 +58,53 @@ public static class TgaFrameReader
             if (stream.Length < HeaderSize + expected)
                 return false;
 
-            var raw = new byte[expected];
-            if (stream.Read(raw, 0, raw.Length) != raw.Length)
-                return false;
+            var dstStride = checked(width * 4);
+            bgra = GC.AllocateUninitializedArray<byte>(checked(dstStride * height));
 
-            bgra = new byte[width * height * 4];
-            for (var y = 0; y < height; y++)
+            if (bpp == 32)
             {
-                var srcY = topOrigin ? y : height - 1 - y;
-                var srcRow = srcY * srcStride;
-                var dstRow = y * width * 4;
-                for (var x = 0; x < width; x++)
+                // Source startmovie commonly produces BGRA32. Read it directly
+                // into the final buffer, reversing whole rows only when the TGA
+                // origin is at the bottom. This is byte-for-byte equivalent to
+                // the old per-pixel copy without a second full-frame allocation.
+                for (var sourceRow = 0; sourceRow < height; sourceRow++)
                 {
-                    var si = srcRow + x * (bpp / 8);
-                    var di = dstRow + x * 4;
-                    bgra[di + 0] = raw[si + 0];
-                    bgra[di + 1] = raw[si + 1];
-                    bgra[di + 2] = raw[si + 2];
-                    bgra[di + 3] = bpp == 32 ? raw[si + 3] : (byte)255;
+                    var destinationRow = topOrigin ? sourceRow : height - 1 - sourceRow;
+                    stream.ReadExactly(bgra.AsSpan(destinationRow * dstStride, dstStride));
+                }
+            }
+            else
+            {
+                // Source startmovie currently emits RGB24. Keep its source
+                // frame in the shared pool and expand independent rows in
+                // parallel. Each worker writes a disjoint destination span, so
+                // ordering and pixel values are identical to the serial path.
+                var sourceBuffer = ArrayPool<byte>.Shared.Rent(expected);
+                try
+                {
+                    stream.ReadExactly(sourceBuffer.AsSpan(0, expected));
+                    var frameWidth = width;
+                    var frameHeight = height;
+                    var destinationBuffer = bgra;
+                    Parallel.For(0, frameHeight, ConversionParallelism, sourceRow =>
+                    {
+                        var destinationRow = topOrigin ? sourceRow : frameHeight - 1 - sourceRow;
+                        var sourceOffset = sourceRow * srcStride;
+                        var destinationOffset = destinationRow * dstStride;
+                        for (var x = 0; x < frameWidth; x++)
+                        {
+                            var sourcePixel = sourceOffset + x * 3;
+                            var destinationPixel = destinationOffset + x * 4;
+                            destinationBuffer[destinationPixel] = sourceBuffer[sourcePixel];
+                            destinationBuffer[destinationPixel + 1] = sourceBuffer[sourcePixel + 1];
+                            destinationBuffer[destinationPixel + 2] = sourceBuffer[sourcePixel + 2];
+                            destinationBuffer[destinationPixel + 3] = 255;
+                        }
+                    });
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(sourceBuffer);
                 }
             }
 

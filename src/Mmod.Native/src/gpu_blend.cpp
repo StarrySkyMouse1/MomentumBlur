@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -62,8 +63,10 @@ void main(uint3 id : SV_DispatchThreadID) {
 }
 )";
 
-/* All processing shaders operate on float RGB in 0..255 space, matching the
-   CPU fallback in frame_processing.cpp. p0..p3 map to the descriptor p0..p3. */
+/* GPU accumulation stores normalized float RGB in 0..1 space. Thresholds in
+   the public effect descriptors are normalized too. The CPU fallback stores
+   0..255 floats and normalizes its measured deltas explicitly, so both paths
+   retain identical parameter semantics. p0..p3 map to descriptor p0..p3. */
 
 static const char* kMotionAdaptiveCs = R"(
 Texture2D<float4> Cur : register(t0);
@@ -85,7 +88,7 @@ void main(uint3 id : SV_DispatchThreadID) {
   float3 cur = Cur.Load(int3(p, 0)).rgb;
   float3 prev = Prev.Load(int3(p, 0)).rgb;
 
-  float motion = abs(Luma(cur) - Luma(prev)) / 255.0;
+  float motion = abs(Luma(cur) - Luma(prev));
   float th = max(P.y, 0.001);
   float mask = smoothstep(th, th * 2.5, motion);
 
@@ -97,7 +100,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 
   float gx = abs(Luma(LoadC(Cur, p + int2(1, 0), w, h)) - Luma(LoadC(Cur, p + int2(-1, 0), w, h)));
   float gy = abs(Luma(LoadC(Cur, p + int2(0, 1), w, h)) - Luma(LoadC(Cur, p + int2(0, -1), w, h)));
-  float edge = sqrt(gx * gx + gy * gy) / 255.0;
+  float edge = sqrt(gx * gx + gy * gy);
   float edge_mask = saturate(edge / 0.6);
   float protect = 1.0 - edge_mask * P.z;
 
@@ -153,7 +156,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       acc += LoadC(Cur, p + int2(dx, dy), w, h);
   float3 mean = acc / 25.0;
   float3 cur = Cur.Load(int3(p, 0)).rgb;
-  float diff = max(max(abs(cur.r - mean.r), abs(cur.g - mean.g)), abs(cur.b - mean.b)) / 255.0;
+  float diff = max(max(abs(cur.r - mean.r), abs(cur.g - mean.g)), abs(cur.b - mean.b));
   float th = max(P.y, 0.001);
   float flat = 1.0 - smoothstep(th, th * 3.0, diff);
   Out[id.xy] = float4(lerp(cur, mean, P.x * flat), 1.0);
@@ -180,7 +183,7 @@ void main(uint3 id : SV_DispatchThreadID) {
   float3 cur = Cur.Load(int3(p, 0)).rgb;
   float3 prev = Prev.Load(int3(p, 0)).rgb;
 
-  float diff = max(max(abs(cur.r - prev.r), abs(cur.g - prev.g)), abs(cur.b - prev.b)) / 255.0;
+  float diff = max(max(abs(cur.r - prev.r), abs(cur.g - prev.g)), abs(cur.b - prev.b));
   float th = max(P.y, 0.001);
   float k = 1.0 - smoothstep(th * 0.5, th * 2.0, diff);
 
@@ -189,7 +192,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     for (int dx = -1; dx <= 1; ++dx)
       acc += LoadC(Cur, p + int2(dx, dy), w, h);
   float3 blur = acc / 9.0;
-  float hf = abs(Luma(cur) - Luma(blur)) / 255.0;
+  float hf = abs(Luma(cur) - Luma(blur));
   float hf_mask = smoothstep(0.02, 0.10, hf);
 
   Out[id.xy] = float4(lerp(cur, prev, P.x * k * hf_mask), 1.0);
@@ -216,12 +219,15 @@ int EffectStage(int32_t effect_type) {
 } // namespace
 
 struct GpuBlendContext {
+  static constexpr size_t kUploadSlotCount = 3;
+
   int width = 0;
   int height = 0;
   ComPtr<ID3D11Device> device;
   ComPtr<ID3D11DeviceContext> context;
   ComPtr<ID3D11Texture2D> input_tex;
-  ComPtr<ID3D11Texture2D> input_staging;
+  std::array<ComPtr<ID3D11Texture2D>, kUploadSlotCount> input_staging;
+  size_t next_upload_slot = 0;
   ComPtr<ID3D11ShaderResourceView> input_srv;
   ComPtr<ID3D11Texture2D> acc_tex;
   ComPtr<ID3D11UnorderedAccessView> acc_uav;
@@ -321,7 +327,12 @@ GpuBlendContext* GpuBlendCreate(int width, int height, int /*blend_frames*/) {
   td.Usage = D3D11_USAGE_STAGING;
   td.BindFlags = 0;
   td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-  ctx->device->CreateTexture2D(&td, nullptr, &ctx->input_staging);
+  for (auto& staging : ctx->input_staging) {
+    if (FAILED(ctx->device->CreateTexture2D(&td, nullptr, &staging))) {
+      delete ctx;
+      return nullptr;
+    }
+  }
 
   // Accumulator float4
   td.Usage = D3D11_USAGE_DEFAULT;
@@ -376,8 +387,14 @@ bool GpuBlendResetWindow(GpuBlendContext* ctx) {
 bool GpuBlendAccumulate(GpuBlendContext* ctx, const uint8_t* bgra, int stride, float weight) {
   if (!ctx || !bgra) return false;
 
+  // Rotate through several CPU-writable upload textures. D3D11 Map still
+  // provides the synchronization guarantee before a slot is reused, while the
+  // extra slots let CPU preparation overlap CopyResource/Dispatch work already
+  // queued on the immediate context. Command issue remains strictly ordered.
+  auto& upload = ctx->input_staging[ctx->next_upload_slot];
+  ctx->next_upload_slot = (ctx->next_upload_slot + 1) % GpuBlendContext::kUploadSlotCount;
   D3D11_MAPPED_SUBRESOURCE mapped{};
-  if (FAILED(ctx->context->Map(ctx->input_staging.Get(), 0, D3D11_MAP_WRITE, 0, &mapped)))
+  if (FAILED(ctx->context->Map(upload.Get(), 0, D3D11_MAP_WRITE, 0, &mapped)))
     return false;
 
   for (int y = 0; y < ctx->height; ++y) {
@@ -391,8 +408,8 @@ bool GpuBlendAccumulate(GpuBlendContext* ctx, const uint8_t* bgra, int stride, f
                (static_cast<uint32_t>(src[i + 3]) << 24);
     }
   }
-  ctx->context->Unmap(ctx->input_staging.Get(), 0);
-  ctx->context->CopyResource(ctx->input_tex.Get(), ctx->input_staging.Get());
+  ctx->context->Unmap(upload.Get(), 0);
+  ctx->context->CopyResource(ctx->input_tex.Get(), upload.Get());
 
   D3D11_MAPPED_SUBRESOURCE cbmap{};
   if (SUCCEEDED(ctx->context->Map(ctx->weight_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &cbmap))) {

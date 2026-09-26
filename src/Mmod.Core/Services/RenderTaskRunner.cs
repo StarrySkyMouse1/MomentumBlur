@@ -283,10 +283,14 @@ public sealed class RenderTaskRunner : IAsyncDisposable
             if (!File.Exists(clip) || new FileInfo(clip).Length == 0)
                 throw new InvalidDataException("节点没有生成有效 MP4 文件。");
 
+            var finishedAt = DateTimeOffset.UtcNow;
             node = node with
             {
                 Status = RenderNodeStatus.Completed,
-                FinishedAt = DateTimeOffset.UtcNow,
+                FinishedAt = finishedAt,
+                ElapsedSeconds = node.StartedAt is { } startedAt
+                    ? Math.Max(0, (finishedAt - startedAt).TotalSeconds)
+                    : node.ElapsedSeconds,
                 ClipPath = clip,
                 LastError = null,
             };
@@ -484,6 +488,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
         ShutterAngle = s.ShutterAngle,
         IntermediateTargetBitrate = s.TargetBitrate,
         DiskSafetyFreePercent = DiskSafetyPolicy.NormalizeSafetyPercent(s.DiskSafetyFreePercent),
+        ForegroundCaptureFpsLimit = SettingsMigration.NormalizeForegroundCaptureFpsLimit(s.ForegroundCaptureFpsLimit),
         VideoProcessing = s.VideoProcessing?.Clone(),
     };
 

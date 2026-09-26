@@ -23,6 +23,7 @@ public sealed class VisualPlaybackEvidenceProbe : IPlaybackEvidenceProbe
     private int _gridWidth;
     private int _gridHeight;
     private int _consecutive;
+    private bool _playbackStarted;
 
     public VisualPlaybackEvidenceProbe(RecordingTimeoutPolicy policy)
     {
@@ -49,7 +50,7 @@ public sealed class VisualPlaybackEvidenceProbe : IPlaybackEvidenceProbe
         get
         {
             lock (_stateLock)
-                return _consecutive >= _requiredConsecutive;
+                return _playbackStarted;
         }
     }
 
@@ -60,6 +61,7 @@ public sealed class VisualPlaybackEvidenceProbe : IPlaybackEvidenceProbe
         {
             _previousBlocks = null;
             _consecutive = 0;
+            _playbackStarted = false;
             _gridWidth = 0;
             _gridHeight = 0;
         }
@@ -111,8 +113,29 @@ public sealed class VisualPlaybackEvidenceProbe : IPlaybackEvidenceProbe
             var meanDelta = total == 0 ? 0 : sumDelta / total;
             var significant = ratio >= _ratioThreshold && meanDelta >= _meanDeltaThreshold;
 
-            _consecutive = significant ? Math.Min(_consecutive + 1, _maxHistory) : 0;
-            _previousBlocks = current;
+            if (!_playbackStarted)
+            {
+                // At high supersampling rates (for example 60x / 3600 fps),
+                // adjacent replay frames move only a tiny amount and can stay
+                // below the evidence thresholds forever. Keep the pre-replay
+                // frame as a fixed baseline until motion has accumulated enough
+                // to clear the existing ratio + luma gates for N consecutive
+                // samples. This still rejects HUD-only changes and one-frame
+                // noise, without making the thresholds depend on N.
+                _consecutive = significant ? Math.Min(_consecutive + 1, _maxHistory) : 0;
+                if (_consecutive >= _requiredConsecutive)
+                {
+                    _playbackStarted = true;
+                    _previousBlocks = current;
+                }
+            }
+            else
+            {
+                // After playback is positively established, compare adjacent
+                // frames again. The recorder uses these samples to locate the
+                // last real visual change and prove the 1-second static tail.
+                _previousBlocks = current;
+            }
 
             return new PlaybackEvidenceSample(ratio, meanDelta, significant, changed, total);
         }
@@ -124,6 +147,7 @@ public sealed class VisualPlaybackEvidenceProbe : IPlaybackEvidenceProbe
         _gridHeight = (height + _blockSize - 1) / _blockSize;
         _previousBlocks = ComputeBlockLuma(bgra, width, height);
         _consecutive = 0;
+        _playbackStarted = false;
     }
 
     /// <summary>

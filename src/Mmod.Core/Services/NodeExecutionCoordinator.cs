@@ -43,8 +43,10 @@ public sealed class NodeExecutionFailedException : Exception
 public sealed class NodeExecutionCoordinator
 {
     private ICapturePipeline? _activePipeline;
+    private string? _privateLobbyGameSessionId;
     private string? _readyGameSessionId;
     private string? _readyMap;
+    private string? _readyNodeId;
     private bool _forceMapReload;
 
     public async Task<string> ExecuteNodeAsync(NodeExecutionContext ctx, CancellationToken token)
@@ -53,6 +55,15 @@ public sealed class NodeExecutionCoordinator
         var nodeId = ctx.Node.Id;
         var nodeDir = Path.Combine(ctx.WorkDirectory, $"node_{ctx.Node.Sequence + 1:D3}");
         Directory.CreateDirectory(nodeDir);
+
+        // A DiskPressure controlled stop may have produced a fully complete,
+        // media-validated clip before the older completion classifier rejected
+        // it. Re-check retained Validated partials before spending another full
+        // replay pass. The source partial remains untouched as recovery evidence;
+        // only a verified copy is atomically promoted to the node clip.
+        var recoveredClip = TryRecoverCompleteValidatedPartial(ctx, nodeDir);
+        if (recoveredClip is not null)
+            return recoveredClip;
 
         // attempt_number is an audit sequence across the lifetime of the node,
         // while MaxAttempts is the budget for this explicit execution/resume.
@@ -140,6 +151,14 @@ public sealed class NodeExecutionCoordinator
             {
                 lastKind = RecordingFailureClassifier.Classify(ex);
                 lastError = ex.Message;
+                ctx.Log(
+                    "Error",
+                    BuildAttemptFailureDiagnostics(
+                        attempt,
+                        lastKind.Value,
+                        tempClip,
+                        partialClip,
+                        ex));
 
                 // M4: DiskPressure with a proven controlled stop → validate the
                 // partial, commit it atomically to the independent partial path,
@@ -246,21 +265,40 @@ public sealed class NodeExecutionCoordinator
         if (!ctx.Game.NetCon.IsConnected)
             throw new RecordingStageException(RecordingFailureKind.NetConLost, "NetCon 未连接。");
 
-        // Positive map readiness. Map loading is a session transition, not a
-        // per-node ritual: consecutive nodes on the same map reuse the proven
-        // ready session. A changed/restarted session or an explicit ReloadMap
-        // retry invalidates that proof and performs a real map transition.
         var gameSessionChanged = !string.Equals(
             _readyGameSessionId,
             ctx.Game.GameSessionId,
             StringComparison.Ordinal);
+
+        // Initialize one invite-only lobby per game process session. Repeating
+        // this for every node needlessly destroys/recreates the same lobby and
+        // may race the next replay command.
+        if (!string.Equals(_privateLobbyGameSessionId, ctx.Game.GameSessionId, StringComparison.Ordinal))
+        {
+            await MomentumReplaySession.EnsurePrivateSoloLobbyAsync(
+                ctx.Game.NetCon,
+                l => ctx.Log("Info", l),
+                token);
+            _privateLobbyGameSessionId = ctx.Game.GameSessionId;
+        }
+        else
+        {
+            ctx.Log("Info", "PrivateSoloLobbyReuse：复用当前游戏会话的私人单人大厅。");
+        }
+
+        // A new node must reload the map even when it belongs to the same
+        // staged task. Momentum can leave the previous TV replay at its end
+        // state; a subsequent mom_tv_replay_watch may be acknowledged without
+        // actually restarting playback. Reuse is therefore limited to the
+        // same node/attempt context only.
         var mapChanged = !string.Equals(_readyMap, ctx.Task.MapName, StringComparison.OrdinalIgnoreCase);
+        var nodeChanged = !string.Equals(_readyNodeId, ctx.Node.Id, StringComparison.Ordinal);
         // Keep the persisted state-machine path explicit even when the gate
         // reuses an already-proven map; these stages mean "resolve/confirm map
         // readiness", not necessarily "always issue a map command".
         setStage(NodeExecutionStage.ChangingMap);
         setStage(NodeExecutionStage.WaitingMapReady);
-        if (gameSessionChanged || mapChanged || _forceMapReload)
+        if (gameSessionChanged || mapChanged || nodeChanged || _forceMapReload)
         {
             try
             {
@@ -281,6 +319,7 @@ public sealed class NodeExecutionCoordinator
 
             _readyGameSessionId = ctx.Game.GameSessionId;
             _readyMap = ctx.Task.MapName;
+            _readyNodeId = ctx.Node.Id;
             _forceMapReload = false;
             ctx.Log("Info", $"MapReady：{ctx.Task.MapName}");
         }
@@ -293,20 +332,29 @@ public sealed class NodeExecutionCoordinator
         var user = RenderTaskRunner.ToUserSettingsForAttempt(ctx.Settings);
         var relative = MomentumReplaySession.BuildGameRelativeReplayPath(ctx.Settings.GameRootPath, ctx.Node.ReplayPath);
 
-        // Supersampling: the game must render at N×60 fps so N input frames span
-        // exactly 1/60s of game time per output frame. Without this the replay
-        // plays at its default rate, so the intended blend/temporal supersampling
-        // cannot be achieved (same step as the verify flow and the generated CFG).
         var hostFps = Math.Max(1, user.SupersamplingMultiplier) * ProjectConstants.FinalOutputFramerate;
-        ctx.Log("Info", $"配置 host_framerate {hostFps}（超采样 {user.SupersamplingMultiplier}x → 成片 {ProjectConstants.FinalOutputFramerate}fps）");
-        await ctx.Game.NetCon.ExecuteAsync($"sv_cheats 1; host_framerate {hostFps}", TimeSpan.FromSeconds(30), token);
-
         var pipeline = new TgaPipelineOrchestrator(timeouts);
         pipeline.Changed += () => ctx.OnNodeStatusChanged?.Invoke(ctx.Node);
         var health = new GameSessionHealthMonitor(ctx.Game as MomentumProcessController ?? throw new InvalidOperationException("需要 MomentumProcessController 健康监控"), ctx.Settings.WatchDirectory);
+        var captureEnvironment = new CaptureConVarScope(ctx.Game.NetCon, ctx.Log);
 
         try
         {
+            var foregroundFpsLimit = SettingsMigration.NormalizeForegroundCaptureFpsLimit(user.ForegroundCaptureFpsLimit);
+            await captureEnvironment.ApplyAsync(
+                hostFps,
+                foregroundFpsLimit == 0 ? null : foregroundFpsLimit,
+                token);
+            ctx.Log("Info", $"录制环境已应用：超采样 {user.SupersamplingMultiplier}x → host_framerate {hostFps} → 成片 {ProjectConstants.FinalOutputFramerate}fps");
+
+            ctx.Log("Info", ctx.Settings.HideHud
+                ? "录制 HUD：隐藏（cl_drawhud 0，包含顶部回放控制条）"
+                : "录制 HUD：显示（cl_drawhud 1）");
+            await ctx.Game.NetCon.ExecuteAsync(
+                ctx.Settings.HideHud ? "cl_drawhud 0" : "cl_drawhud 1",
+                TimeSpan.FromSeconds(10),
+                token);
+
             setStage(NodeExecutionStage.PreparingCaptureBaseline);
             await pipeline.StartAsync(user, tempClip, captureSession, acceptPreSessionFiles: false);
             _activePipeline = pipeline;
@@ -347,6 +395,19 @@ public sealed class NodeExecutionCoordinator
                     $"时长不符：clip={probe.DurationSeconds:0.###}s 期望≈{expectedDuration:0.###}s（输出帧 {result.ProducedFrames}）");
             }
 
+            // The replay metadata is an independent lower-bound proof. A
+            // visually static/stale replay state can otherwise satisfy the
+            // internal frame-count check with a tiny but self-consistent clip.
+            var minimumReplayDuration = Math.Max(0.5, ctx.Replay.RunTimeSeconds * 0.8);
+            if (probe.DurationSeconds < minimumReplayDuration)
+            {
+                _forceMapReload = true;
+                throw new RecordingStageException(
+                    RecordingFailureKind.MediaValidationFault,
+                    $"阶段成片明显不完整：clip={probe.DurationSeconds:0.###}s，" +
+                    $"回放元数据={ctx.Replay.RunTimeSeconds:0.###}s，最低要求={minimumReplayDuration:0.###}s。");
+            }
+
             attempt = attempt with
             {
                 FedCount = result.SubmittedFrames,
@@ -364,7 +425,32 @@ public sealed class NodeExecutionCoordinator
         finally
         {
             _activePipeline = null;
-            await pipeline.DisposeAsync();
+            ctx.Log("Info", pipeline.MotionDiagnosticsSummary);
+            try
+            {
+                await pipeline.DisposeAsync();
+            }
+            finally
+            {
+                // Environment restoration must run even if pipeline disposal
+                // surfaces a late encoder/cleanup failure.
+                await captureEnvironment.RestoreAsync();
+            }
+            if (ctx.Settings.HideHud && ctx.Game.NetCon.IsConnected)
+            {
+                try
+                {
+                    using var restoreCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    await ctx.Game.NetCon.ExecuteAsync("cl_drawhud 1", TimeSpan.FromSeconds(10), restoreCts.Token);
+                    ctx.Log("Info", "录制 HUD：已恢复显示（cl_drawhud 1）");
+                }
+                catch (Exception ex)
+                {
+                    // Restoring an attached user's display is best effort and
+                    // must not replace the primary recording result/failure.
+                    ctx.Log("Warning", $"录制结束后恢复 HUD 失败：{ex.Message}");
+                }
+            }
         }
     }
 
@@ -455,6 +541,111 @@ public sealed class NodeExecutionCoordinator
             }
             throw;
         }
+    }
+
+    private static string? TryRecoverCompleteValidatedPartial(
+        NodeExecutionContext ctx,
+        string nodeDirectory)
+    {
+        var attempts = ctx.Repository
+            .GetAttemptsForNode(ctx.Task.Id, ctx.Node.Id)
+            .Where(static attempt => attempt.PartialState == PartialState.Validated)
+            .OrderByDescending(static attempt => attempt.AttemptNumber)
+            .ToArray();
+        if (attempts.Length == 0)
+            return null;
+
+        var minimumDuration = Math.Max(0.5, ctx.Replay.RunTimeSeconds);
+        var maximumDuration =
+            Math.Max(0.1, ctx.Replay.RunTimeSeconds) +
+            CaptureEnvelopeRecorder.PreSafetySeconds +
+            CaptureEnvelopeRecorder.TailSafetySeconds;
+
+        foreach (var attempt in attempts)
+        {
+            var partialPath = attempt.PartialPath;
+            if (string.IsNullOrWhiteSpace(partialPath) || !File.Exists(partialPath))
+            {
+                ctx.Log(
+                    "Warning",
+                    $"PartialRecoveryRejected：Attempt={attempt.AttemptNumber} 原因=文件不存在 " +
+                    $"Path={partialPath ?? "-"} PersistedFrames={attempt.PartialOutputFrames?.ToString() ?? "-"}。");
+                continue;
+            }
+
+            var probe = ctx.MediaProbe.Probe(partialPath, expectedFps: ProjectConstants.FinalOutputFramerate);
+            var persistedFramesMatch =
+                attempt.PartialOutputFrames is null ||
+                attempt.PartialOutputFrames.Value == probe.FrameCount;
+            var durationComplete =
+                probe.DurationSeconds >= minimumDuration &&
+                probe.DurationSeconds <= maximumDuration;
+
+            ctx.Log(
+                "Info",
+                $"PartialRecoveryEvidence：Attempt={attempt.AttemptNumber} State={attempt.PartialState} " +
+                $"Path={partialPath} Valid={probe.IsValid} Size={probe.Width}x{probe.Height} " +
+                $"Fps={probe.Fps:0.###} Frames={probe.FrameCount} " +
+                $"PersistedFrames={attempt.PartialOutputFrames?.ToString() ?? "-"} " +
+                $"Duration={probe.DurationSeconds:0.###}s " +
+                $"Envelope=[{minimumDuration:0.###},{maximumDuration:0.###}]s " +
+                $"FramesMatch={persistedFramesMatch} DurationComplete={durationComplete} " +
+                $"ProbeError={probe.Error ?? "-"}.");
+
+            if (!probe.IsValid || !persistedFramesMatch || !durationComplete)
+            {
+                ctx.Log(
+                    "Warning",
+                    $"PartialRecoveryRejected：Attempt={attempt.AttemptNumber} " +
+                    $"原因={(probe.IsValid ? "完整性证据不足" : "媒体校验失败")}。");
+                continue;
+            }
+
+            var recoveryTemp = Path.Combine(
+                nodeDirectory,
+                $"recovery_{attempt.AttemptNumber}_{Guid.NewGuid():N}.encoding.mp4");
+            try
+            {
+                File.Copy(partialPath, recoveryTemp, overwrite: false);
+                AtomicFileCommitter.Commit(recoveryTemp, ctx.StableClipPath);
+                ctx.Log(
+                    "Warning",
+                    $"PartialRecoveryCommitted：Attempt={attempt.AttemptNumber} 已验证完整并恢复为正式阶段文件；" +
+                    $"Source={partialPath} Destination={ctx.StableClipPath} Frames={probe.FrameCount} " +
+                    $"Duration={probe.DurationSeconds:0.###}s。原 partial 保留用于审计。");
+                return ctx.StableClipPath;
+            }
+            catch (Exception ex)
+            {
+                TryDelete(recoveryTemp);
+                ctx.Log(
+                    "Error",
+                    $"PartialRecoveryCommitFailed：Attempt={attempt.AttemptNumber} " +
+                    $"Source={partialPath} Destination={ctx.StableClipPath} " +
+                    $"Exception={ex.GetType().FullName}: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+
+        return null;
+    }
+
+    private static string BuildAttemptFailureDiagnostics(
+        RenderAttemptRecord attempt,
+        RecordingFailureKind failureKind,
+        string tempClip,
+        string partialClip,
+        Exception exception)
+    {
+        var chain = new List<string>();
+        for (var current = exception; current is not null; current = current.InnerException)
+            chain.Add($"{current.GetType().FullName}: {current.Message}");
+
+        return
+            $"AttemptFailureDiagnostics：Attempt={attempt.AttemptNumber} AttemptId={attempt.Id} " +
+            $"Session={attempt.SessionId} Stage={attempt.Stage} Kind={failureKind} " +
+            $"Prefix={attempt.SequencePrefix} Temp={tempClip} Partial={partialClip}\n" +
+            $"ExceptionChain={string.Join(" -> ", chain)}\n" +
+            $"StackTrace={exception.StackTrace ?? "-"}";
     }
 
     private async Task CleanupAndRecordFailureAsync(

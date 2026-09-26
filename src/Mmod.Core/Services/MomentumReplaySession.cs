@@ -1,4 +1,6 @@
 using System.Text;
+using System.Globalization;
+using System.Text.RegularExpressions;
 using Mmod.Core.Models;
 
 namespace Mmod.Core.Services;
@@ -26,11 +28,70 @@ public static class MomentumReplaySession
     {
         var replay = Quote(gameRelativeReplayPath);
         var sb = new StringBuilder();
+        sb.AppendLine("mom_lobby_leave");
+        sb.AppendLine("mom_lobby_type 0");
+        sb.AppendLine("mom_lobby_create");
         sb.AppendLine($"map {Quote(mapName)}");
         sb.AppendLine("startmovie frame tga");
         sb.AppendLine($"mom_tv_replay_watch {replay}");
         sb.AppendLine("endmovie");
         return sb.ToString().TrimEnd();
+    }
+
+    /// <summary>
+    /// Leaves any inherited lobby, then creates an invite-only Steam lobby for
+    /// this game session. This preserves the signed-in Steam identity/avatar
+    /// while preventing public lobby players and chat from entering capture.
+    /// </summary>
+    public static async Task EnsurePrivateSoloLobbyAsync(
+        INetConClient netCon,
+        Action<string>? log,
+        CancellationToken token)
+    {
+        log?.Invoke("PrivateSoloLobby：离开当前大厅…");
+        await netCon.ExecuteAsync("mom_lobby_leave", TimeSpan.FromSeconds(10), token);
+        log?.Invoke("PrivateSoloLobby：设置为仅邀请并创建私人大厅…");
+        await netCon.ExecuteAsync("mom_lobby_type 0", TimeSpan.FromSeconds(10), token);
+        await netCon.ExecuteAsync("mom_lobby_create", TimeSpan.FromSeconds(10), token);
+        log?.Invoke("PrivateSoloLobby：私人单人大厅已初始化（保留 Steam 登录）");
+    }
+
+    /// <summary>
+    /// Reads a numeric Source convar value from the console transcript returned
+    /// by a strict query. Source branches vary between quoted and plain output,
+    /// so accept both forms but require the requested convar name on the line.
+    /// </summary>
+    public static bool TryReadNumericConVar(
+        NetConCommandResult result,
+        string conVarName,
+        out double value)
+    {
+        value = 0;
+        var escapedName = Regex.Escape(conVarName);
+        var patterns = new[]
+        {
+            $"\\\"?{escapedName}\\\"?\\s*=\\s*\\\"?(?<value>[-+]?[0-9]+(?:\\.[0-9]+)?)",
+            $"\\b{escapedName}\\b\\s*:\\s*\\\"?(?<value>[-+]?[0-9]+(?:\\.[0-9]+)?)",
+        };
+
+        foreach (var line in result.CapturedConsoleLines)
+        {
+            foreach (var pattern in patterns)
+            {
+                var match = Regex.Match(line, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                if (match.Success &&
+                    double.TryParse(
+                        match.Groups["value"].Value,
+                        NumberStyles.Float,
+                        CultureInfo.InvariantCulture,
+                        out value))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

@@ -19,9 +19,10 @@ public static class SettingsMigration
         settings.SupersamplingMultiplier = Math.Clamp(settings.SupersamplingMultiplier, 1, 64);
         settings.Exposure = Math.Clamp(settings.Exposure, 0.05, 1.0);
         settings.ShutterAngle = Math.Clamp(settings.ShutterAngle, 180.0, 360.0);
-        settings.IntermediateTargetBitrate = Math.Clamp(settings.IntermediateTargetBitrate, 0, 120_000_000);
+        settings.IntermediateTargetBitrate = NormalizeTargetBitrate(settings.IntermediateTargetBitrate);
         settings.ObsCaptureFramerate = ProjectConstants.NormalizeObsCaptureFramerate(settings.ObsCaptureFramerate);
         settings.DiskSafetyFreePercent = DiskSafetyPolicy.NormalizeSafetyPercent(settings.DiskSafetyFreePercent);
+        settings.ForegroundCaptureFpsLimit = NormalizeForegroundCaptureFpsLimit(settings.ForegroundCaptureFpsLimit);
     }
 
     /// <summary>
@@ -39,11 +40,31 @@ public static class SettingsMigration
             SupersamplingMultiplier = Math.Clamp(snapshot.SupersamplingMultiplier, 1, 64),
             Exposure = Math.Clamp(snapshot.Exposure, 0.05, 1.0),
             ShutterAngle = Math.Clamp(snapshot.ShutterAngle, 180.0, 360.0),
-            TargetBitrate = Math.Clamp(snapshot.TargetBitrate, 0, 120_000_000),
+            TargetBitrate = NormalizeTargetBitrate(snapshot.TargetBitrate),
             DiskSafetyFreePercent = DiskSafetyPolicy.NormalizeSafetyPercent(snapshot.DiskSafetyFreePercent),
+            ForegroundCaptureFpsLimit = NormalizeForegroundCaptureFpsLimit(snapshot.ForegroundCaptureFpsLimit),
             VideoProcessing = processing,
         };
     }
 
     public static double NormalizeShutterAngle(double angle) => Math.Clamp(angle, 180.0, 360.0);
+
+    public static int NormalizeForegroundCaptureFpsLimit(int value) =>
+        Math.Clamp(value, 0, ProjectConstants.MaxForegroundCaptureFpsLimit);
+
+    /// <summary>
+    /// Bitrate is persisted as bits per second. A short-lived UI version exposed
+    /// the raw field while users reasonably entered Mbps values such as 100,
+    /// producing a 100 bps snapshot that Native later clamped to only 1 Mbps.
+    /// Values 1..120 cannot be useful raw bitrates, so migrate them as Mbps.
+    /// Other positive sub-1-Mbps values are raised to the encoder's real floor.
+    /// </summary>
+    public static int NormalizeTargetBitrate(int value)
+    {
+        if (value <= 0)
+            return 0;
+        if (value <= 120)
+            return value * 1_000_000;
+        return Math.Clamp(value, 1_000_000, 120_000_000);
+    }
 }

@@ -424,7 +424,10 @@ public sealed record PerformanceSnapshot(
     double? CatchUpSeconds,
     ProcessingBackend QualityBackend,
     EncoderBackend EncoderBackend,
-    DateTimeOffset SampledAt)
+    DateTimeOffset SampledAt,
+    long ProducedFrames = 0,
+    long ConsumedFrames = 0,
+    long OutputFrames = 0)
 {
     /// <summary>Empty snapshot before any real observation exists.</summary>
     public static PerformanceSnapshot Empty { get; } = new(

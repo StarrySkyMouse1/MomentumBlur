@@ -24,6 +24,8 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
     private readonly string _sequencePrefix;
     private readonly int _pollIntervalMs;
     private readonly ConcurrentDictionary<int, string> _pending = new();
+    private readonly Dictionary<int, long> _pendingFileBytes = [];
+    private readonly SortedSet<int> _pendingIndices = [];
     private readonly ConcurrentDictionary<int, CandidateFile> _candidates = new();
     private readonly HashSet<int> _acceptedIndices = [];
     private readonly object _acceptedLock = new();
@@ -223,7 +225,7 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
         {
             if (_pending.TryRemove(frameIndex, out filePath!))
             {
-                OnPendingRemoved();
+                OnPendingRemoved(frameIndex);
                 removed = true;
             }
         }
@@ -238,13 +240,33 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
         return false;
     }
 
+    /// <summary>
+    /// Returns the path of a stable pending frame without transferring its
+    /// ownership. The ordered pipeline uses this only for bounded speculative
+    /// decoding; disk/backlog accounting continues to include the file until
+    /// <see cref="TryTake"/> commits it for Native submission.
+    /// </summary>
+    public bool TryGetPendingPath(int frameIndex, out string filePath)
+    {
+        lock (_backlogLock)
+        {
+            return _pending.TryGetValue(frameIndex, out filePath!);
+        }
+    }
+
     public bool TryGetMinPendingFrameIndex(out int frameIndex)
     {
-        frameIndex = -1;
-        if (_pending.IsEmpty)
-            return false;
-        frameIndex = _pending.Keys.Min();
-        return true;
+        lock (_backlogLock)
+        {
+            if (_pendingIndices.Count == 0)
+            {
+                frameIndex = -1;
+                return false;
+            }
+
+            frameIndex = _pendingIndices.Min;
+            return true;
+        }
     }
 
     public void ForceFullScan() => ScanDirectory();
@@ -351,7 +373,7 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
                 _hasReadFailure = true; // telemetry only
                 if (_pending.TryRemove(index, out _))
                 {
-                    OnPendingRemoved();
+                    OnPendingRemoved(index);
                     removed = true;
                 }
             }
@@ -457,7 +479,7 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
                         _lastAcceptedFrameIndex = index;
                         _lastStableFrameUtc = DateTime.UtcNow;
                         _producedCount++;
-                        OnPendingAdded(candidate.Path);
+                        OnPendingAdded(index, candidate.Path);
                         accepted = true;
                     }
                 }
@@ -514,7 +536,7 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
         }
     }
 
-    private void OnPendingAdded(string path)
+    private void OnPendingAdded(int index, string path)
     {
         var length = TryGetFileLength(path);
         if (length < 0)
@@ -523,6 +545,8 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
             length = 0;
         }
 
+        _pendingIndices.Add(index);
+        _pendingFileBytes[index] = length;
         _pendingBytes += length;
         if (_pendingBytes > _peakPendingBytes)
             _peakPendingBytes = _pendingBytes;
@@ -531,28 +555,27 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
             _peakPendingFrames = frames;
     }
 
-    /// <summary>Recomputes pending bytes from live file lengths (file-level, long).</summary>
-    private void OnPendingRemoved()
+    /// <summary>
+    /// Removes one accepted frame from the backlog counters in O(log n).
+    /// The previous implementation re-read every remaining file and searched
+    /// every pending key for each consumed frame, making a large backlog
+    /// quadratic and starving the consumer precisely when it needed to catch up.
+    /// Accepted TGA files are already complete/stable, so their recorded size is
+    /// immutable and can be subtracted directly.
+    /// </summary>
+    private void OnPendingRemoved(int index)
     {
-        long total = 0;
-        foreach (var path in _pending.Values)
+        _pendingIndices.Remove(index);
+        if (_pendingFileBytes.Remove(index, out var length))
         {
-            var length = TryGetFileLength(path);
-            if (length < 0)
-            {
-                _hasReadFailure = true;
-                length = 0;
-            }
-
-            total += length;
+            _pendingBytes = Math.Max(0, _pendingBytes - length);
         }
-
-        _pendingBytes = total;
-        if (_pendingBytes > _peakPendingBytes)
-            _peakPendingBytes = _pendingBytes;
-        var frames = (long)_pending.Count;
-        if (frames > _peakPendingFrames)
-            _peakPendingFrames = frames;
+        else
+        {
+            // Telemetry accounting degraded, but capture ownership remains
+            // correct because the authoritative pending entry was removed.
+            _hasReadFailure = true;
+        }
     }
 
     private void TrackCandidate(int index, string path)

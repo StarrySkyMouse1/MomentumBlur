@@ -4,6 +4,8 @@ public sealed class UserSettings
 {
     public CaptureMode CaptureMode { get; set; } = CaptureMode.Obs;
     public string VideoOutputDirectory { get; set; } = string.Empty;
+    public string LastQualityPreviewSlowMotionSourcePath { get; set; } = string.Empty;
+    public string LastQualityPreviewProcessedPath { get; set; } = string.Empty;
     public string RamDiskWatchDirectory { get; set; } = string.Empty;
     public string? RamDiskDriveLetter { get; set; } = "R:\\";
     public string? StartmoviePathPrefix { get; set; }
@@ -20,6 +22,13 @@ public sealed class UserSettings
 
     public int MaxParallelJobs { get; set; } = 2;
     public int PendingTgaWarningCount { get; set; } = 30;
+
+    /// <summary>
+    /// Wall-clock TGA generation limit applied through fps_max during automated
+    /// replay capture. 0 keeps the game's current fps_max; old settings default
+    /// to the historical 90 fps protection.
+    /// </summary>
+    public int ForegroundCaptureFpsLimit { get; set; } = ProjectConstants.DefaultForegroundCaptureFpsLimit;
 
     // ---- Disk safety (percentage contract, S1) ----
 

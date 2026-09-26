@@ -271,6 +271,9 @@
                                   ItemTemplate="{StaticResource ReplayRowTemplate}"
                                   ItemContainerStyle="{StaticResource AppReplayTreeItem}"
                                   Style="{StaticResource AppTreeView}"
+                                  ScrollViewer.CanContentScroll="True"
+                                  VirtualizingStackPanel.IsVirtualizing="True"
+                                  VirtualizingStackPanel.VirtualizationMode="Recycling"
                                   ScrollViewer.VerticalScrollBarVisibility="Auto"
                                   ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                                   Visibility="{Binding IsCatalogEmpty, Converter={StaticResource InverseBoolToVis}}"/>
@@ -503,6 +506,36 @@
                                     <ui:TextBlock Margin="0,2,0,0"
                                                   Style="{StaticResource AppCaptionMuted}"
                                                   Text="{Binding FrozenQualityText}"/>
+                                    <Grid Margin="0,10,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="120"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                            <ui:TextBlock Style="{StaticResource AppFieldLabel}"
+                                                          Margin="0"
+                                                          Text="前台 TGA 生成速率上限（fps）"/>
+                                            <ui:TextBlock Margin="0,3,12,0"
+                                                          Style="{StaticResource AppCaptionMuted}"
+                                                          Text="0 表示不覆盖；修改后保留已完成节点，从失败或待执行节点继续。"/>
+                                        </StackPanel>
+                                        <ui:NumberBox Grid.Column="1"
+                                                      Margin="0,0,8,0"
+                                                      VerticalAlignment="Center"
+                                                      Value="{Binding SelectedTaskForegroundCaptureFpsLimit, Mode=TwoWay}"
+                                                      ValueChanged="OnNumberBoxValueChanged"
+                                                      Minimum="0"
+                                                      Maximum="1000"
+                                                      SmallChange="10"
+                                                      SpinButtonPlacementMode="Hidden"
+                                                      IsEnabled="{Binding CanEditSelectedTaskForegroundCaptureFpsLimit}"/>
+                                        <ui:Button Grid.Column="2"
+                                                   VerticalAlignment="Center"
+                                                   Content="应用"
+                                                   IsEnabled="{Binding CanEditSelectedTaskForegroundCaptureFpsLimit}"
+                                                   Command="{Binding ApplySelectedTaskForegroundCaptureFpsLimitCommand}"/>
+                                    </Grid>
                                 </StackPanel>
                             </ui:Card>
 
@@ -534,6 +567,23 @@
         <!-- 运行遥测（常驻） -->
         <ui:Card Grid.Row="4" Padding="14,12,14,12">
             <StackPanel>
+                <ui:Card Margin="0,0,0,12"
+                         Padding="12,10,12,10"
+                         Background="{DynamicResource ControlFillColorSecondaryBrush}">
+                    <StackPanel>
+                        <ui:TextBlock Style="{StaticResource AppMetricLabel}" Text="当前任务 · 最终视频规格"/>
+                        <ui:TextBlock Margin="0,4,0,0"
+                                      Style="{StaticResource AppBodyText}"
+                                      Text="{Binding CurrentVideoSpecText}"
+                                      TextWrapping="Wrap"/>
+                        <ui:TextBlock Margin="0,3,0,0"
+                                      Style="{StaticResource AppCaptionMuted}"
+                                      Text="{Binding CurrentVideoSpecSubText}"
+                                      TextTrimming="CharacterEllipsis"
+                                      ToolTip="{Binding CurrentVideoSpecSubText}"/>
+                    </StackPanel>
+                </ui:Card>
+
                 <Grid Margin="0,0,0,10">
                     <ui:TextBlock HorizontalAlignment="Left"
                                   Style="{StaticResource AppCardTitle}"
@@ -544,7 +594,7 @@
                                   Text="UI 最高 4 Hz 合并 · 任务列表最多每秒刷新一次，避免反向影响捕获管线"/>
                 </Grid>
 
-                <UniformGrid Columns="4">
+                <UniformGrid Columns="5">
                     <ui:Card Margin="0,0,6,0" Padding="10,8,10,8">
                         <StackPanel>
                             <ui:TextBlock Style="{StaticResource AppMetricLabel}" Text="积压"/>
@@ -573,6 +623,13 @@
                             <ui:TextBlock Style="{StaticResource AppMetricLabel}" Text="监视盘剩余"/>
                             <ui:TextBlock Style="{StaticResource AppMetricNumber}" Text="{Binding DiskFreeText}"/>
                             <ui:TextBlock Style="{StaticResource AppMetricSub}" Text="{Binding DiskSubText}"/>
+                        </StackPanel>
+                    </ui:Card>
+                    <ui:Card Margin="6,0,0,0" Padding="10,8,10,8">
+                        <StackPanel>
+                            <ui:TextBlock Style="{StaticResource AppMetricLabel}" Text="预计剩余时间"/>
+                            <ui:TextBlock Style="{StaticResource AppMetricNumber}" Text="{Binding RemainingTimeText}"/>
+                            <ui:TextBlock Style="{StaticResource AppMetricSub}" Text="{Binding RemainingTimeSubText}"/>
                         </StackPanel>
                     </ui:Card>
                 </UniformGrid>

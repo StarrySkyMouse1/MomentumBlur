@@ -108,10 +108,9 @@ static void ClearAccumulator(MmodSession* session) {
   std::fill(session->accumulator.begin(), session->accumulator.end(), 0.0f);
 }
 
-static void AccumulateFrame(MmodSession* session, const uint8_t* bgra, int32_t stride, float weight) {
+static bool AccumulateFrame(MmodSession* session, const uint8_t* bgra, int32_t stride, float weight) {
   if (session->use_gpu && session->gpu) {
-    GpuBlendAccumulate(session->gpu, bgra, stride, weight);
-    return;
+    return GpuBlendAccumulate(session->gpu, bgra, stride, weight);
   }
   const int width = session->width;
   const int height = session->height;
@@ -125,6 +124,7 @@ static void AccumulateFrame(MmodSession* session, const uint8_t* bgra, int32_t s
       session->accumulator[pi + 2] += static_cast<float>(row[bi + 0]) * weight;
     }
   }
+  return true;
 }
 
 static void PackOutputBgra(MmodSession* session) {
@@ -203,6 +203,17 @@ static HRESULT ConfigureSinkWriter(MmodSession* session) {
   if (FAILED(hr)) return hr;
   hr = MFSetAttributeRatio(out_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
   if (FAILED(hr)) return hr;
+  // The game/TGA path supplies standard SDR sRGB-like pixels. Describe the
+  // encoded H.264 stream explicitly as Rec.709 limited-range video so players
+  // and editors do not have to guess the matrix, transfer curve or levels.
+  hr = out_type->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
+  if (FAILED(hr)) return hr;
+  hr = out_type->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
+  if (FAILED(hr)) return hr;
+  hr = out_type->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+  if (FAILED(hr)) return hr;
+  hr = out_type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
+  if (FAILED(hr)) return hr;
 
   hr = session->writer->AddStream(out_type.Get(), &session->writer_stream);
   if (FAILED(hr)) return hr;
@@ -223,6 +234,14 @@ static HRESULT ConfigureSinkWriter(MmodSession* session) {
   hr = MFSetAttributeRatio(in_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
   if (FAILED(hr)) return hr;
   hr = in_type->SetUINT32(MF_MT_DEFAULT_STRIDE, session->width * 4);
+  if (FAILED(hr)) return hr;
+  hr = in_type->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
+  if (FAILED(hr)) return hr;
+  hr = in_type->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
+  if (FAILED(hr)) return hr;
+  hr = in_type->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+  if (FAILED(hr)) return hr;
+  hr = in_type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_0_255);
   if (FAILED(hr)) return hr;
 
   hr = session->writer->SetInputMediaType(session->writer_stream, in_type.Get(), nullptr);
@@ -404,7 +423,9 @@ extern "C" MMOD_API int32_t mmod_session_submit_bgra(MmodSession* session, const
     ClearAccumulator(session);
   }
 
-  AccumulateFrame(session, bgra, stride, session->weights[static_cast<size_t>(index_in_window)]);
+  if (!AccumulateFrame(session, bgra, stride, session->weights[static_cast<size_t>(index_in_window)])) {
+    return MmodError_SubmitFailed;
+  }
   session->frames_submitted += 1;
 
   if ((session->frames_submitted % session->blend_frames) == 0) {

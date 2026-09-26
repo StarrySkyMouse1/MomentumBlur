@@ -10,6 +10,14 @@
     <Page.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
         <conv:BooleanToControlAppearanceConverter x:Key="SegmentAppearance"/>
+        <Style x:Key="PreviewReplayTreeItem"
+               TargetType="{x:Type TreeViewItem}"
+               BasedOn="{StaticResource DefaultTreeViewItemStyle}">
+            <Setter Property="Padding" Value="6,4,6,4"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="IsExpanded"
+                    Value="{Binding Header.IsExpanded, RelativeSource={RelativeSource Self}, Mode=TwoWay}"/>
+        </Style>
 
         <!-- 画质参数行：标签居左、数值居右；ui:Card 的模板会把内容撑满，行宽即容器宽 -->
         <DataTemplate x:Key="QualityParameterTemplate" DataType="{x:Type vm:QualityParameterViewModel}">
@@ -102,7 +110,241 @@
             且不造成索引位移）。SelectedIndex 绑定到 VM，切换模式时若停留在
             另一模式的专属页签，会被强制回到公共页签。
         -->
-        <ui:TabView Grid.Row="1"
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="5*" MinWidth="360"/>
+                <ColumnDefinition Width="8"/>
+                <ColumnDefinition Width="7*" MinWidth="520"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 常驻画质预览：独立于右侧设置页签，参数调整后可立即重新生成。 -->
+            <ui:Card Grid.Column="0" Margin="0,0,8,0" Padding="14">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Margin="0,0,0,12">
+                        <ui:TextBlock Style="{StaticResource AppCardTitle}" Text="画面预览"/>
+                        <ui:TextBlock Margin="0,5,0,0"
+                                      Style="{StaticResource AppCaptionMuted}"
+                                      TextWrapping="Wrap"
+                                      Text="先从 Momentum 回放生成固定 60× 慢放、60fps 的未合成底片；之后可反复应用右侧 N、快门与画质参数。"/>
+                    </StackPanel>
+
+                    <Border x:Name="QualityPreviewViewport"
+                            Grid.Row="1"
+                            Background="#FF101010"
+                            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            ClipToBounds="True"
+                            HorizontalAlignment="Stretch"
+                            SizeChanged="OnQualityPreviewViewportSizeChanged">
+                        <Grid>
+                            <MediaElement x:Name="QualityPreviewPlayer"
+                                          LoadedBehavior="Manual"
+                                          UnloadedBehavior="Manual"
+                                          Stretch="Uniform"
+                                          ScrubbingEnabled="True"
+                                          MediaOpened="OnQualityPreviewMediaOpened"
+                                          MediaEnded="OnQualityPreviewMediaEnded"
+                                          MediaFailed="OnQualityPreviewMediaFailed"/>
+                            <StackPanel HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Margin="24"
+                                        Visibility="{Binding HasNoQualityPreview, Converter={StaticResource BoolToVis}}">
+                                <ui:SymbolIcon Symbol="VideoClip24"
+                                               FontSize="36"
+                                               Foreground="White"
+                                               HorizontalAlignment="Center"/>
+                                <TextBlock Margin="0,12,0,0"
+                                           Foreground="White"
+                                           TextAlignment="Center"
+                                           TextWrapping="Wrap"
+                                           Text="搜索并选择一条 Momentum 回放"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <Grid Grid.Row="2" Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Slider x:Name="QualityPreviewPositionSlider"
+                                Grid.Column="0"
+                                Margin="0,0,12,0"
+                                Minimum="0"
+                                Maximum="1"
+                                IsEnabled="False"
+                                IsMoveToPointEnabled="True"
+                                ValueChanged="OnQualityPreviewPositionChanged"/>
+                        <TextBlock x:Name="QualityPreviewPositionText"
+                                   Grid.Column="1"
+                                   MinWidth="92"
+                                   VerticalAlignment="Center"
+                                   TextAlignment="Right"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   Text="00:00 / 00:00"/>
+                    </Grid>
+
+                    <ui:TabView Grid.Row="3"
+                                Margin="0,12,0,0"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                Padding="0"
+                                SelectedIndex="{Binding SelectedQualityPreviewStageIndex, Mode=TwoWay}">
+                        <ui:TabViewItem Header="阶段 1 · 获取底片">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Margin="0,8,0,0">
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ui:TextBox Grid.Column="0"
+                                        Margin="0,0,8,0"
+                                        PlaceholderText="地图、玩家或回放文件名（留空显示最新）"
+                                        Text="{Binding QualityPreviewSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                            <ui:Button Grid.Column="1"
+                                       Content="搜索回放"
+                                       Icon="{ui:SymbolIcon Search24}"
+                                       Command="{Binding SearchQualityPreviewReplaysCommand}"/>
+                        </Grid>
+                        <Border Margin="0,0,0,8"
+                                Height="132"
+                                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="4">
+                            <TreeView ItemsSource="{Binding QualityPreviewReplayTree}"
+                                      SelectedItemChanged="OnQualityPreviewReplaySelected"
+                                      Style="{StaticResource AppTreeView}"
+                                      ItemContainerStyle="{StaticResource PreviewReplayTreeItem}"
+                                      ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                      ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <TreeView.Resources>
+                                    <HierarchicalDataTemplate DataType="{x:Type vm:PreviewReplayTreeNode}"
+                                                              ItemsSource="{Binding Children}">
+                                        <StackPanel Orientation="Horizontal">
+                                            <ui:SymbolIcon Symbol="{Binding Icon}" Margin="0,0,7,0"/>
+                                            <TextBlock Text="{Binding Label}" VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                    </HierarchicalDataTemplate>
+                                </TreeView.Resources>
+                            </TreeView>
+                        </Border>
+                        <WrapPanel>
+                            <ui:Button Content="阶段 1 · 获取60×底片"
+                                       Appearance="Primary"
+                                       Icon="{ui:SymbolIcon Play24}"
+                                       Command="{Binding CreateQualityPreviewCommand}"
+                                       Margin="0,0,8,8"/>
+                            <ui:Button Content="选择并预览阶段1"
+                                       Command="{Binding ShowQualityPreviewSourceCommand}"
+                                       Margin="0,0,8,8"/>
+                            <ui:Button Content="在资源管理器中显示"
+                                       Command="{Binding OpenQualityPreviewCommand}"
+                                       Margin="0,0,8,8"/>
+                        </WrapPanel>
+                        <ui:TextBlock Margin="0,2,0,0"
+                                      Style="{StaticResource AppCaptionMuted}"
+                                      TextWrapping="Wrap"
+                                      Text="{Binding QualityPreviewStatus}"/>
+
+                            </StackPanel>
+                            </ScrollViewer>
+                        </ui:TabViewItem>
+
+                        <ui:TabViewItem Header="阶段 2 · 参数合成">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Margin="0,8,0,0">
+                                <WrapPanel>
+                                    <ui:Button Content="阶段 2 · 并行合成"
+                                               Appearance="Primary"
+                                               Icon="{ui:SymbolIcon ArrowSync24}"
+                                               Command="{Binding UpdateQualityPreviewCommand}"
+                                               Margin="0,0,8,8"/>
+                                    <ui:Button Content="预览阶段2"
+                                               Command="{Binding ShowQualityPreviewResultCommand}"
+                                               Margin="0,0,8,8"/>
+                                    <ui:Button Content="选择并预览阶段1"
+                                               Command="{Binding ShowQualityPreviewSourceCommand}"
+                                               Margin="0,0,8,8"/>
+                                    <ui:Button Content="在资源管理器中显示"
+                                               Command="{Binding OpenQualityPreviewCommand}"
+                                               Margin="0,0,8,8"/>
+                                </WrapPanel>
+                                <ui:TextBlock Margin="0,2,0,0"
+                                              Style="{StaticResource AppCaptionMuted}"
+                                              TextWrapping="Wrap"
+                                              Text="{Binding QualityPreviewStatus}"/>
+
+                        <ui:Card Margin="0,10,0,0" Padding="10,8,10,8"
+                                 Background="{DynamicResource ControlFillColorSecondaryBrush}">
+                            <StackPanel>
+                                <ui:TextBlock Style="{StaticResource AppMetricLabel}" Text="本次预览录制参数"/>
+                                <ui:TextBlock Margin="0,3,0,0"
+                                              Style="{StaticResource AppCaptionMuted}"
+                                              TextWrapping="Wrap"
+                                              Text="{Binding PreviewCaptureSettingsText}"/>
+                            </StackPanel>
+                        </ui:Card>
+
+                        <Grid Margin="0,10,0,4">
+                            <ui:TextBlock Style="{StaticResource AppCardTitle}" Text="预览运行遥测"/>
+                            <ui:TextBlock HorizontalAlignment="Right"
+                                          Style="{StaticResource AppCaptionMuted}"
+                                          Text="最高 4 Hz"/>
+                        </Grid>
+                        <UniformGrid Columns="2">
+                            <ui:Card Margin="0,0,4,4" Padding="8,6,8,6">
+                                <StackPanel><ui:TextBlock Style="{StaticResource AppMetricLabel}" Text="积压"/><ui:TextBlock Style="{StaticResource AppMetricNumber}" Text="{Binding PreviewBacklogValueText}"/><ui:TextBlock Style="{StaticResource AppMetricSub}" Text="{Binding PreviewBacklogSubText}"/></StackPanel>
+                            </ui:Card>
+                            <ui:Card Margin="4,0,0,4" Padding="8,6,8,6">
+                                <StackPanel><ui:TextBlock Style="{StaticResource AppMetricLabel}" Text="编码速率"/><ui:TextBlock Style="{StaticResource AppMetricNumber}" Text="{Binding PreviewEncoderRateText}"/><ui:TextBlock Style="{StaticResource AppMetricSub}" Text="{Binding PreviewEncoderRateSubText}"/></StackPanel>
+                            </ui:Card>
+                            <ui:Card Margin="0,4,4,4" Padding="8,6,8,6">
+                                <StackPanel><ui:TextBlock Style="{StaticResource AppMetricLabel}" Text="消费比"/><ui:TextBlock Style="{StaticResource AppMetricNumber}" Text="{Binding PreviewConsumptionValueText}"/><ui:TextBlock Style="{StaticResource AppMetricSub}" Text="{Binding PreviewConsumptionSubText}"/></StackPanel>
+                            </ui:Card>
+                            <ui:Card Margin="4,4,0,4" Padding="8,6,8,6">
+                                <StackPanel><ui:TextBlock Style="{StaticResource AppMetricLabel}" Text="监视盘剩余"/><ui:TextBlock Style="{StaticResource AppMetricNumber}" Text="{Binding PreviewDiskValueText}"/><ui:TextBlock Style="{StaticResource AppMetricSub}" Text="{Binding PreviewDiskSubText}"/></StackPanel>
+                            </ui:Card>
+                            <ui:Card Margin="0,4,4,0" Padding="8,6,8,6">
+                                <StackPanel><ui:TextBlock Style="{StaticResource AppMetricLabel}" Text="预计剩余"/><ui:TextBlock Style="{StaticResource AppMetricNumber}" Text="{Binding PreviewEtaValueText}"/><ui:TextBlock Style="{StaticResource AppMetricSub}" Text="{Binding PreviewEtaSubText}"/></StackPanel>
+                            </ui:Card>
+                        </UniformGrid>
+                            </StackPanel>
+                            </ScrollViewer>
+                        </ui:TabViewItem>
+                    </ui:TabView>
+                </Grid>
+            </ui:Card>
+
+            <GridSplitter Grid.Column="1"
+                          Width="8"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch"
+                          Background="Transparent"
+                          ResizeBehavior="PreviousAndNext"
+                          ResizeDirection="Columns">
+                <GridSplitter.Template>
+                    <ControlTemplate TargetType="GridSplitter">
+                        <Grid Background="Transparent" Cursor="SizeWE">
+                            <Border Width="1"
+                                    HorizontalAlignment="Center"
+                                    Background="{DynamicResource DividerStrokeColorDefaultBrush}"/>
+                        </Grid>
+                    </ControlTemplate>
+                </GridSplitter.Template>
+            </GridSplitter>
+
+            <ui:TabView Grid.Column="2"
                     Background="Transparent"
                     BorderThickness="0"
                     Padding="0"
@@ -123,14 +365,64 @@
                               CanContentScroll="False"
                               PanningMode="VerticalOnly"
                               Focusable="True">
-                    <ui:Card Padding="14">
-                        <StackPanel>
+                    <StackPanel>
+                        <ui:Card Margin="0,0,0,12" Padding="14">
+                            <StackPanel>
+                                <ui:TextBlock Style="{StaticResource AppCardTitle}"
+                                              Margin="0,0,0,12"
+                                              Text="成片输出目录"/>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ui:TextBox Grid.Column="0"
+                                                Margin="0,0,8,0"
+                                                PlaceholderText="请选择 MP4 成片保存目录"
+                                                Text="{Binding VideoOutputDirectory, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"/>
+                                    <ui:Button Grid.Column="1"
+                                               Content="浏览…"
+                                               Icon="{ui:SymbolIcon FolderOpen24}"
+                                               Command="{Binding BrowseVideoOutputCommand}"/>
+                                </Grid>
+                                <ui:TextBlock Margin="0,8,0,0"
+                                              Style="{StaticResource AppCaptionMuted}"
+                                              Text="OBS 与游戏 TGA 共用此目录；改动会立即保存，新建任务时冻结到任务快照。"/>
+                            </StackPanel>
+                        </ui:Card>
+
+                        <ui:Card Padding="14">
+                            <StackPanel>
                             <ui:TextBlock Style="{StaticResource AppCardTitle}"
                                           Margin="0,0,0,12"
                                           Text="运动模糊与超采样"/>
 
                             <ui:TextBlock Style="{StaticResource AppHelperText}"
                                           Text="顶层工作模式在标题栏切换；本页只显示当前模式的专属设置。以下超采样、运动模糊与画质参数为两种模式共用的同一份配置。"/>
+
+                            <Border Margin="0,12,0,4"
+                                    Padding="12"
+                                    CornerRadius="6"
+                                    Background="{DynamicResource CardBackgroundFillColorSecondaryBrush}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Margin="0,0,16,0">
+                                        <ui:TextBlock Style="{StaticResource AppBodyTextStrong}"
+                                                      Text="KSF 风格 · 极致运动模糊"/>
+                                        <ui:TextBlock Margin="0,4,0,0"
+                                                      Style="{StaticResource AppHelperText}"
+                                                      Text="TGA 离线录制专用：60× 超采样、360° 全快门、60 fps、120 Mbps；约为默认 10× 的六倍采样负载。"/>
+                                    </StackPanel>
+                                    <ui:Button Grid.Column="1"
+                                               VerticalAlignment="Center"
+                                               Content="应用预设"
+                                               IsEnabled="{Binding IsTgaMode}"
+                                               Command="{Binding ApplyKsfMaximumMotionBlurCommand}"/>
+                                </Grid>
+                            </Border>
 
                             <Grid Style="{StaticResource AppFieldRow}">
                                 <Grid.ColumnDefinitions>
@@ -148,7 +440,7 @@
                                               Minimum="1"
                                               Maximum="64"
                                               SmallChange="1"
-                                              SpinButtonPlacementMode="Inline"/>
+                                              SpinButtonPlacementMode="Hidden"/>
                             </Grid>
 
                             <Border Style="{StaticResource AppDivider}"/>
@@ -211,14 +503,15 @@
                                               Minimum="0.05"
                                               Maximum="1"
                                               SmallChange="0.05"
-                                              SpinButtonPlacementMode="Inline"/>
+                                              SpinButtonPlacementMode="Hidden"/>
                             </Grid>
 
                             <ui:TextBlock Margin="0,12,0,0"
                                           Style="{StaticResource AppHelperText}"
                                           Text="Exposure 是 Legacy Gaussian 的权重分布宽度；Shutter Angle 为推荐模式，有效样本 ≈ N × angle / 360。兼顾 4K60 上传与 1080p30 观看，建议先 AB 测试 300°–360°。"/>
-                        </StackPanel>
-                    </ui:Card>
+                            </StackPanel>
+                        </ui:Card>
+                    </StackPanel>
                 </ScrollViewer>
             </ui:TabViewItem>
 
@@ -377,12 +670,23 @@
                             </Grid>
 
                             <ui:TextBlock Style="{StaticResource AppFieldLabel}" Margin="0,14,0,6"
+                                          Text="前台 TGA 生成速率上限（fps）"/>
+                            <ui:NumberBox Value="{Binding ForegroundCaptureFpsLimit, Mode=TwoWay}"
+                                          ValueChanged="OnNumberBoxValueChanged"
+                                          Minimum="0" Maximum="1000" SmallChange="10"
+                                          HorizontalAlignment="Left" Width="160"
+                                          SpinButtonPlacementMode="Hidden"/>
+                            <ui:TextBlock Margin="0,6,0,0"
+                                          Style="{StaticResource AppCaptionMuted}"
+                                          Text="默认 90；0 表示不覆盖游戏当前 fps_max。只影响现实时间中的 TGA 生成速度，不改变超采样时间步和最终 60 fps。"/>
+
+                            <ui:TextBlock Style="{StaticResource AppFieldLabel}" Margin="0,14,0,6"
                                           Text="监视盘剩余空间安全下限（%）"/>
                             <ui:NumberBox Value="{Binding DiskSafetyFreePercent, Mode=TwoWay}"
                                           ValueChanged="OnNumberBoxValueChanged"
                                           Minimum="0" Maximum="50" SmallChange="1"
                                           HorizontalAlignment="Left" Width="160"
-                                          SpinButtonPlacementMode="Inline"/>
+                                          SpinButtonPlacementMode="Hidden"/>
                             <!-- 画板 05 底部黄色警示条：阈值摘要走 ui:InfoBar（Warning=黄色警示；InfoBarSeverity 无 Caution，勿与 InfoBadgeSeverity 混用） -->
                             <ui:InfoBar Margin="0,8,0,0"
                                         Severity="Warning"
@@ -425,8 +729,8 @@
 
                             <ui:ToggleSwitch Margin="0,12,0,0"
                                              IsChecked="{Binding HideHudInCfg, Mode=TwoWay}"
-                                             OnContent="CFG 中隐藏 HUD（cl_drawhud 0）"
-                                             OffContent="CFG 中隐藏 HUD（cl_drawhud 0）"/>
+                                             OnContent="录制时隐藏游戏 HUD 与顶部回放栏"
+                                             OffContent="录制时隐藏游戏 HUD 与顶部回放栏"/>
 
                             <Border Style="{StaticResource AppDivider}"/>
 
@@ -496,7 +800,7 @@
                                               ValueChanged="OnNumberBoxValueChanged"
                                               Minimum="1" Maximum="8" SmallChange="1"
                                               HorizontalAlignment="Left" Width="160"
-                                              SpinButtonPlacementMode="Inline"/>
+                                              SpinButtonPlacementMode="Hidden"/>
                             </StackPanel>
                         </ui:Card>
 
@@ -507,8 +811,8 @@
                                               Text="游戏慢放指令"/>
                                 <ui:ToggleSwitch Margin="0,0,0,8"
                                                  IsChecked="{Binding HideHudInCfg, Mode=TwoWay}"
-                                                 OnContent="隐藏 HUD（cl_drawhud）"
-                                                 OffContent="隐藏 HUD（cl_drawhud）"/>
+                                                 OnContent="录制时隐藏游戏 HUD 与顶部回放栏"
+                                                 OffContent="录制时隐藏游戏 HUD 与顶部回放栏"/>
                                 <ui:TextBox Style="{StaticResource AppCodeBlock}" Text="{Binding SlowMotionBlock}" MinHeight="90"/>
                                 <ui:TextBox Style="{StaticResource AppCodeBlock}" Margin="0,8,0,0" Text="{Binding RestoreBlock}" MinHeight="70"/>
 
@@ -552,25 +856,26 @@
                                 <ui:TextBlock Grid.Column="0"
                                               VerticalAlignment="Center"
                                               Style="{StaticResource AppKeyText}"
-                                              Text="TargetBitrate"/>
+                                              Text="目标码率（Mbps）"/>
                                 <ui:NumberBox Grid.Column="1"
-                                              Value="{Binding IntermediateTargetBitrate, Mode=TwoWay}"
+                                              Value="{Binding IntermediateTargetBitrateMbps, Mode=TwoWay}"
                                               ValueChanged="OnNumberBoxValueChanged"
                                               Minimum="0"
-                                              Maximum="120000000"
-                                              SmallChange="1000000"
-                                              SpinButtonPlacementMode="Compact"/>
+                                              Maximum="120"
+                                              SmallChange="1"
+                                              SpinButtonPlacementMode="Hidden"/>
                             </Grid>
                             <ui:TextBlock Margin="0,8,0,0"
                                           Style="{StaticResource AppCaptionMuted}"
                                           Text="{Binding BitrateSummaryText}"/>
                             <ui:TextBlock Margin="0,4,0,0"
                                           Style="{StaticResource AppCaptionMuted}"
-                                          Text="0 = 自动估算；填入的数值会真正传给 MF 编码器作为中间母版码率。两种模式共用同一份设置。"/>
+                                          Text="0 = 自动估算；可设置 1–120 Mbps。数值越大，编码器可使用的码率越高，通常画质越好、文件也越大；实际平均码率会随画面复杂度和硬件编码器而波动。两种模式共用同一份设置。"/>
                         </StackPanel>
                     </ui:Card>
                 </ScrollViewer>
             </ui:TabViewItem>
-        </ui:TabView>
+            </ui:TabView>
+        </Grid>
     </Grid>
 </Page>

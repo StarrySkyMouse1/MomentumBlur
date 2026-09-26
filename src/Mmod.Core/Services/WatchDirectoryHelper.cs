@@ -6,6 +6,8 @@ namespace Mmod.Core.Services;
 
 public static class WatchDirectoryHelper
 {
+    public readonly record struct TgaCleanupResult(int DeletedFiles, long DeletedBytes);
+
     public static void EnsureDerivedPaths(UserSettings settings, string? gameRoot = null)
     {
         var name = SanitizeSequenceName(settings.MovieSequenceName);
@@ -96,5 +98,39 @@ public static class WatchDirectoryHelper
         }
 
         return Path.GetFullPath(settings.RamDiskWatchDirectory);
+    }
+
+    /// <summary>
+    /// Clears root-level TGA files left in the dedicated capture directory.
+    /// The caller must first prove that startmovie is stopped and that this
+    /// directory is the configured RAM capture target. A failed deletion is a
+    /// hard error: starting a new stream with stale files consuming capacity
+    /// would immediately reproduce DiskPressure.
+    /// </summary>
+    public static TgaCleanupResult ClearResidualTgaFiles(string watchDirectory)
+    {
+        var directory = Path.GetFullPath(watchDirectory);
+        if (!Directory.Exists(directory))
+            throw new DirectoryNotFoundException($"TGA 监视目录不存在：{directory}");
+
+        var deletedFiles = 0;
+        long deletedBytes = 0;
+        foreach (var path in Directory.EnumerateFiles(directory, "*.tga", SearchOption.TopDirectoryOnly))
+        {
+            long length = 0;
+            try { length = new FileInfo(path).Length; } catch { }
+            try
+            {
+                File.Delete(path);
+                deletedFiles++;
+                deletedBytes += Math.Max(0, length);
+            }
+            catch (Exception ex)
+            {
+                throw new IOException($"无法清理遗留 TGA：{path}", ex);
+            }
+        }
+
+        return new TgaCleanupResult(deletedFiles, deletedBytes);
     }
 }

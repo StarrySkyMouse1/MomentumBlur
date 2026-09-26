@@ -10,4 +10,12 @@ public partial class TasksPage : Page
     {
         if (Window.GetWindow(this) is MainWindow main) DataContext = main.ViewModel.Tasks;
     }
+
+    private void OnNumberBoxValueChanged(object sender, Wpf.Ui.Controls.NumberBoxValueChangedEventArgs e)
+    {
+        if (e.NewValue is not null)
+            return;
+        if (sender is Wpf.Ui.Controls.NumberBox box)
+            box.GetBindingExpression(Wpf.Ui.Controls.NumberBox.ValueProperty)?.UpdateTarget();
+    }
 }

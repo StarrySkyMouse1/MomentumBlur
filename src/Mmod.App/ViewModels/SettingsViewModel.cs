@@ -10,6 +10,10 @@ namespace Mmod.App.ViewModels;
 
 public partial class SettingsViewModel : ObservableObject
 {
+    private const double MaxTargetBitrateMbps = 120.0;
+    private const int KsfMaximumBlurSupersampling = 60;
+    private const double KsfMaximumBlurShutterAngle = 360.0;
+
     /// <summary>设置页页签索引：仅 OBS 模式可见的页签。</summary>
     private const int ObsOnlySectionIndex = 4;
 
@@ -55,15 +59,34 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string cfgCommandBlock = string.Empty;
     [ObservableProperty] private string cfgRestoreCommandBlock = string.Empty;
     [ObservableProperty] private int diskSafetyFreePercent = 10;
+    [ObservableProperty] private int foregroundCaptureFpsLimit = ProjectConstants.DefaultForegroundCaptureFpsLimit;
     [ObservableProperty] private string diskSafetySummary = string.Empty;
 
     // ---- Quality pipeline ----
     [ObservableProperty] private MotionBlurWeightMode motionBlurWeightMode;
     [ObservableProperty] private double shutterAngle = 270;
-    [ObservableProperty] private int intermediateTargetBitrate;
+    [ObservableProperty] private double intermediateTargetBitrateMbps;
     [ObservableProperty] private bool enableDaVinci4KWorkflowGuide;
     [ObservableProperty] private string selectedPresetId = VideoProcessingPresetIds.Off;
     [ObservableProperty] private string processingSummary = string.Empty;
+    [ObservableProperty] private bool isQualityPreviewRunning;
+    [ObservableProperty] private int selectedQualityPreviewStageIndex;
+    [ObservableProperty] private string qualityPreviewSearchText = string.Empty;
+    [ObservableProperty] private ReplayPreviewItem? selectedQualityPreviewReplay;
+    [ObservableProperty] private string qualityPreviewSlowMotionSourcePath = string.Empty;
+    [ObservableProperty] private string qualityPreviewProcessedPath = string.Empty;
+    [ObservableProperty] private string qualityPreviewPath = string.Empty;
+    [ObservableProperty] private string qualityPreviewStatus = "搜索游戏回放，选择一条后获取 6 秒真实高采样预览。";
+    [ObservableProperty] private string previewBacklogValueText = "—";
+    [ObservableProperty] private string previewBacklogSubText = "等待采样";
+    [ObservableProperty] private string previewEncoderRateText = "—";
+    [ObservableProperty] private string previewEncoderRateSubText = "等待采样";
+    [ObservableProperty] private string previewConsumptionValueText = "—";
+    [ObservableProperty] private string previewConsumptionSubText = "等待采样";
+    [ObservableProperty] private string previewDiskValueText = "—";
+    [ObservableProperty] private string previewDiskSubText = "等待采样";
+    [ObservableProperty] private string previewEtaValueText = "—";
+    [ObservableProperty] private string previewEtaSubText = "开始抓取后估算";
     [ObservableProperty] private string davinciGuideText = string.Empty;
 
     public IReadOnlyList<CaptureMode> CaptureModeOptions { get; } = [CaptureMode.Tga, CaptureMode.Obs];
@@ -74,6 +97,8 @@ public partial class SettingsViewModel : ObservableObject
     public IReadOnlyList<VideoProcessingPresetDefinition> PresetOptions { get; } =
         VideoProcessorCatalog.Presets;
     public ObservableCollection<QualityModuleViewModel> QualityModules { get; } = [];
+    public ObservableCollection<PreviewReplayTreeNode> QualityPreviewReplayTree { get; } = [];
+    public event Action<string>? QualityPreviewPlaybackRequested;
 
     public bool IsObsMode => CaptureMode == CaptureMode.Obs;
     public bool IsTgaMode => CaptureMode == CaptureMode.Tga;
@@ -100,13 +125,18 @@ public partial class SettingsViewModel : ObservableObject
     public string ShutterCurrentText => $"当前 {ShutterAngle:0}°";
 
     /// <summary>「自动（估算 ≈ 42 Mbps）」/「自定义 12 Mbps」。</summary>
-    public string BitrateSummaryText => IntermediateTargetBitrate > 0
-        ? $"自定义 {IntermediateTargetBitrate / 1_000_000.0:0.#} Mbps"
+    public string BitrateSummaryText => IntermediateTargetBitrateMbps > 0
+        ? $"目标 {IntermediateTargetBitrateMbps:0.#} Mbps（数值越大，目标画质越高）"
         : "自动（估算 ≈ 42 Mbps）";
+
+    public string PreviewCaptureSettingsText =>
+        $"生成上限 {(ForegroundCaptureFpsLimit == 0 ? "不覆盖" : $"{ForegroundCaptureFpsLimit} fps")} · " +
+        $"编码码率 {(IntermediateTargetBitrateMbps > 0 ? $"{IntermediateTargetBitrateMbps:0.#} Mbps" : "自动")} · " +
+        $"阶段2并行 {Math.Clamp(MaxParallelJobs, 1, 6)} 路 · 时间采样 3600 fps";
 
     /// <summary>「成片目录 …—— 可从合成页直接打开」。</summary>
     public string OutputDirectoryText => string.IsNullOrWhiteSpace(VideoOutputDirectory)
-        ? "成片目录未配置 —— 请先在「游戏 TGA」分组中设置"
+        ? "成片目录未配置 —— 请先在「捕获与合成」中设置"
         : $"成片目录 {VideoOutputDirectory} —— 可从合成页直接打开";
 
     /// <summary>
@@ -181,6 +211,44 @@ public partial class SettingsViewModel : ObservableObject
     [RelayCommand] private void SetShutterMode() => MotionBlurWeightMode = MotionBlurWeightMode.ShutterAngle;
     [RelayCommand] private void SetLegacyMode() => MotionBlurWeightMode = MotionBlurWeightMode.LegacyGaussianExposure;
 
+    /// <summary>
+    /// Applies an explicit Source Video Render-inspired offline capture profile:
+    /// 60 output fps × 60 samples and a full-frame shutter. KSF publishes videos
+    /// rendered with SVR, but does not publish one canonical channel profile, so
+    /// this is deliberately labelled "style" instead of claiming exact parity.
+    /// Extra quality filters stay off because SVR itself does not add effects.
+    /// </summary>
+    [RelayCommand]
+    private void ApplyKsfMaximumMotionBlur()
+    {
+        if (!IsTgaMode)
+        {
+            StatusText = "KSF 极致运动模糊仅适用于 TGA 离线录制；请先切换到 TGA 模式。";
+            return;
+        }
+
+        _suppressPersist = true;
+        try
+        {
+            SupersamplingMultiplier = KsfMaximumBlurSupersampling;
+            Exposure = 1.0;
+            MotionBlurWeightMode = MotionBlurWeightMode.ShutterAngle;
+            ShutterAngle = KsfMaximumBlurShutterAngle;
+            IntermediateTargetBitrateMbps = MaxTargetBitrateMbps;
+
+            var processing = VideoProcessingPresetService.Apply(VideoProcessingPresetIds.Off);
+            RebuildQualityModules(processing);
+            RefreshQualityState(processing);
+        }
+        finally
+        {
+            _suppressPersist = false;
+        }
+
+        Persist();
+        StatusText = "已应用 KSF 风格·极致运动模糊：60×、360°、60 fps、120 Mbps；额外画质滤镜关闭。";
+    }
+
     partial void OnCaptureModeChanged(CaptureMode value)
     {
         OnPropertyChanged(nameof(IsObsMode));
@@ -195,6 +263,8 @@ public partial class SettingsViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(OutputDirectoryText));
         Persist();
+        if (!_loading && !HasQualityPreviewSlowMotionSource)
+            RestoreCompletedQualityPreview(_settings);
     }
     partial void OnRamDiskWatchDirectoryChanged(string value) => Persist();
     partial void OnGameRootPathChanged(string value) => Persist();
@@ -202,7 +272,23 @@ public partial class SettingsViewModel : ObservableObject
     partial void OnStartMovieHotkeyChanged(string value) => Persist();
     partial void OnEndMovieHotkeyChanged(string value) => Persist();
     partial void OnHideHudInCfgChanged(bool value) => Persist();
-    partial void OnMaxParallelJobsChanged(int value) => Persist();
+    partial void OnMaxParallelJobsChanged(int value)
+    {
+        OnPropertyChanged(nameof(PreviewCaptureSettingsText));
+        Persist();
+    }
+
+    partial void OnForegroundCaptureFpsLimitChanged(int value)
+    {
+        var normalized = SettingsMigration.NormalizeForegroundCaptureFpsLimit(value);
+        if (normalized != value)
+        {
+            ForegroundCaptureFpsLimit = normalized;
+            return;
+        }
+        OnPropertyChanged(nameof(PreviewCaptureSettingsText));
+        Persist();
+    }
 
     partial void OnDiskSafetyFreePercentChanged(int value)
     {
@@ -247,10 +333,19 @@ public partial class SettingsViewModel : ObservableObject
         Persist();
     }
 
-    partial void OnIntermediateTargetBitrateChanged(int value)
+    partial void OnIntermediateTargetBitrateMbpsChanged(double value)
     {
-        IntermediateTargetBitrate = Math.Clamp(value, 0, 120_000_000);
+        var clamped = Math.Clamp(value, 0, MaxTargetBitrateMbps);
+        var normalized = clamped > 0 && clamped < 1
+            ? 1
+            : Math.Round(clamped, 1);
+        if (Math.Abs(normalized - value) > 0.0001)
+        {
+            IntermediateTargetBitrateMbps = normalized;
+            return;
+        }
         OnPropertyChanged(nameof(BitrateSummaryText));
+        OnPropertyChanged(nameof(PreviewCaptureSettingsText));
         Persist();
     }
 
@@ -288,10 +383,14 @@ public partial class SettingsViewModel : ObservableObject
             HideHudInCfg = s.HideHudInCfg;
             MaxParallelJobs = Math.Max(1, s.MaxParallelJobs);
             DiskSafetyFreePercent = DiskSafetyPolicy.NormalizeSafetyPercent(s.DiskSafetyFreePercent);
+            ForegroundCaptureFpsLimit = SettingsMigration.NormalizeForegroundCaptureFpsLimit(s.ForegroundCaptureFpsLimit);
 
             MotionBlurWeightMode = s.MotionBlurWeightMode;
             ShutterAngle = SettingsMigration.NormalizeShutterAngle(s.ShutterAngle);
-            IntermediateTargetBitrate = Math.Clamp(s.IntermediateTargetBitrate, 0, 120_000_000);
+            IntermediateTargetBitrateMbps = Math.Clamp(
+                s.IntermediateTargetBitrate / 1_000_000.0,
+                0,
+                MaxTargetBitrateMbps);
             EnableDaVinci4KWorkflowGuide = s.EnableDaVinci4KWorkflowGuide;
         }
         finally
@@ -303,6 +402,61 @@ public partial class SettingsViewModel : ObservableObject
         RefreshDaVinciGuide();
         RefreshDiskSafetySummary();
         RefreshDerived();
+        RestoreCompletedQualityPreview(s);
+    }
+
+    private void RestoreCompletedQualityPreview(UserSettings settings)
+    {
+        var slowMotionSource = ExistingFileOrEmpty(settings.LastQualityPreviewSlowMotionSourcePath);
+        if (slowMotionSource.Length == 0)
+            slowMotionSource = FindLatestCompletedStageOnePreview(settings.VideoOutputDirectory);
+
+        var processed = ExistingFileOrEmpty(settings.LastQualityPreviewProcessedPath);
+        QualityPreviewSlowMotionSourcePath = slowMotionSource;
+        QualityPreviewProcessedPath = processed;
+        QualityPreviewPath = slowMotionSource.Length > 0 ? slowMotionSource : processed;
+
+        if (QualityPreviewPath.Length == 0)
+            return;
+
+        QualityPreviewStatus = slowMotionSource.Length > 0
+            ? $"已恢复最近完成的阶段 1 底片：{Path.GetFileName(slowMotionSource)}"
+            : $"已恢复最近完成的阶段 2 预览：{Path.GetFileName(processed)}";
+
+        // Old settings did not persist preview paths. Once a completed stage-1
+        // file is recovered by its dedicated filename, retain that exact path.
+        if (!string.Equals(settings.LastQualityPreviewSlowMotionSourcePath, slowMotionSource, StringComparison.OrdinalIgnoreCase))
+        {
+            settings.LastQualityPreviewSlowMotionSourcePath = slowMotionSource;
+            _store.Save(settings);
+        }
+    }
+
+    private static string ExistingFileOrEmpty(string? path) =>
+        !string.IsNullOrWhiteSpace(path) && File.Exists(path) ? Path.GetFullPath(path) : string.Empty;
+
+    private static string FindLatestCompletedStageOnePreview(string? outputDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(outputDirectory) || !Directory.Exists(outputDirectory))
+            return string.Empty;
+
+        try
+        {
+            return Directory.EnumerateFiles(outputDirectory, "quality-preview-stage1-*.mp4", SearchOption.TopDirectoryOnly)
+                .Select(path => new FileInfo(path))
+                .Where(file => file.Length > 0)
+                .OrderByDescending(file => file.LastWriteTimeUtc)
+                .Select(file => file.FullName)
+                .FirstOrDefault() ?? string.Empty;
+        }
+        catch (IOException)
+        {
+            return string.Empty;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return string.Empty;
+        }
     }
 
     private void RebuildQualityModules(VideoProcessingSettings? processing)
@@ -370,6 +524,321 @@ public partial class SettingsViewModel : ObservableObject
             vm.RestoreDefaultsCommand.Execute(null);
     }
 
+    public bool HasQualityPreview => !string.IsNullOrWhiteSpace(QualityPreviewPath) && File.Exists(QualityPreviewPath);
+    public bool HasNoQualityPreview => !HasQualityPreview;
+    public bool HasQualityPreviewSlowMotionSource =>
+        !string.IsNullOrWhiteSpace(QualityPreviewSlowMotionSourcePath) && File.Exists(QualityPreviewSlowMotionSourcePath);
+
+    private bool CanCreateQualityPreview() =>
+        !IsQualityPreviewRunning && SelectedQualityPreviewReplay is not null;
+
+    partial void OnIsQualityPreviewRunningChanged(bool value)
+    {
+        CreateQualityPreviewCommand.NotifyCanExecuteChanged();
+        UpdateQualityPreviewCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnSelectedQualityPreviewReplayChanged(ReplayPreviewItem? value) =>
+        CreateQualityPreviewCommand.NotifyCanExecuteChanged();
+
+    partial void OnQualityPreviewSlowMotionSourcePathChanged(string value)
+    {
+        OnPropertyChanged(nameof(HasQualityPreviewSlowMotionSource));
+        UpdateQualityPreviewCommand.NotifyCanExecuteChanged();
+        ShowQualityPreviewSourceCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnQualityPreviewProcessedPathChanged(string value) =>
+        ShowQualityPreviewResultCommand.NotifyCanExecuteChanged();
+
+    partial void OnQualityPreviewPathChanged(string value)
+    {
+        OnPropertyChanged(nameof(HasQualityPreview));
+        OnPropertyChanged(nameof(HasNoQualityPreview));
+        OpenQualityPreviewCommand.NotifyCanExecuteChanged();
+    }
+
+    [RelayCommand]
+    private async Task SearchQualityPreviewReplaysAsync()
+    {
+        if (IsQualityPreviewRunning)
+            return;
+
+        QualityPreviewStatus = "正在扫描 Momentum 回放…";
+        try
+        {
+            var gameRoot = GameRootPath?.Trim() ?? string.Empty;
+            var query = QualityPreviewSearchText?.Trim() ?? string.Empty;
+            var result = await Task.Run(() => new ReplayCatalogService().Scan(gameRoot));
+            var matches = result.Records
+                .Where(record => record.IsCompatible)
+                .Where(record => query.Length == 0
+                    || record.MapName.Contains(query, StringComparison.CurrentCultureIgnoreCase)
+                    || record.PlayerName.Contains(query, StringComparison.CurrentCultureIgnoreCase)
+                    || Path.GetFileName(record.FilePath).Contains(query, StringComparison.CurrentCultureIgnoreCase))
+                .OrderByDescending(record => record.RecordedAt)
+                .Take(100)
+                .ToList();
+
+            QualityPreviewReplayTree.Clear();
+            foreach (var item in BuildQualityPreviewReplayTree(matches))
+                QualityPreviewReplayTree.Add(item);
+            SelectedQualityPreviewReplay = null;
+            QualityPreviewStatus = matches.Count == 0
+                ? $"没有找到匹配的可用回放；扫描问题 {result.Issues.Count} 条。"
+                : $"找到 {matches.Count} 条回放，已默认选择最新一条。";
+        }
+        catch (Exception ex)
+        {
+            QualityPreviewStatus = $"搜索回放失败：{ex.Message}";
+        }
+    }
+
+    private static IReadOnlyList<PreviewReplayTreeNode> BuildQualityPreviewReplayTree(
+        IReadOnlyList<ReplayRecord> records)
+    {
+        var result = new List<PreviewReplayTreeNode>();
+        foreach (var mapGroup in records.GroupBy(x => x.MapName, StringComparer.OrdinalIgnoreCase))
+        {
+            var map = new PreviewReplayTreeNode(mapGroup.Key, "Folder24") { IsExpanded = true };
+            foreach (var playerGroup in mapGroup.GroupBy(x => x.PlayerName, StringComparer.CurrentCultureIgnoreCase))
+            {
+                var player = new PreviewReplayTreeNode(playerGroup.Key, "Person24") { IsExpanded = true };
+                foreach (var trackGroup in playerGroup.GroupBy(x => x.TrackNumber).OrderBy(x => x.Key))
+                {
+                    var staged = trackGroup.Any(x => x.StageNumber > 1);
+                    foreach (var stageGroup in trackGroup.GroupBy(x => staged ? x.StageNumber : 0).OrderBy(x => x.Key))
+                    {
+                        var trackLabel = trackGroup.Key == 1 ? "主赛道" : $"Bonus {trackGroup.Key - 1}";
+                        var track = new PreviewReplayTreeNode(
+                            staged ? $"{trackLabel} · 阶段 {stageGroup.Key}" : trackLabel,
+                            "Map24") { IsExpanded = true };
+                        foreach (var record in stageGroup.OrderBy(x => x.RunTimeSeconds).ThenByDescending(x => x.RecordedAt))
+                        {
+                            track.Children.Add(new PreviewReplayTreeNode(
+                                $"{record.RunTimeSeconds:0.0}s · {record.RecordedAt.LocalDateTime:MM-dd HH:mm}",
+                                "Document24",
+                                new ReplayPreviewItem(record)));
+                        }
+                        player.Children.Add(track);
+                    }
+                }
+                map.Children.Add(player);
+            }
+            result.Add(map);
+        }
+        return result;
+    }
+
+    [RelayCommand(CanExecute = nameof(CanCreateQualityPreview))]
+    private async Task CreateQualityPreviewAsync()
+    {
+        SelectedQualityPreviewStageIndex = 0;
+        var blocker = CaptureModeSwitchBlocker?.Invoke();
+        if (!string.IsNullOrWhiteSpace(blocker))
+        {
+            QualityPreviewStatus = $"暂时不能获取预览：{blocker}";
+            return;
+        }
+
+        IsQualityPreviewRunning = true;
+        QualityPreviewStatus = "正在准备预览…";
+        ResetQualityPreviewTelemetry();
+        try
+        {
+            var replay = SelectedQualityPreviewReplay?.Record
+                ?? throw new InvalidOperationException("请先搜索并选择一条回放。");
+            var progress = new Progress<QualityPreviewService.PreviewProgress>(p =>
+            {
+                QualityPreviewStatus = p.Total > 0
+                    ? $"{p.Stage} {p.Done}/{p.Total}"
+                    : p.Stage;
+                UpdateQualityPreviewTelemetry(p, replay.RunTimeSeconds);
+            });
+            var rawSource = await new ReplayQualityPreviewCaptureService().CaptureAsync(
+                replay,
+                Snapshot(),
+                progress,
+                CancellationToken.None);
+            QualityPreviewSlowMotionSourcePath = rawSource;
+            ReloadQualityPreview(rawSource);
+            Persist();
+            QualityPreviewStatus =
+                $"阶段 1 完成：60× 慢放、60fps 底片已保存到 {rawSource}。可直接预览，或执行阶段 2 并行合成。";
+        }
+        catch (Exception ex)
+        {
+            QualityPreviewStatus = $"预览失败：{ex.Message}";
+        }
+        finally
+        {
+            IsQualityPreviewRunning = false;
+        }
+    }
+
+    private void ResetQualityPreviewTelemetry()
+    {
+        PreviewBacklogValueText = "—";
+        PreviewBacklogSubText = "等待采样";
+        PreviewEncoderRateText = "—";
+        PreviewEncoderRateSubText = "等待采样";
+        PreviewConsumptionValueText = "—";
+        PreviewConsumptionSubText = "等待采样";
+        PreviewDiskValueText = "—";
+        PreviewDiskSubText = "等待采样";
+        PreviewEtaValueText = "—";
+        PreviewEtaSubText = "开始抓取后估算";
+    }
+
+    private void UpdateQualityPreviewTelemetry(
+        QualityPreviewService.PreviewProgress progress,
+        double replayDurationSeconds)
+    {
+        if (progress.Performance is not { } performance)
+            return;
+
+        PreviewBacklogValueText = $"{performance.Backlog.PendingFrames} 帧";
+        PreviewBacklogSubText =
+            $"{performance.Backlog.PendingBytes / 1024d / 1024d:0.0} MiB · {performance.BacklogTrend}";
+        PreviewEncoderRateText = $"{performance.OutputFramesPerSecond:0.0} fps";
+        PreviewEncoderRateSubText = $"{performance.QualityBackend} · {performance.EncoderBackend}";
+        PreviewConsumptionValueText = $"{performance.ConsumptionRatio:0.00}";
+        PreviewConsumptionSubText =
+            $"生产 {performance.ProducedFramesPerSecond:0.0} / 消费 {performance.ConsumedFramesPerSecond:0.0} fps";
+
+        if (progress.Disk is { } disk)
+        {
+            PreviewDiskValueText = $"{disk.FreePercent:0}%";
+            PreviewDiskSubText = $"安全 {disk.SafetyPercent}% · {disk.State}";
+        }
+
+        var targetFrames = CaptureEnvelopeRecorder.ComputeEnvelopeFrameCount(
+            Math.Min(6, Math.Max(0.5, replayDurationSeconds)),
+            ReplayQualityPreviewCaptureService.PreviewSupersamplingMultiplier);
+        var remainingFrames = Math.Max(0, targetFrames - performance.ConsumedFrames);
+        if (performance.ConsumedFramesPerSecond >= 1)
+        {
+            var remaining = TimeSpan.FromSeconds(remainingFrames / performance.ConsumedFramesPerSecond);
+            PreviewEtaValueText = remaining.TotalMinutes >= 1
+                ? $"约 {(int)remaining.TotalMinutes}分 {remaining.Seconds:D2}秒"
+                : $"约 {Math.Max(1, (int)Math.Ceiling(remaining.TotalSeconds))}秒";
+            PreviewEtaSubText = $"剩余 {remainingFrames:N0} 帧";
+        }
+        else
+        {
+            PreviewEtaValueText = "采样中";
+            PreviewEtaSubText = "等待稳定消费速度";
+        }
+    }
+
+    private bool CanUpdateQualityPreview() =>
+        !IsQualityPreviewRunning && HasQualityPreviewSlowMotionSource;
+
+    [RelayCommand(CanExecute = nameof(CanUpdateQualityPreview))]
+    private async Task UpdateQualityPreviewAsync()
+    {
+        SelectedQualityPreviewStageIndex = 1;
+        IsQualityPreviewRunning = true;
+        try
+        {
+            var progress = new Progress<QualityPreviewService.PreviewProgress>(p =>
+            {
+                QualityPreviewStatus = p.Total > 0
+                    ? $"{p.Stage} {p.Done}/{p.Total}"
+                    : p.Stage;
+            });
+            await SynthesizeQualityPreviewAsync(progress, SelectedQualityPreviewReplay?.Record.MapName ?? "缓存素材");
+        }
+        catch (Exception ex)
+        {
+            QualityPreviewStatus = $"更新预览失败：{ex.Message}";
+        }
+        finally
+        {
+            IsQualityPreviewRunning = false;
+        }
+    }
+
+    private async Task SynthesizeQualityPreviewAsync(
+        IProgress<QualityPreviewService.PreviewProgress> progress,
+        string sourceLabel)
+    {
+        if (!HasQualityPreviewSlowMotionSource)
+            throw new FileNotFoundException("尚未从游戏获取 60× 慢放预览素材。");
+
+        var settings = Snapshot();
+        var output = await new QualityPreviewService().CreateFromSlowMotionSourceAsync(
+            QualityPreviewSlowMotionSourcePath,
+            settings,
+            progress,
+            CancellationToken.None);
+        QualityPreviewProcessedPath = output;
+        ReloadQualityPreview(output);
+        Persist();
+        QualityPreviewStatus =
+            $"预览已更新：{sourceLabel} · 60×慢放底片 · 当前 N={settings.SupersamplingMultiplier} · " +
+            (settings.MotionBlurWeightMode == MotionBlurWeightMode.ShutterAngle
+                ? $"快门 {settings.ShutterAngle:0}°"
+                : $"Exposure {settings.Exposure:0.##}");
+    }
+
+    [RelayCommand]
+    private void ShowQualityPreviewSource()
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "选择阶段 1 预览视频",
+            Filter = "视频|*.mp4;*.mkv;*.mov;*.avi;*.wmv;*.webm|所有文件|*.*",
+            Multiselect = false,
+        };
+        var currentDirectory = Path.GetDirectoryName(QualityPreviewSlowMotionSourcePath);
+        if (!string.IsNullOrWhiteSpace(currentDirectory) && Directory.Exists(currentDirectory))
+            dialog.InitialDirectory = currentDirectory;
+        else if (Directory.Exists(VideoOutputDirectory))
+            dialog.InitialDirectory = VideoOutputDirectory;
+
+        if (dialog.ShowDialog() != true)
+            return;
+
+        var selected = Path.GetFullPath(dialog.FileName);
+        if (!string.Equals(QualityPreviewSlowMotionSourcePath, selected, StringComparison.OrdinalIgnoreCase))
+            QualityPreviewProcessedPath = string.Empty;
+        QualityPreviewSlowMotionSourcePath = selected;
+        ReloadQualityPreview(selected);
+        Persist();
+        QualityPreviewStatus = $"正在预览阶段 1：{Path.GetFileName(selected)}";
+    }
+
+    private bool CanShowQualityPreviewResult() =>
+        !string.IsNullOrWhiteSpace(QualityPreviewProcessedPath) && File.Exists(QualityPreviewProcessedPath);
+
+    [RelayCommand(CanExecute = nameof(CanShowQualityPreviewResult))]
+    private void ShowQualityPreviewResult()
+    {
+        ReloadQualityPreview(QualityPreviewProcessedPath);
+        QualityPreviewStatus = "正在预览阶段 2：按当前参数生成的60fps结果。";
+    }
+
+    private void ReloadQualityPreview(string path)
+    {
+        QualityPreviewPath = path;
+        QualityPreviewPlaybackRequested?.Invoke(path);
+    }
+
+    private bool CanOpenQualityPreview() => HasQualityPreview;
+
+    [RelayCommand(CanExecute = nameof(CanOpenQualityPreview))]
+    private void OpenQualityPreview()
+    {
+        var path = Path.GetFullPath(QualityPreviewPath);
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = "explorer.exe",
+            UseShellExecute = true,
+            ArgumentList = { "/select,", path },
+        });
+    }
+
     [RelayCommand]
     private void CopyDaVinciSteps()
     {
@@ -401,6 +870,8 @@ public partial class SettingsViewModel : ObservableObject
             Exposure = Math.Clamp(Exposure, 0.05, 1.0),
             ObsCaptureFramerate = ObsCaptureFramerate,
             VideoOutputDirectory = VideoOutputDirectory?.Trim() ?? string.Empty,
+            LastQualityPreviewSlowMotionSourcePath = QualityPreviewSlowMotionSourcePath,
+            LastQualityPreviewProcessedPath = QualityPreviewProcessedPath,
             RamDiskWatchDirectory = RamDiskWatchDirectory?.Trim() ?? string.Empty,
             GameRootPath = GameRootPath?.Trim(),
             MovieSequenceName = MovieSequenceName,
@@ -412,9 +883,12 @@ public partial class SettingsViewModel : ObservableObject
             StartmoviePathPrefix = _settings.StartmoviePathPrefix,
             PendingTgaWarningCount = _settings.PendingTgaWarningCount,
             DiskSafetyFreePercent = DiskSafetyPolicy.NormalizeSafetyPercent(DiskSafetyFreePercent),
+            ForegroundCaptureFpsLimit = SettingsMigration.NormalizeForegroundCaptureFpsLimit(ForegroundCaptureFpsLimit),
             MotionBlurWeightMode = MotionBlurWeightMode,
             ShutterAngle = SettingsMigration.NormalizeShutterAngle(ShutterAngle),
-            IntermediateTargetBitrate = Math.Clamp(IntermediateTargetBitrate, 0, 120_000_000),
+            IntermediateTargetBitrate = (int)Math.Round(
+                Math.Clamp(IntermediateTargetBitrateMbps, 0, MaxTargetBitrateMbps) * 1_000_000.0,
+                MidpointRounding.AwayFromZero),
             EnableDaVinci4KWorkflowGuide = EnableDaVinci4KWorkflowGuide,
             VideoProcessing = BuildProcessingSnapshot(),
         };
@@ -598,4 +1072,30 @@ public partial class SettingsViewModel : ObservableObject
             StatusText = $"打开 ImDisk 失败：{ex.Message}";
         }
     }
+}
+
+public sealed class ReplayPreviewItem
+{
+    public ReplayPreviewItem(ReplayRecord record) => Record = record;
+    public ReplayRecord Record { get; }
+    public string DisplayText =>
+        $"{Record.MapName} · {Record.PlayerName} · {Record.TrackLabel}" +
+        (Record.StageNumber > 0 ? $" 阶段 {Record.StageNumber}" : string.Empty) +
+        $" · {Record.RunTimeSeconds:0.0}s · {Record.RecordedAt.LocalDateTime:MM-dd HH:mm}";
+}
+
+public sealed class PreviewReplayTreeNode
+{
+    public PreviewReplayTreeNode(string label, string icon, ReplayPreviewItem? replay = null)
+    {
+        Label = label;
+        Icon = icon;
+        Replay = replay;
+    }
+
+    public string Label { get; }
+    public string Icon { get; }
+    public ReplayPreviewItem? Replay { get; }
+    public bool IsExpanded { get; set; }
+    public ObservableCollection<PreviewReplayTreeNode> Children { get; } = [];
 }

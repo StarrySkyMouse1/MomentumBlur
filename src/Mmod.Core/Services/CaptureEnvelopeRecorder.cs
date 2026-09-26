@@ -72,10 +72,26 @@ public static class CaptureEnvelopeRecorder
 
         try
         {
-            // Refuse to start a new TGA stream when the watch volume is already
-            // unsafe. Without this gate, startmovie can create only a zero-byte
-            // frame on a full RAM disk and the workflow misleadingly stalls in
-            // WaitingCaptureReady before the regular capture-loop sampling runs.
+            // 1. Clean baseline: no active startmovie from a previous session.
+            Stage(NodeExecutionStage.PreparingCaptureBaseline, "Begin", "开始录制 Envelope");
+            var baselineStop = await MomentumReplaySession.ExecuteEndMovieAsync(netCon, timeouts, phase, token);
+            if (baselineStop is not StopMovieResult.CommandAcked and not StopMovieResult.KnownAlreadyStopped)
+            {
+                throw new CaptureStopUnconfirmedException($"准备阶段 endmovie 未确认（{baselineStop}）。");
+            }
+
+            // The watch directory is a dedicated RAM capture target. Once the
+            // previous writer is positively stopped, remove every residual TGA
+            // (including stale prefixes from earlier attempts) before sampling
+            // free space and starting the new unique-prefix stream.
+            var watchDirectory = WatchDirectoryHelper.ResolveEffectiveWatchDirectory(user, user.GameRootPath);
+            var cleanup = WatchDirectoryHelper.ClearResidualTgaFiles(watchDirectory);
+            phase?.Invoke(
+                $"清理遗留 TGA：{cleanup.DeletedFiles} 个，释放 {ToGiB(cleanup.DeletedBytes):0.00} GiB");
+
+            // Refuse to start only after cleanup has restored all reclaimable
+            // capacity. This prevents stale files from causing an immediate
+            // DiskPressure stop while preserving the configured safety floor.
             if (health is not null)
             {
                 var preflightDisk = health.GetWatchDiskHealth(user.DiskSafetyFreePercent);
@@ -83,44 +99,32 @@ public static class CaptureEnvelopeRecorder
                     preflightDisk.FreeBytes < CaptureStartMinimumFreeBytes)
                 {
                     throw new DiskPressureException(
-                        $"开始录制前磁盘可用空间不足：监视盘 {FormatDriveRoot(preflightDisk.DriveRoot)} " +
-                        $"仅剩 {ToGiB(preflightDisk.FreeBytes):0.00} GiB，至少需要 " +
-                        $"{ToGiB(CaptureStartMinimumFreeBytes):0.00} GiB 才能建立 CaptureReady。",
+                        $"清理遗留 TGA 后空间仍不足：监视盘 {FormatDriveRoot(preflightDisk.DriveRoot)} " +
+                        $"剩余 {preflightDisk.FreePercent:0.0}% / {ToGiB(preflightDisk.FreeBytes):0.00} GiB，" +
+                        $"安全下限 {preflightDisk.SafetyPercent}% / {ToGiB(preflightDisk.SafetyBytes):0.00} GiB。",
                         preflightDisk);
                 }
 
-                switch (preflightDisk.State)
+                if (preflightDisk.State == DiskSafetyState.Critical)
                 {
-                    case DiskSafetyState.Critical:
-                        // Enough absolute space exists to establish CaptureReady.
-                        // Preserve the existing controlled-stop path so a verified
-                        // partial can still be finalized under percentage pressure.
-                        phase?.Invoke(
-                            $"磁盘压力：开始录制前监视盘 {FormatDriveRoot(preflightDisk.DriveRoot)} " +
-                            $"剩余 {preflightDisk.FreePercent:0.0}%，CaptureReady 后将受控收尾。");
-                        break;
-                    case DiskSafetyState.Unavailable:
-                        // Preserve the existing transient-sampling contract:
-                        // one unavailable read is not proof of an unsafe disk.
-                        // The capture loop still fails closed after the configured
-                        // number of consecutive unavailable samples.
-                        phase?.Invoke(
-                            $"磁盘采样暂不可用：开始录制前无法读取监视盘 {FormatDriveRoot(preflightDisk.DriveRoot)} 的空间状态。");
-                        break;
-                    case DiskSafetyState.Warning:
-                        phase?.Invoke(
-                            $"磁盘警告：开始录制前监视盘 {FormatDriveRoot(preflightDisk.DriveRoot)} " +
-                            $"剩余 {preflightDisk.FreePercent:0.0}%（警告线 {preflightDisk.WarningPercent}%）");
-                        break;
+                    // Preserve the verified controlled-stop/partial contract
+                    // when the RAM disk itself is genuinely too small even
+                    // after all stale TGA files have been reclaimed.
+                    phase?.Invoke(
+                        $"磁盘压力：清理后监视盘 {FormatDriveRoot(preflightDisk.DriveRoot)} " +
+                        $"仍只剩 {preflightDisk.FreePercent:0.0}%，CaptureReady 后将受控收尾。");
                 }
-            }
-
-            // 1. Clean baseline: no active startmovie from a previous session.
-            Stage(NodeExecutionStage.PreparingCaptureBaseline, "Begin", "开始录制 Envelope");
-            var baselineStop = await MomentumReplaySession.ExecuteEndMovieAsync(netCon, timeouts, phase, token);
-            if (baselineStop is not StopMovieResult.CommandAcked and not StopMovieResult.KnownAlreadyStopped)
-            {
-                throw new CaptureStopUnconfirmedException($"准备阶段 endmovie 未确认（{baselineStop}）。");
+                else if (preflightDisk.State == DiskSafetyState.Unavailable)
+                {
+                    phase?.Invoke(
+                        $"磁盘采样暂不可用：开始录制前无法读取监视盘 {FormatDriveRoot(preflightDisk.DriveRoot)} 的空间状态。");
+                }
+                else if (preflightDisk.State == DiskSafetyState.Warning)
+                {
+                    phase?.Invoke(
+                        $"磁盘警告：清理后监视盘 {FormatDriveRoot(preflightDisk.DriveRoot)} " +
+                        $"剩余 {preflightDisk.FreePercent:0.0}%（警告线 {preflightDisk.WarningPercent}%）");
+                }
             }
 
             // 2. Start movie with the unique session prefix (strict, failure patterns).
@@ -230,7 +234,13 @@ public static class CaptureEnvelopeRecorder
                                 // for SafeEnd, and run the controlled stop
                                 // (endmovie → quiescence → drain → Finish).
                                 pressureSnapshot = snapshot;
-                                phase?.Invoke($"磁盘压力 Critical：监视盘 {FormatDriveRoot(snapshot.DriveRoot)} 剩余 {snapshot.FreePercent:0.0}%，进入受控收尾。");
+                                phase?.Invoke(
+                                    $"磁盘压力 Critical：监视盘 {FormatDriveRoot(snapshot.DriveRoot)} " +
+                                    $"剩余 {snapshot.FreePercent:0.0}% / {ToGiB(snapshot.FreeBytes):0.00} GiB，" +
+                                    $"Fed={pipeline.FedCount} Candidate={pipeline.Watcher.CandidateCount} " +
+                                    $"Pending={pipeline.Watcher.PendingCount} Anchor={pipeline.ActivityAnchorFrame?.ToString() ?? "-"} " +
+                                    $"LastVisual={pipeline.LastVisualChangeFrame?.ToString() ?? "-"} " +
+                                    $"StaticGap={GetStaticGap(pipeline)} RequiredStatic={staticEndFrames} SafeEnd={safeEnd}，进入受控收尾。");
                                 break;
                             case DiskSafetyState.Unavailable:
                                 consecutiveUnavailableSamples++;
@@ -315,6 +325,47 @@ public static class CaptureEnvelopeRecorder
                 if (pipeline.ActivityAnchorFrame is null || !pipeline.HasVisualChange)
                     throw new InvalidOperationException("成片校验失败：DiskPressure 收尾前未建立 PlaybackEvidence。");
 
+                // Disk pressure can win the sampling race while the final
+                // static tail is still sitting in the watcher. FinalizeAsync
+                // drains those already-written frames, so re-evaluate the same
+                // positive completion evidence used by the normal capture
+                // loop before classifying the attempt as an interrupted
+                // partial. This keeps the safety stop intact without turning a
+                // fully captured replay into a permanent DiskPressure failure.
+                var reachedStaticEnd =
+                    pipeline.LastVisualChangeFrame is { } drainedLastVisualChange &&
+                    finalize.SubmittedFrames - drainedLastVisualChange >= staticEndFrames;
+                var outputDurationSeconds = finalize.ProducedFrames / (double)ProjectConstants.FinalOutputFramerate;
+                var minimumCompleteDurationSeconds = Math.Max(0.5, runTimeSeconds);
+                var maximumEnvelopeDurationSeconds =
+                    Math.Max(0.1, runTimeSeconds) + PreSafetySeconds + TailSafetySeconds;
+                var reachedDurationEnvelope =
+                    outputDurationSeconds >= minimumCompleteDurationSeconds &&
+                    outputDurationSeconds <= maximumEnvelopeDurationSeconds;
+
+                phase?.Invoke(
+                    $"DiskPressureCompletionEvidence：Submitted={finalize.SubmittedFrames} " +
+                    $"Output={finalize.ProducedFrames} OutputDuration={outputDurationSeconds:0.###}s " +
+                    $"ReplayDuration={runTimeSeconds:0.###}s Envelope=[{minimumCompleteDurationSeconds:0.###},{maximumEnvelopeDurationSeconds:0.###}]s " +
+                    $"Anchor={pipeline.ActivityAnchorFrame?.ToString() ?? "-"} " +
+                    $"LastVisual={pipeline.LastVisualChangeFrame?.ToString() ?? "-"} " +
+                    $"StaticGap={GetStaticGap(pipeline)} RequiredStatic={staticEndFrames} " +
+                    $"StaticComplete={reachedStaticEnd} DurationComplete={reachedDurationEnvelope}.");
+
+                if (reachedStaticEnd || reachedDurationEnvelope)
+                {
+                    var completionEvidence = reachedStaticEnd && reachedDurationEnvelope
+                        ? "连续静止与输出时长包络"
+                        : reachedStaticEnd
+                            ? "连续静止"
+                            : "输出时长包络";
+                    phase?.Invoke(
+                        $"DiskPressureRecoveredAsComplete：受控排空后已确认回放完整（" +
+                        $"证据={completionEvidence}，" +
+                        $"帧 {finalize.SubmittedFrames}，输出 {finalize.ProducedFrames}），继续正常媒体校验。");
+                    return finalize;
+                }
+
                 var stopResult = new ControlledStopResult(
                     Finalize: finalize,
                     Snapshot: pressureSnapshot,
@@ -325,7 +376,10 @@ public static class CaptureEnvelopeRecorder
                 Stage(NodeExecutionStage.ControlledStopFinalized, "DiskPressureControlledStopFinalized", "受控收尾与 Native finalize 完成，等待 partial 校验与提交");
                 throw new DiskPressureException(
                     $"监视盘 {FormatDriveRoot(pressureSnapshot.DriveRoot)} 剩余 {pressureSnapshot.FreePercent:0.0}% / {ToGiB(pressureSnapshot.FreeBytes):0.0} GiB，" +
-                    $"已达到安全下限 {pressureSnapshot.SafetyPercent}% / {ToGiB(pressureSnapshot.SafetyBytes):0.0} GiB。已受控收尾（帧 {finalize.SubmittedFrames}，输出 {finalize.ProducedFrames}）。",
+                    $"已达到安全下限 {pressureSnapshot.SafetyPercent}% / {ToGiB(pressureSnapshot.SafetyBytes):0.0} GiB。" +
+                    $"已受控收尾但完整性证据不足（帧 {finalize.SubmittedFrames}，输出 {finalize.ProducedFrames}，" +
+                    $"输出时长 {outputDurationSeconds:0.###}s，回放 {runTimeSeconds:0.###}s，" +
+                    $"静止差 {GetStaticGap(pipeline)}/{staticEndFrames}）。",
                     pressureSnapshot,
                     stopResult);
             }
@@ -398,6 +452,11 @@ public static class CaptureEnvelopeRecorder
     }
 
     private static double ToGiB(long bytes) => bytes / 1024d / 1024d / 1024d;
+
+    private static long GetStaticGap(ICapturePipeline pipeline) =>
+        pipeline.LastVisualChangeFrame is { } lastVisualChange
+            ? Math.Max(0, pipeline.FedCount - lastVisualChange)
+            : -1;
 
     private static string FormatDriveRoot(string driveRoot) =>
         string.IsNullOrWhiteSpace(driveRoot) ? "(未知)" : driveRoot;

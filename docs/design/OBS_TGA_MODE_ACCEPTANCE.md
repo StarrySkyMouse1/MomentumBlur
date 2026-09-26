@@ -550,6 +550,11 @@ R1 改造把原有的 `HierarchicalDataTemplate` 换成了带 `x:Key` 的普通 
 - **删除入口**：曾经的 `UpdatePendingTaskSettings`（SQL `UPDATE render_tasks SET settings_json=...`）已删除，不要加回。
 - 用户若要改配置，正确做法是**重新勾选回放记录创建新任务**，而不是修改旧任务。
 
+2026-09-24 例外：任务页允许对 `Pending / Paused / FailedNeedsAttention` 任务单独修改
+`ForegroundCaptureFpsLimit`。该字段只控制现实时间中的 TGA 生成速率，不改变输出帧率、
+超采样时间步、运动模糊、画质处理或编码规格；更新使用带状态守卫的专用事务，已完成节点与
+片段保持不变。禁止据此恢复“刷新整个任务快照”的入口。
+
 ### 验证
 
 | 项 | 结果 |

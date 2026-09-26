@@ -58,7 +58,7 @@
 | 回放树：可折叠节点 + 记录行 | 原生 `TreeView` + `HierarchicalDataTemplate`（`ReplayRowTemplate`） | `AppTreeView` BasedOn `DefaultTreeViewStyle` | 四层展开/折叠 | **完成**（2026-09-16 修正）：R1 把原 `HierarchicalDataTemplate` 退化成普通 `DataTemplate` 并加了 `x:Key`，丢掉 `ItemsSource="{Binding Children}"` → `HasItems=false` → 无展开箭头、无子容器、无勾选框；已恢复 |
 | 树节点选中视觉 | 原生 `TreeViewItem` 隐式样式（`DefaultTreeViewItemStyle` 自带 `ActiveRectangle`） | `DefaultTreeViewItemStyle` | 选中态 | **完成**（2026-09-15 修正）：容器是原生 `TreeViewItem`，`ItemContainerStyle` 写 `ui:TreeViewItem` 会在生成容器时抛 `InvalidOperationException` |
 | 记录行 CheckBox 多选 | `AppReplayRowCheckBox` | `CheckBox`（隐式样式）BasedOn `DefaultCheckBoxStyle` | 禁用 + ToolTip | 完成 |
-| 底部常驻遥测条（积压/编码速率/消费比/监视盘剩余） | `UniformGrid Columns=4` | `ui:Card` ×4 | 真实采样 | **完成**（2026-09-16 修正）：稿面 5 项中的「追赶时间」按用户要求移除，编码速率取自原生 `frames_output` 计数，其余 4 项均为真实采样 |
+| 底部常驻遥测条（积压/编码速率/消费比/监视盘剩余/预计剩余时间） | `UniformGrid Columns=5` | `ui:Card` ×5 | 真实采样 + 节点耗时估算 | **完成**（2026-09-22 修正）：预计剩余时间以回放时长 × 冻结的超采样倍数为基线，并用已完成节点的真实墙钟耗时校准；编码速率取自原生 `frames_output` 计数 |
 | 页头 + 工具条「开始/继续、当前节点后暂停、立即停止」 | 3 个 Command | `ui:Button` | `CanExecute` | 完成 |
 | 工具条按钮（仅队列启停） | 3 个 Command | `ui:Button` | `CanExecute` | **完成**（2026-09-16 修正）：「回放操作」下拉按用户要求移除（内容多余），「刷新回放记录」改为回放记录页签搜索行的独立「刷新」按钮；「刷新快照」按用户要求一并删除（任务配置创建时冻结、之后不可变）。`ui:DropDownButton` 在本页不再使用 |
 
@@ -80,7 +80,7 @@
 | 六页签横向 | `SettingsPage.xaml` `ui:TabView` | `ui:TabView` | 换行 TabPanel | **待修**：`ui:TabView.Resources` 里放 `TabPanel` 无键样式**未加 BasedOn**，且 `TabPanel` 是框架原语（无 Fluent 模板），当前写法只设 Margin 无实际风险，但需核对 960 下 6 页签是否换行完整可见 |
 | 「捕获与合成」标题 + 分段器「游戏 TGA / OBS 批量」 | `SetTgaModeCommand`/`SetObsModeCommand` + `SegmentAppearance` | `ui:Button` + `Appearance` | 选中态 Primary | 完成 |
 | 监视目录 + 浏览… | `BrowseWatchDirectoryCommand` | `ui:TextBox` + `ui:Button` | — | 完成 |
-| 超采样 N（1–64） | `ui:NumberBox` | `ui:NumberBox` | Inline 微调 + 清空回填 | **完成**（2026-09-16 补修）：控件 `Value` 是可空 `double`，清空输入框后失焦会把它置成 `null` 且不回写源，输入框会永久空白；已在 `SettingsPage` 统一兜底，详见验收文档追加节 |
+| 超采样 N（1–64） | `ui:NumberBox` | `ui:NumberBox` | 直接输入 + 清空回填 | **完成**（2026-09-23 调整）：所有数字框隐藏上下微调箭头，避免窄输入框内容被遮挡；控件 `Value` 是可空 `double`，清空输入框后失焦仍由 `SettingsPage` 统一回填有效值 |
 | Exposure | `ui:NumberBox` | `ui:NumberBox` | — | 完成 |
 | 「输出与编码」卡：编码器下拉 | `ComboBox` `PresetOptions` | `ComboBox`（隐式样式） | — | 完成（隐式样式类，用原生标签合规） |
 | 目标码率 Mbps | `ui:NumberBox` | `ui:NumberBox` | — | 完成 |

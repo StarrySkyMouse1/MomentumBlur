@@ -31,6 +31,9 @@ public sealed class CapturePerformanceTracker
     private readonly double _catchUpMargin;
     private long _peakPendingFrames;
     private long _peakPendingBytes;
+    private long _latestProduced;
+    private long _latestConsumed;
+    private long _latestOutput;
 
     public CapturePerformanceTracker(
         TimeSpan? window = null,
@@ -71,6 +74,9 @@ public sealed class CapturePerformanceTracker
             _producedWindow.AddSample(monotonicTicks, sample.Produced);
             _consumedWindow.AddSample(monotonicTicks, sample.Consumed);
             _outputWindow.AddSample(monotonicTicks, sample.Output);
+            _latestProduced = Math.Max(0, (long)sample.Produced);
+            _latestConsumed = Math.Max(0, (long)sample.Consumed);
+            _latestOutput = Math.Max(0, (long)sample.Output);
 
             if (sample.PendingFrames > _peakPendingFrames)
                 _peakPendingFrames = sample.PendingFrames;
@@ -89,6 +95,9 @@ public sealed class CapturePerformanceTracker
             _outputWindow.Reset();
             _peakPendingFrames = 0;
             _peakPendingBytes = 0;
+            _latestProduced = 0;
+            _latestConsumed = 0;
+            _latestOutput = 0;
         }
     }
 
@@ -124,6 +133,9 @@ public sealed class CapturePerformanceTracker
             }
 
             return new PerformanceSnapshot(
+                ProducedFrames: _latestProduced,
+                ConsumedFrames: _latestConsumed,
+                OutputFrames: _latestOutput,
                 ProducedFramesPerSecond: produced,
                 ConsumedFramesPerSecond: consumed,
                 OutputFramesPerSecond: output,

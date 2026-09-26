@@ -16,10 +16,13 @@ public partial class TasksViewModel : ObservableObject
     private readonly RenderTaskRepository _repository = new();
     private readonly RenderTaskRunner _runner;
     private readonly DispatcherTimer _runnerUiTimer;
+    private readonly DispatcherTimer _catalogFilterTimer;
+    private CancellationTokenSource? _catalogFilterCancellation;
     private int _runnerUiTicks;
+    private double _lastEtaConsumptionRate;
 
-    public ObservableCollection<ReplayTreeNode> Catalog { get; } = [];
-    public ObservableCollection<ReplayTreeNode> CatalogView { get; } = [];
+    public ObservableCollection<ReplayTreeNode> Catalog { get; private set; } = [];
+    public ObservableCollection<ReplayTreeNode> CatalogView { get; private set; } = [];
     public ObservableCollection<TaskListItem> Queue { get; } = [];
     public ObservableCollection<TaskListItem> History { get; } = [];
     public ObservableCollection<TaskNodeItem> DetailNodes { get; } = [];
@@ -43,6 +46,8 @@ public partial class TasksViewModel : ObservableObject
     [ObservableProperty] private TaskPresentationState detailState = TaskPresentationState.Idle;
     [ObservableProperty] private string frozenComposeText = "选择任务后显示冻结的合成参数。";
     [ObservableProperty] private string frozenQualityText = string.Empty;
+    [ObservableProperty] private int selectedTaskForegroundCaptureFpsLimit = ProjectConstants.DefaultForegroundCaptureFpsLimit;
+    [ObservableProperty] private bool canEditSelectedTaskForegroundCaptureFpsLimit;
 
     // ---- 空态可见性（画板 04 · ③）----
     /// <summary>回放树为空（刷新后无可执行记录）。</summary>
@@ -69,6 +74,10 @@ public partial class TasksViewModel : ObservableObject
     // 编码速率：真实来源是原生 frames_output 计数（OutputFramesPerSecond）。
     [ObservableProperty] private string encoderRateText = "—";
     [ObservableProperty] private string encoderRateSubText = "等待采样";
+    [ObservableProperty] private string remainingTimeText = "—";
+    [ObservableProperty] private string remainingTimeSubText = "开始队列后估算";
+    [ObservableProperty] private string currentVideoSpecText = "暂无待执行任务";
+    [ObservableProperty] private string currentVideoSpecSubText = "创建任务后显示冻结的视频规格";
 
     public bool IsHistoryTabSelected
     {
@@ -94,32 +103,81 @@ public partial class TasksViewModel : ObservableObject
     [RelayCommand] private void ShowQueueTab() => IsQueueTabSelected = true;
     [RelayCommand] private void ShowHistoryTab() => IsQueueTabSelected = false;
 
-    partial void OnCatalogFilterChanged(string value) => ApplyCatalogFilter();
-
-    private void ApplyCatalogFilter()
+    partial void OnCatalogFilterChanged(string value)
     {
-        CatalogView.Clear();
+        // AutoSuggestBox updates on every keystroke. Rebuilding a large WPF tree
+        // for every intermediate value causes repeated container creation and layout.
+        // A short debounce keeps typing responsive while preserving live search.
+        _catalogFilterCancellation?.Cancel();
+        _catalogFilterTimer.Stop();
+        _catalogFilterTimer.Start();
+    }
+
+    private async Task ApplyCatalogFilterAsync()
+    {
+        _catalogFilterCancellation?.Cancel();
+        var cancellation = new CancellationTokenSource();
+        _catalogFilterCancellation = cancellation;
+
         var query = CatalogFilter?.Trim() ?? string.Empty;
-        foreach (var map in Catalog)
+        var catalogSnapshot = Catalog.ToArray();
+        try
         {
-            if (query.Length == 0)
-            {
-                CatalogView.Add(map);
-                continue;
-            }
-            if (map.Label.Contains(query, StringComparison.CurrentCultureIgnoreCase))
-            {
-                CatalogView.Add(map);
-                continue;
-            }
-            var mapClone = map.CloneFiltered(query);
-            if (mapClone is not null)
-                CatalogView.Add(mapClone);
+            // Recursive matching and filtered-tree construction can be expensive for
+            // large replay catalogs. Keep that CPU work off the WPF dispatcher.
+            var filtered = await Task.Run(
+                () => BuildCatalogFilter(catalogSnapshot, query, cancellation.Token),
+                cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (!ReferenceEquals(_catalogFilterCancellation, cancellation))
+                return;
+
+            // Await resumes on the UI dispatcher. Publish once so TreeView performs
+            // one binding/layout pass rather than one pass per matching branch.
+            CatalogView = new ObservableCollection<ReplayTreeNode>(filtered);
+            OnPropertyChanged(nameof(CatalogView));
+            IsCatalogEmpty = filtered.Count == 0;
+            CatalogEmptyHint = query.Length == 0
+                ? "启动合成后，完成的片段会出现在这里"
+                : $"没有与「{query}」匹配的回放记录";
         }
-        IsCatalogEmpty = CatalogView.Count == 0;
-        CatalogEmptyHint = query.Length == 0
-            ? "启动合成后，完成的片段会出现在这里"
-            : $"没有与「{query}」匹配的回放记录";
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            // New input or a catalog refresh superseded this result.
+        }
+        catch (Exception ex)
+        {
+            if (ReferenceEquals(_catalogFilterCancellation, cancellation))
+                SetStatus($"搜索回放记录失败：{ex.Message}", Wpf.Ui.Controls.InfoBarSeverity.Error);
+        }
+        finally
+        {
+            if (ReferenceEquals(_catalogFilterCancellation, cancellation))
+                _catalogFilterCancellation = null;
+            cancellation.Dispose();
+        }
+    }
+
+    private static List<ReplayTreeNode> BuildCatalogFilter(
+        IReadOnlyList<ReplayTreeNode> catalog,
+        string query,
+        CancellationToken cancellationToken)
+    {
+        var filtered = new List<ReplayTreeNode>(catalog.Count);
+        foreach (var map in catalog)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (query.Length == 0 || map.Label.Contains(query, StringComparison.CurrentCultureIgnoreCase))
+            {
+                filtered.Add(map);
+                continue;
+            }
+
+            var mapClone = map.CloneFiltered(query, cancellationToken);
+            if (mapClone is not null)
+                filtered.Add(mapClone);
+        }
+        return filtered;
     }
 
     /// <summary>空态说明文字：区分「还没有记录」与「筛选无结果」。</summary>
@@ -129,6 +187,12 @@ public partial class TasksViewModel : ObservableObject
     {
         _settings = settings; _runner = new RenderTaskRunner(_repository);
         ReplayTreeNode.SelectionChanged += UpdateSelectionCount;
+        _catalogFilterTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+        _catalogFilterTimer.Tick += (_, _) =>
+        {
+            _catalogFilterTimer.Stop();
+            _ = ApplyCatalogFilterAsync();
+        };
         _runnerUiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _runnerUiTimer.Tick += (_, _) => UpdateRunnerProjection();
         _runner.Changed += () => System.Windows.Application.Current.Dispatcher.BeginInvoke(() =>
@@ -137,17 +201,49 @@ public partial class TasksViewModel : ObservableObject
                 _runnerUiTimer.Start();
         });
         ReloadTasks();
+        UpdateRemainingEstimate();
     }
 
     [RelayCommand]
-    private void RefreshCatalog()
+    private async Task RefreshCatalog()
     {
-        Catalog.Clear();
+        _catalogFilterTimer.Stop();
+        _catalogFilterCancellation?.Cancel();
         var gameRoot = _settings.GameRootPath?.Trim() ?? string.Empty;
-        var result = _catalog.Scan(gameRoot);
-        // Only current-version (compatible) replays are shown; legacy formats are
-        // counted and kept out of the tree so it stays clean and selectable-only.
-        var usable = result.Records.Where(x => x.IsCompatible).ToList();
+        SetStatus("正在后台扫描并解析回放记录…", Wpf.Ui.Controls.InfoBarSeverity.Informational);
+
+        try
+        {
+            // File enumeration, MTV parsing, grouping and tree construction are all
+            // CPU/disk-heavy for large catalogs; none of them belongs on the UI thread.
+            var refresh = await Task.Run(() =>
+            {
+                var result = _catalog.Scan(gameRoot);
+                var usable = result.Records.Where(x => x.IsCompatible).ToList();
+                var tree = BuildCatalogTree(usable);
+                return (Result: result, Usable: usable, Tree: tree);
+            });
+
+            _catalogFilterCancellation?.Cancel();
+            Catalog = new ObservableCollection<ReplayTreeNode>(refresh.Tree);
+            OnPropertyChanged(nameof(Catalog));
+
+            var incompatible = refresh.Result.Records.Count - refresh.Usable.Count;
+            CatalogCountText = $"可执行 {refresh.Usable.Count} · 不支持 {incompatible}";
+            _ = ApplyCatalogFilterAsync();
+            UpdateSelectionCount();
+            SetStatus($"已解析 {refresh.Result.Records.Count} 条回放；可执行 {refresh.Usable.Count} 条；格式不支持 {incompatible} 条（已隐藏）；无法解析 {refresh.Result.Issues.Count} 条。",
+                Wpf.Ui.Controls.InfoBarSeverity.Informational);
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"刷新回放记录失败：{ex.Message}", Wpf.Ui.Controls.InfoBarSeverity.Error);
+        }
+    }
+
+    private static List<ReplayTreeNode> BuildCatalogTree(IReadOnlyList<ReplayRecord> usable)
+    {
+        var tree = new List<ReplayTreeNode>();
         foreach (var mapGroup in usable.GroupBy(x => x.MapName, StringComparer.OrdinalIgnoreCase))
         {
             // 地图与玩家默认展开，让「有下级」和记录行勾选框一刷新就可见；
@@ -170,14 +266,9 @@ public partial class TasksViewModel : ObservableObject
                 }
                 map.Children.Add(player);
             }
-            Catalog.Add(map);
+            tree.Add(map);
         }
-        var incompatible = result.Records.Count - usable.Count;
-        CatalogCountText = $"可执行 {usable.Count} · 旧版 {incompatible}";
-        ApplyCatalogFilter();
-        UpdateSelectionCount();
-        SetStatus($"已解析 {result.Records.Count} 条回放；可执行 {usable.Count} 条；旧版不兼容 {incompatible} 条（已隐藏）；无法解析 {result.Issues.Count} 条。",
-            Wpf.Ui.Controls.InfoBarSeverity.Informational);
+        return tree;
     }
 
     private void UpdateSelectionCount()
@@ -245,8 +336,9 @@ public partial class TasksViewModel : ObservableObject
                 // 冻结配置：这里是全局设置写入任务的唯一时机。此后执行 / 暂停 / 恢复 /
                 // 中断重启都只从 render_tasks.settings_json 反序列化，绝不重新读取全局设置
                 // （RenderTaskRunner 甚至不持有 SettingsViewModel/UserSettings 依赖）。
-                // 用户要求「创建时是什么配置就一直是什么配置」，因此曾经用于事后覆盖快照的
-                // 「刷新快照」按钮与其仓储方法 UpdatePendingTaskSettings 已一并删除，不要加回。
+                // 任务的画面与编码配置创建后保持冻结，不允许用全局设置整体覆盖。
+                // 唯一例外是前台 TGA 生成速率上限：它只影响现实生成速度，可在安全状态下
+                // 通过专用事务窄更新，不改变已完成片段或其余快照字段。
                 var snapshot = new RenderSettingsSnapshot(
                     settings.SupersamplingMultiplier,
                     settings.Exposure,
@@ -259,7 +351,8 @@ public partial class TasksViewModel : ObservableObject
                     settings.MotionBlurWeightMode,
                     settings.ShutterAngle,
                     settings.VideoProcessing?.Clone(),
-                    DiskSafetyFreePercent: settings.DiskSafetyFreePercent);
+                    DiskSafetyFreePercent: settings.DiskSafetyFreePercent,
+                    ForegroundCaptureFpsLimit: settings.ForegroundCaptureFpsLimit);
                 _repository.CreateTask(new NewRenderTask(group.Key.MapName, group.Key.PlayerName, group.Key.TrackNumber, output, snapshot, nodes));
                 count++;
             }
@@ -291,17 +384,85 @@ public partial class TasksViewModel : ObservableObject
         IsHistoryEmpty = History.Count == 0;
         if (selectedId is not null)
             SelectedTask = Queue.Concat(History).FirstOrDefault(x => x.Record.Id == selectedId);
+        UpdateCurrentVideoSpec();
+    }
+
+    private void UpdateCurrentVideoSpec()
+    {
+        var task = Queue.FirstOrDefault(x => x.Record.Status is RenderTaskStatus.Starting
+            or RenderTaskStatus.Running
+            or RenderTaskStatus.Merging)
+            ?? Queue.FirstOrDefault(x => x.Record.Status == RenderTaskStatus.Paused)
+            ?? Queue.FirstOrDefault(x => x.Record.Status == RenderTaskStatus.Pending);
+
+        if (task is null)
+        {
+            CurrentVideoSpecText = "暂无待执行任务";
+            CurrentVideoSpecSubText = "创建任务后显示冻结的视频规格";
+            return;
+        }
+
+        if (!TryBuildVideoSpec(task.Record, out var primary, out var secondary))
+        {
+            CurrentVideoSpecText = "视频规格快照无法解析";
+            CurrentVideoSpecSubText = task.Record.OutputPath;
+            return;
+        }
+
+        CurrentVideoSpecText = primary;
+        CurrentVideoSpecSubText = secondary;
     }
 
     [RelayCommand]
     private async Task StartQueue()
     {
+        _lastEtaConsumptionRate = 0;
+        CanEditSelectedTaskForegroundCaptureFpsLimit = false;
         await _runner.StartAsync();
         SetStatus(_runner.Status);
     }
 
     [RelayCommand] private void PauseAfterNode() => _runner.PauseAfterCurrentNode();
     [RelayCommand] private void StopNow() => _runner.StopImmediately();
+
+    partial void OnSelectedTaskForegroundCaptureFpsLimitChanged(int value)
+    {
+        var normalized = SettingsMigration.NormalizeForegroundCaptureFpsLimit(value);
+        if (normalized != value)
+            SelectedTaskForegroundCaptureFpsLimit = normalized;
+    }
+
+    [RelayCommand]
+    private void ApplySelectedTaskForegroundCaptureFpsLimit()
+    {
+        if (SelectedTask is null)
+        {
+            SetStatus("请先选择要修改的任务。", Wpf.Ui.Controls.InfoBarSeverity.Warning);
+            return;
+        }
+        if (_runner.IsRunning || !CanEditSelectedTaskForegroundCaptureFpsLimit)
+        {
+            SetStatus("任务正在执行、收尾或已经结束，无法修改前台生成速率上限。",
+                Wpf.Ui.Controls.InfoBarSeverity.Warning);
+            return;
+        }
+
+        try
+        {
+            var taskId = SelectedTask.Record.Id;
+            var normalized = SettingsMigration.NormalizeForegroundCaptureFpsLimit(SelectedTaskForegroundCaptureFpsLimit);
+            _repository.UpdateTaskForegroundCaptureFpsLimit(taskId, normalized);
+            ReloadTasks();
+            SetStatus(normalized == 0
+                    ? "任务前台生成上限已改为不覆盖。点击“开始 / 继续”后，将保留已完成节点并从失败或待执行节点继续。"
+                    : $"任务前台生成上限已改为 {normalized} fps。点击“开始 / 继续”后，将保留已完成节点并从失败或待执行节点继续。",
+                Wpf.Ui.Controls.InfoBarSeverity.Success);
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"修改任务运行参数失败：{ex.Message}", Wpf.Ui.Controls.InfoBarSeverity.Error);
+        }
+    }
 
     /// <summary>
     /// 顶层模式切换的只读安全门：无人值守任务执行中时拒绝切换。
@@ -355,6 +516,7 @@ public partial class TasksViewModel : ObservableObject
             DetailState = TaskPresentationState.Idle;
             FrozenComposeText = "选择任务后显示冻结的合成参数。";
             FrozenQualityText = string.Empty;
+            CanEditSelectedTaskForegroundCaptureFpsLimit = false;
             IsDetailEmpty = true;
             return;
         }
@@ -390,30 +552,69 @@ public partial class TasksViewModel : ObservableObject
         foreach (var log in _repository.GetLogs(value.Record.Id).TakeLast(20))
             DetailLogs.Add(new TaskLogItem($"{log.Timestamp.LocalDateTime:HH:mm:ss}  [{log.Level}] {log.Message}"));
 
-        var configLines = new List<string>();
         FrozenComposeText = "（快照不可解析）";
         FrozenQualityText = string.Empty;
+        if (TryBuildVideoSpec(value.Record, out var primarySpec, out var secondarySpec))
+        {
+            FrozenComposeText = primarySpec;
+            FrozenQualityText = secondarySpec;
+        }
+
         try
         {
-            var snapshot = System.Text.Json.JsonSerializer.Deserialize<RenderSettingsSnapshot>(value.Record.SettingsJson);
-            if (snapshot is not null)
-            {
-                var blur = snapshot.MotionBlurMode == MotionBlurWeightMode.ShutterAngle
-                    ? $"Shutter {snapshot.ShutterAngle:0}°"
-                    : $"Legacy Exposure {snapshot.Exposure:0.##}";
-                var bitrate = snapshot.TargetBitrate > 0 ? $" · 码率 {snapshot.TargetBitrate / 1_000_000.0:0.#} Mbps" : " · 码率 自动";
-                FrozenComposeText = $"合成：N={snapshot.SupersamplingMultiplier} · {blur} · {snapshot.OutputFramerate}fps{bitrate}";
-                FrozenQualityText = VideoProcessingSummary.Build(snapshot.VideoProcessing);
-            }
+            var snapshot = SettingsMigration.NormalizeSnapshot(
+                System.Text.Json.JsonSerializer.Deserialize<RenderSettingsSnapshot>(value.Record.SettingsJson)
+                ?? throw new InvalidDataException("任务设置快照无法解析。"));
+            SelectedTaskForegroundCaptureFpsLimit = snapshot.ForegroundCaptureFpsLimit;
         }
         catch
         {
-            // old SettingsJson without new fields: keep legacy display
+            SelectedTaskForegroundCaptureFpsLimit = ProjectConstants.DefaultForegroundCaptureFpsLimit;
         }
+        CanEditSelectedTaskForegroundCaptureFpsLimit = !_runner.IsRunning &&
+            value.Record.Status is RenderTaskStatus.Pending or RenderTaskStatus.Paused or RenderTaskStatus.FailedNeedsAttention;
 
         var nodeLines = nodes.Select(x => $"节点 {x.Sequence + 1} / 阶段 {x.StageNumber}：{x.Status}，重试 {x.RetryCount}/2\n{x.ReplayPath}");
         var logLines = _repository.GetLogs(value.Record.Id).TakeLast(30).Select(x => $"{x.Timestamp.LocalDateTime:MM-dd HH:mm:ss} [{x.Level}] {x.Message}");
-        SelectedTaskDetail = string.Join("\n", nodeLines.Concat(configLines).Concat(["", "最近日志："]).Concat(logLines));
+        SelectedTaskDetail = string.Join("\n", nodeLines.Concat(["", "最近日志："]).Concat(logLines));
+    }
+
+    private static bool TryBuildVideoSpec(
+        RenderTaskRecord task,
+        out string primary,
+        out string secondary)
+    {
+        primary = string.Empty;
+        secondary = string.Empty;
+        try
+        {
+            var raw = System.Text.Json.JsonSerializer.Deserialize<RenderSettingsSnapshot>(task.SettingsJson);
+            if (raw is null)
+                return false;
+
+            var snapshot = SettingsMigration.NormalizeSnapshot(raw);
+            var blur = snapshot.MotionBlurMode == MotionBlurWeightMode.ShutterAngle
+                ? $"Shutter {snapshot.ShutterAngle:0}°"
+                : $"Legacy Exposure {snapshot.Exposure:0.##}";
+            var legacyShortBitrate = raw.TargetBitrate is > 0 and <= 120;
+            var bitrate = legacyShortBitrate && task.Status is RenderTaskStatus.Completed or RenderTaskStatus.ClipsReadyNeedsManualMerge
+                ? $"旧值 {raw.TargetBitrate} bps（本文件按编码器最低码率生成）"
+                : snapshot.TargetBitrate > 0
+                    ? $"{snapshot.TargetBitrate / 1_000_000.0:0.#} Mbps{(legacyShortBitrate ? "（旧值已迁移）" : string.Empty)}"
+                    : "自动";
+
+            primary = $"MP4 / H.264 · 分辨率跟随源 TGA · {snapshot.OutputFramerate} fps · 目标码率 {bitrate}";
+            var hud = snapshot.HideHud ? "HUD/回放栏隐藏" : "HUD/回放栏显示";
+            var foregroundLimit = snapshot.ForegroundCaptureFpsLimit > 0
+                ? $"前台生成上限 {snapshot.ForegroundCaptureFpsLimit} fps"
+                : "前台生成上限不覆盖";
+            secondary = $"超采样 {snapshot.SupersamplingMultiplier}x · {blur} · {hud} · {foregroundLimit} · {VideoProcessingSummary.Build(snapshot.VideoProcessing)} · 输出：{task.OutputPath}";
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     [RelayCommand] private void OpenOutput()
@@ -457,12 +658,102 @@ public partial class TasksViewModel : ObservableObject
         // 运行中也要刷新节点投影；录制管线的高频遥测仍只更新指标，
         // 数据库列表固定每秒读取一次，避免 UI 4 Hz 查询影响捕获线程。
         if (++_runnerUiTicks % 4 == 0)
+        {
             ReloadTasks();
+            UpdateRemainingEstimate();
+        }
         if (!_runner.IsRunning)
         {
             ReloadTasks();
+            UpdateRemainingEstimate();
             _runnerUiTimer.Stop();
         }
+    }
+
+    private void UpdateRemainingEstimate()
+    {
+        if (!_runner.IsRunning)
+        {
+            RemainingTimeText = "—";
+            RemainingTimeSubText = Queue.Any(task => task.Record.Status == RenderTaskStatus.Paused)
+                ? "队列已暂停"
+                : Queue.Count == 0 ? "暂无待执行任务" : "开始队列后估算";
+            return;
+        }
+
+        var snapshot = _runner.RuntimeSnapshot;
+        var sampledRate = snapshot.Performance.ConsumedFramesPerSecond;
+        if (double.IsFinite(sampledRate) && sampledRate >= 1)
+            _lastEtaConsumptionRate = sampledRate;
+
+        if (_lastEtaConsumptionRate < 1)
+        {
+            RemainingTimeText = "采样中";
+            RemainingTimeSubText = "等待稳定的实时消费速度";
+            return;
+        }
+
+        long remainingInputFrames = 0;
+        var remainingNodeCount = 0;
+        foreach (var task in Queue)
+        {
+            if (!TryReadSupersampling(task.Record, out var supersampling))
+                continue;
+            foreach (var node in task.NodeRecords)
+            {
+                if (node.Status is RenderNodeStatus.Completed or RenderNodeStatus.Skipped)
+                    continue;
+
+                long nodeFrames = CaptureEnvelopeRecorder.ComputeEnvelopeFrameCount(
+                    node.ExpectedDurationSeconds,
+                    supersampling);
+                if (string.Equals(task.Record.Id, snapshot.TaskId, StringComparison.Ordinal)
+                    && string.Equals(node.Id, snapshot.NodeId, StringComparison.Ordinal))
+                {
+                    nodeFrames = Math.Max(0, nodeFrames - snapshot.Performance.ConsumedFrames);
+                }
+
+                remainingInputFrames += nodeFrames;
+                remainingNodeCount++;
+            }
+        }
+
+        if (remainingNodeCount == 0)
+        {
+            RemainingTimeText = "收尾中";
+            RemainingTimeSubText = "正在完成编码、校验或合并";
+            return;
+        }
+
+        var remainingSeconds = remainingInputFrames / _lastEtaConsumptionRate;
+        RemainingTimeText = $"约 {FormatRemainingTime(remainingSeconds)}";
+        RemainingTimeSubText =
+            $"剩余 {remainingNodeCount} 节点 / {remainingInputFrames:N0} 帧 · 实时消费 {_lastEtaConsumptionRate:0.0} fps";
+    }
+
+    private static bool TryReadSupersampling(RenderTaskRecord task, out int supersampling)
+    {
+        try
+        {
+            var settings = System.Text.Json.JsonSerializer.Deserialize<RenderSettingsSnapshot>(task.SettingsJson);
+            supersampling = Math.Clamp(settings?.SupersamplingMultiplier ?? 1, 1, 64);
+            return settings is not null;
+        }
+        catch
+        {
+            supersampling = 1;
+            return false;
+        }
+    }
+
+    private static string FormatRemainingTime(double seconds)
+    {
+        var duration = TimeSpan.FromSeconds(Math.Max(0, Math.Ceiling(seconds)));
+        if (duration.TotalHours >= 1)
+            return $"{(int)duration.TotalHours} 小时 {duration.Minutes:D2} 分";
+        if (duration.TotalMinutes >= 1)
+            return $"{(int)duration.TotalMinutes} 分 {duration.Seconds:D2} 秒";
+        return "少于 1 分钟";
     }
 
     private void UpdateTelemetry(CaptureRuntimeSnapshot snapshot)
@@ -507,6 +798,11 @@ public partial class TasksViewModel : ObservableObject
             DiskFreeText = "—";
             DiskSubText = "等待采样";
         }
+
+        // Pure in-memory arithmetic over the once-per-second queue snapshot.
+        // Updating at the existing UI ceiling (4 Hz) makes ETA responsive
+        // without adding database, disk, native or capture-thread work.
+        UpdateRemainingEstimate();
     }
 
     private static string FormatRuntime(CaptureRuntimeSnapshot snapshot)
@@ -610,11 +906,18 @@ public partial class ReplayTreeNode : ObservableObject
     /// 命中的节点直接复用原实例（而不是拷贝），否则过滤状态下勾选/取消会写进
     /// 与 Catalog 脱钩的副本，「已选 N 条」和创建任务都取不到。
     /// </summary>
-    public ReplayTreeNode? CloneFiltered(string query)
+    public ReplayTreeNode? CloneFiltered(string query, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (Matches(query))
             return this;
-        var kept = Children.Select(c => c.CloneFiltered(query)).Where(c => c is not null).Select(c => c!).ToList();
+        var kept = new List<ReplayTreeNode>();
+        foreach (var child in Children)
+        {
+            var match = child.CloneFiltered(query, cancellationToken);
+            if (match is not null)
+                kept.Add(match);
+        }
         if (kept.Count == 0)
             return null;
         // 过滤路径上的分组节点强制展开，命中的记录行不会藏在折叠里。
@@ -644,10 +947,12 @@ public sealed class TaskListItem
     public TaskListItem(RenderTaskRecord record, IReadOnlyList<RenderNodeRecord> nodes)
     {
         Record = record;
-        Nodes = nodes.OrderBy(x => x.Sequence).Select(CreateNodeItem).ToArray();
+        NodeRecords = nodes.OrderBy(x => x.Sequence).ToArray();
+        Nodes = NodeRecords.Select(CreateNodeItem).ToArray();
     }
 
     public RenderTaskRecord Record { get; }
+    public IReadOnlyList<RenderNodeRecord> NodeRecords { get; }
     public IReadOnlyList<TaskNodeItem> Nodes { get; }
     public int NodeCount => Nodes.Count;
     public string Title => $"{Record.MapName} · {Record.PlayerName}";

@@ -42,7 +42,8 @@ public sealed record RenderSettingsSnapshot(
     MotionBlurWeightMode MotionBlurMode = MotionBlurWeightMode.LegacyGaussianExposure,
     double ShutterAngle = 270,
     VideoProcessingSettings? VideoProcessing = null,
-    int DiskSafetyFreePercent = 10);
+    int DiskSafetyFreePercent = 10,
+    int ForegroundCaptureFpsLimit = ProjectConstants.DefaultForegroundCaptureFpsLimit);
 
 public sealed record NewRenderNode(
     string ReplayPath,

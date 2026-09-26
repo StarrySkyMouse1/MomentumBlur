@@ -182,6 +182,63 @@ public sealed class RenderTaskRepository
         command.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// Narrow post-creation override for the wall-clock capture throttle only.
+    /// This field does not change output fps, sampling, processing or encoding,
+    /// so completed stage clips remain compatible with stages recorded later.
+    /// The status guard prevents racing a running/finalizing task.
+    /// </summary>
+    public void UpdateTaskForegroundCaptureFpsLimit(string taskId, int fpsLimit)
+    {
+        var normalized = SettingsMigration.NormalizeForegroundCaptureFpsLimit(fpsLimit);
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction();
+
+        string settingsJson;
+        RenderTaskStatus status;
+        using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction;
+            read.CommandText = "SELECT status, settings_json FROM render_tasks WHERE id=$id;";
+            read.Parameters.AddWithValue("$id", taskId);
+            using var reader = read.ExecuteReader();
+            if (!reader.Read())
+                throw new InvalidOperationException("任务不存在或已被删除。");
+            status = (RenderTaskStatus)reader.GetInt32(0);
+            settingsJson = reader.GetString(1);
+        }
+
+        if (status is not (RenderTaskStatus.Pending or RenderTaskStatus.Paused or RenderTaskStatus.FailedNeedsAttention))
+            throw new InvalidOperationException("只有待执行、已暂停或失败待处理的任务可以修改前台生成速率上限。");
+
+        var snapshot = SettingsMigration.NormalizeSnapshot(
+            JsonSerializer.Deserialize<RenderSettingsSnapshot>(settingsJson)
+            ?? throw new InvalidDataException("任务设置快照无法解析。"));
+        var updatedJson = JsonSerializer.Serialize(snapshot with { ForegroundCaptureFpsLimit = normalized });
+
+        using (var update = connection.CreateCommand())
+        {
+            update.Transaction = transaction;
+            update.CommandText = """
+                UPDATE render_tasks SET settings_json=$settings
+                WHERE id=$id AND status IN ($pending, $paused, $failed);
+                """;
+            update.Parameters.AddWithValue("$settings", updatedJson);
+            update.Parameters.AddWithValue("$id", taskId);
+            update.Parameters.AddWithValue("$pending", (int)RenderTaskStatus.Pending);
+            update.Parameters.AddWithValue("$paused", (int)RenderTaskStatus.Paused);
+            update.Parameters.AddWithValue("$failed", (int)RenderTaskStatus.FailedNeedsAttention);
+            if (update.ExecuteNonQuery() != 1)
+                throw new InvalidOperationException("任务状态已经变化，未修改运行参数。请刷新后重试。");
+        }
+
+        InsertLog(connection, transaction, taskId, null, "Info",
+            normalized == 0
+                ? "前台 TGA 生成速率上限已改为不覆盖；已完成节点保留，未完成节点继续执行。"
+                : $"前台 TGA 生成速率上限已改为 {normalized} fps；已完成节点保留，未完成节点继续执行。");
+        transaction.Commit();
+    }
+
     // ---- render_attempts (fine-grained state machine persistence) ----
 
     public string CreateAttempt(RenderAttemptRecord attempt)
