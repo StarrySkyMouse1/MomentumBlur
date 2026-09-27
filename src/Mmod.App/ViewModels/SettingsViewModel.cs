@@ -5,6 +5,7 @@ using Mmod.Core.Services;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
+using System.Text.Json;
 
 namespace Mmod.App.ViewModels;
 
@@ -98,7 +99,10 @@ public partial class SettingsViewModel : ObservableObject
         VideoProcessorCatalog.Presets;
     public ObservableCollection<QualityModuleViewModel> QualityModules { get; } = [];
     public ObservableCollection<PreviewReplayTreeNode> QualityPreviewReplayTree { get; } = [];
-    public event Action<string>? QualityPreviewPlaybackRequested;
+    public ObservableCollection<QualityPreviewArtifactItem> QualityPreviewStageOneArtifacts { get; } = [];
+    public ObservableCollection<QualityPreviewArtifactItem> QualityPreviewStageTwoArtifacts { get; } = [];
+    [ObservableProperty] private QualityPreviewArtifactItem? selectedQualityPreviewStageOneArtifact;
+    [ObservableProperty] private QualityPreviewArtifactItem? selectedQualityPreviewStageTwoArtifact;
 
     public bool IsObsMode => CaptureMode == CaptureMode.Obs;
     public bool IsTgaMode => CaptureMode == CaptureMode.Tga;
@@ -263,7 +267,7 @@ public partial class SettingsViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(OutputDirectoryText));
         Persist();
-        if (!_loading && !HasQualityPreviewSlowMotionSource)
+        if (!_loading)
             RestoreCompletedQualityPreview(_settings);
     }
     partial void OnRamDiskWatchDirectoryChanged(string value) => Persist();
@@ -416,6 +420,8 @@ public partial class SettingsViewModel : ObservableObject
         QualityPreviewProcessedPath = processed;
         QualityPreviewPath = slowMotionSource.Length > 0 ? slowMotionSource : processed;
 
+        RefreshQualityPreviewArtifacts();
+
         if (QualityPreviewPath.Length == 0)
             return;
 
@@ -442,7 +448,10 @@ public partial class SettingsViewModel : ObservableObject
 
         try
         {
-            return Directory.EnumerateFiles(outputDirectory, "quality-preview-stage1-*.mp4", SearchOption.TopDirectoryOnly)
+            var stageDirectory = Path.Combine(outputDirectory, "quality-preview", "stage1");
+            if (!Directory.Exists(stageDirectory))
+                return string.Empty;
+            return Directory.EnumerateFiles(stageDirectory, "*.mp4", SearchOption.TopDirectoryOnly)
                 .Select(path => new FileInfo(path))
                 .Where(file => file.Length > 0)
                 .OrderByDescending(file => file.LastWriteTimeUtc)
@@ -545,17 +554,39 @@ public partial class SettingsViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(HasQualityPreviewSlowMotionSource));
         UpdateQualityPreviewCommand.NotifyCanExecuteChanged();
-        ShowQualityPreviewSourceCommand.NotifyCanExecuteChanged();
     }
 
-    partial void OnQualityPreviewProcessedPathChanged(string value) =>
-        ShowQualityPreviewResultCommand.NotifyCanExecuteChanged();
+    partial void OnQualityPreviewProcessedPathChanged(string value) { }
 
     partial void OnQualityPreviewPathChanged(string value)
     {
         OnPropertyChanged(nameof(HasQualityPreview));
         OnPropertyChanged(nameof(HasNoQualityPreview));
         OpenQualityPreviewCommand.NotifyCanExecuteChanged();
+        PlayQualityPreviewCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnSelectedQualityPreviewStageOneArtifactChanged(QualityPreviewArtifactItem? value)
+    {
+        UpdateQualityPreviewCommand.NotifyCanExecuteChanged();
+        if (value is null)
+            return;
+        QualityPreviewSlowMotionSourcePath = value.FilePath;
+        QualityPreviewPath = value.FilePath;
+        Persist();
+        OpenQualityPreviewCommand.NotifyCanExecuteChanged();
+        PlayQualityPreviewCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnSelectedQualityPreviewStageTwoArtifactChanged(QualityPreviewArtifactItem? value)
+    {
+        if (value is null)
+            return;
+        QualityPreviewProcessedPath = value.FilePath;
+        QualityPreviewPath = value.FilePath;
+        Persist();
+        OpenQualityPreviewCommand.NotifyCanExecuteChanged();
+        PlayQualityPreviewCommand.NotifyCanExecuteChanged();
     }
 
     [RelayCommand]
@@ -661,10 +692,13 @@ public partial class SettingsViewModel : ObservableObject
                 progress,
                 CancellationToken.None);
             QualityPreviewSlowMotionSourcePath = rawSource;
-            ReloadQualityPreview(rawSource);
+            QualityPreviewPath = rawSource;
+            WriteQualityPreviewMetadata(rawSource, 1, SelectedQualityPreviewReplay?.DisplayText ?? replay.MapName,
+                $"60× 高时间采样 · 60 fps · {IntermediateTargetBitrateMbps:0.##} Mbps", string.Empty);
+            RefreshQualityPreviewArtifacts(rawSource, null);
             Persist();
             QualityPreviewStatus =
-                $"阶段 1 完成：60× 慢放、60fps 底片已保存到 {rawSource}。可直接预览，或执行阶段 2 并行合成。";
+                $"阶段 1 完成：底片已加入列表，可选中后生成阶段 2 影片。";
         }
         catch (Exception ex)
         {
@@ -732,7 +766,9 @@ public partial class SettingsViewModel : ObservableObject
     }
 
     private bool CanUpdateQualityPreview() =>
-        !IsQualityPreviewRunning && HasQualityPreviewSlowMotionSource;
+        !IsQualityPreviewRunning
+        && SelectedQualityPreviewStageOneArtifact is not null
+        && File.Exists(SelectedQualityPreviewStageOneArtifact.FilePath);
 
     [RelayCommand(CanExecute = nameof(CanUpdateQualityPreview))]
     private async Task UpdateQualityPreviewAsync()
@@ -763,17 +799,24 @@ public partial class SettingsViewModel : ObservableObject
         IProgress<QualityPreviewService.PreviewProgress> progress,
         string sourceLabel)
     {
-        if (!HasQualityPreviewSlowMotionSource)
-            throw new FileNotFoundException("尚未从游戏获取 60× 慢放预览素材。");
+        var selectedStageOne = SelectedQualityPreviewStageOneArtifact
+            ?? throw new InvalidOperationException("请先在阶段 1 列表中选择一部影片。");
+        if (!File.Exists(selectedStageOne.FilePath))
+            throw new FileNotFoundException("选中的阶段 1 影片已不存在。", selectedStageOne.FilePath);
+
+        QualityPreviewSlowMotionSourcePath = selectedStageOne.FilePath;
 
         var settings = Snapshot();
         var output = await new QualityPreviewService().CreateFromSlowMotionSourceAsync(
-            QualityPreviewSlowMotionSourcePath,
+            selectedStageOne.FilePath,
             settings,
             progress,
             CancellationToken.None);
         QualityPreviewProcessedPath = output;
-        ReloadQualityPreview(output);
+        QualityPreviewPath = output;
+        var parameterText = BuildQualityPreviewParameterText(settings);
+        WriteQualityPreviewMetadata(output, 2, sourceLabel, parameterText, selectedStageOne.FilePath);
+        RefreshQualityPreviewArtifacts(selectedStageOne.FilePath, output);
         Persist();
         QualityPreviewStatus =
             $"预览已更新：{sourceLabel} · 60×慢放底片 · 当前 N={settings.SupersamplingMultiplier} · " +
@@ -782,50 +825,13 @@ public partial class SettingsViewModel : ObservableObject
                 : $"Exposure {settings.Exposure:0.##}");
     }
 
-    [RelayCommand]
-    private void ShowQualityPreviewSource()
-    {
-        var dialog = new Microsoft.Win32.OpenFileDialog
-        {
-            Title = "选择阶段 1 预览视频",
-            Filter = "视频|*.mp4;*.mkv;*.mov;*.avi;*.wmv;*.webm|所有文件|*.*",
-            Multiselect = false,
-        };
-        var currentDirectory = Path.GetDirectoryName(QualityPreviewSlowMotionSourcePath);
-        if (!string.IsNullOrWhiteSpace(currentDirectory) && Directory.Exists(currentDirectory))
-            dialog.InitialDirectory = currentDirectory;
-        else if (Directory.Exists(VideoOutputDirectory))
-            dialog.InitialDirectory = VideoOutputDirectory;
-
-        if (dialog.ShowDialog() != true)
-            return;
-
-        var selected = Path.GetFullPath(dialog.FileName);
-        if (!string.Equals(QualityPreviewSlowMotionSourcePath, selected, StringComparison.OrdinalIgnoreCase))
-            QualityPreviewProcessedPath = string.Empty;
-        QualityPreviewSlowMotionSourcePath = selected;
-        ReloadQualityPreview(selected);
-        Persist();
-        QualityPreviewStatus = $"正在预览阶段 1：{Path.GetFileName(selected)}";
-    }
-
-    private bool CanShowQualityPreviewResult() =>
-        !string.IsNullOrWhiteSpace(QualityPreviewProcessedPath) && File.Exists(QualityPreviewProcessedPath);
-
-    [RelayCommand(CanExecute = nameof(CanShowQualityPreviewResult))]
-    private void ShowQualityPreviewResult()
-    {
-        ReloadQualityPreview(QualityPreviewProcessedPath);
-        QualityPreviewStatus = "正在预览阶段 2：按当前参数生成的60fps结果。";
-    }
-
-    private void ReloadQualityPreview(string path)
-    {
-        QualityPreviewPath = path;
-        QualityPreviewPlaybackRequested?.Invoke(path);
-    }
-
     private bool CanOpenQualityPreview() => HasQualityPreview;
+
+    [RelayCommand(CanExecute = nameof(CanOpenQualityPreview))]
+    private void PlayQualityPreview()
+    {
+        Process.Start(new ProcessStartInfo(Path.GetFullPath(QualityPreviewPath)) { UseShellExecute = true });
+    }
 
     [RelayCommand(CanExecute = nameof(CanOpenQualityPreview))]
     private void OpenQualityPreview()
@@ -838,6 +844,75 @@ public partial class SettingsViewModel : ObservableObject
             ArgumentList = { "/select,", path },
         });
     }
+
+    private void RefreshQualityPreviewArtifacts(string? selectStageOnePath = null, string? selectStageTwoPath = null)
+    {
+        QualityPreviewStageOneArtifacts.Clear();
+        QualityPreviewStageTwoArtifacts.Clear();
+        LoadQualityPreviewArtifacts(1, QualityPreviewStageOneArtifacts);
+        LoadQualityPreviewArtifacts(2, QualityPreviewStageTwoArtifacts);
+
+        SelectedQualityPreviewStageOneArtifact = QualityPreviewStageOneArtifacts.FirstOrDefault(item =>
+            string.Equals(item.FilePath, selectStageOnePath ?? QualityPreviewSlowMotionSourcePath, StringComparison.OrdinalIgnoreCase))
+            ?? QualityPreviewStageOneArtifacts.FirstOrDefault();
+        SelectedQualityPreviewStageTwoArtifact = QualityPreviewStageTwoArtifacts.FirstOrDefault(item =>
+            string.Equals(item.FilePath, selectStageTwoPath ?? QualityPreviewProcessedPath, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void LoadQualityPreviewArtifacts(int stage, ObservableCollection<QualityPreviewArtifactItem> target)
+    {
+        var directory = Path.Combine(VideoOutputDirectory?.Trim() ?? string.Empty, "quality-preview", $"stage{stage}");
+        if (!Directory.Exists(directory))
+            return;
+
+        foreach (var path in Directory.EnumerateFiles(directory, "*.mp4", SearchOption.TopDirectoryOnly)
+                     .Select(path => new FileInfo(path)).Where(file => file.Length > 0)
+                     .OrderByDescending(file => file.LastWriteTimeUtc))
+        {
+            var metadata = ReadQualityPreviewMetadata(path.FullName);
+            target.Add(new QualityPreviewArtifactItem
+            {
+                FilePath = path.FullName,
+                FileName = path.Name,
+                CreatedText = (metadata?.CreatedAt ?? path.LastWriteTime).ToString("yyyy-MM-dd HH:mm:ss"),
+                ParametersText = metadata?.Parameters ?? (stage == 1 ? "60× 高时间采样 · 60 fps" : "旧影片：未记录参数"),
+                SourceText = metadata is null ? string.Empty :
+                    string.IsNullOrWhiteSpace(metadata.SourcePath) ? $"回放：{metadata.SourceLabel}" :
+                    $"来源：{Path.GetFileName(metadata.SourcePath)}",
+            });
+        }
+    }
+
+    private static string BuildQualityPreviewParameterText(UserSettings settings) =>
+        $"N={settings.SupersamplingMultiplier} · " +
+        (settings.MotionBlurWeightMode == MotionBlurWeightMode.ShutterAngle
+            ? $"快门 {settings.ShutterAngle:0}°"
+            : $"Exposure {settings.Exposure:0.##}") +
+        $" · {settings.IntermediateTargetBitrate / 1_000_000d:0.##} Mbps · " +
+        VideoProcessingSummary.Build(settings.VideoProcessing);
+
+    private static void WriteQualityPreviewMetadata(
+        string videoPath, int stage, string sourceLabel, string parameters, string sourcePath)
+    {
+        var metadata = new QualityPreviewMetadata(stage, DateTime.Now, sourceLabel, sourcePath, parameters);
+        File.WriteAllText(videoPath + ".json", JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private static QualityPreviewMetadata? ReadQualityPreviewMetadata(string videoPath)
+    {
+        try
+        {
+            var path = videoPath + ".json";
+            return File.Exists(path) ? JsonSerializer.Deserialize<QualityPreviewMetadata>(File.ReadAllText(path)) : null;
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private sealed record QualityPreviewMetadata(
+        int Stage, DateTime CreatedAt, string SourceLabel, string SourcePath, string Parameters);
 
     [RelayCommand]
     private void CopyDaVinciSteps()

@@ -77,10 +77,10 @@ public sealed class QualityPreviewService
         if (!File.Exists(sourcePath))
             throw new FileNotFoundException("慢放预览源不存在。", sourcePath);
 
-        var previewDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            ProjectConstants.AppDataFolderName,
-            "quality-preview");
+        var outputDirectory = settings.VideoOutputDirectory?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(outputDirectory))
+            throw new DirectoryNotFoundException("请先配置成片输出目录。");
+        var previewDirectory = Path.Combine(outputDirectory, "quality-preview", "stage2");
         Directory.CreateDirectory(previewDirectory);
 
         var id = Guid.NewGuid().ToString("N");

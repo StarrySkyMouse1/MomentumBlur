@@ -37,7 +37,7 @@ dotnet run --project src\Mmod.App\Mmod.App.csproj -c Release
 | ImDisk | 设置页一键打开内置 RamDiskUI |
 | 编码 | D3D11 mosample + MF H.264（硬件 MFT 优先） |
 | 画质处理 | Motion-Adaptive Detail / Micro Detail Low-Pass / Deband (No Dither) / Temporal Shimmer，全部可独立勾选 |
-| 即时画质预览 | 播放器下方分为“阶段 1 · 获取底片”和“阶段 2 · 参数合成”两个页签：阶段 1 负责搜索回放、抓取并播放固定 60× 慢放底片；阶段 2 负责参数摘要、并行合成、遥测和结果播放。两个阶段独立按钮控制并共享上方播放器及可拖动播放进度条 |
+| 两阶段预览影片 | 阶段 1 与阶段 2 分别保存到成片输出目录的 `quality-preview/stage1` 和 `quality-preview/stage2`；界面按列表展示影片、生成时间、参数及阶段 2 的阶段 1 来源。阶段 2 只能基于列表中选中的阶段 1 影片生成；影片由系统默认播放器打开，或在资源管理器中定位 |
 | 色彩描述 | H.264 母版明确标记为 Rec.709 SDR；RGB 输入按 Full Range 解释，编码输出按 Limited Range 标记，避免播放器或后期软件误判黑白位与色彩矩阵 |
 | Motion Blur | Legacy Gaussian Exposure（默认，保持旧行为）+ Shutter Angle 180°~360°（推荐） |
 | KSF 风格预设 | TGA 离线录制一键应用 60× 超采样、360° 全快门、60 fps、120 Mbps，并关闭额外滤镜；参考 SVR 高采样/满曝光语义，不声称复刻 KSF 未公开的频道私有参数 |

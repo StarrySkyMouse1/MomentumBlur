@@ -26,9 +26,10 @@ public sealed class ReplayQualityPreviewCaptureService
             settings.RamDiskWatchDirectory ?? string.Empty,
             watchDirectory);
 
-        var previewDirectory = settings.VideoOutputDirectory?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(previewDirectory))
+        var outputDirectory = settings.VideoOutputDirectory?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(outputDirectory))
             throw new DirectoryNotFoundException("请先配置成片输出目录，阶段 1 底片会直接保存在该目录中。");
+        var previewDirectory = Path.Combine(outputDirectory, "quality-preview", "stage1");
         Directory.CreateDirectory(previewDirectory);
         var replayName = SanitizeFileName($"{replay.MapName}-{replay.PlayerName}");
         var output = Path.Combine(
