@@ -634,6 +634,24 @@ extern "C" MMOD_API int32_t mmod_concat_video_files(const wchar_t* input_paths, 
   return result;
 }
 
+// Signed RGB32 stride of the completed reader output type. Negative means
+// bottom-up (DIB origin), positive means top-down. When the type omits the
+// stride, fall back to the BITMAPINFOHEADER convention for RGB32 (bottom-up).
+static int GetSourceReaderRgb32Stride(IMFSourceReader* reader, UINT32 width) {
+  ComPtr<IMFMediaType> type;
+  if (SUCCEEDED(reader->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &type))) {
+    INT32 stride = 0;
+    if (SUCCEEDED(type->GetUINT32(MF_MT_DEFAULT_STRIDE, reinterpret_cast<UINT32*>(&stride))) && stride != 0) {
+      return stride;
+    }
+    LONG bih_stride = 0;
+    if (SUCCEEDED(MFGetStrideForBitmapInfoHeader(MFVideoFormat_RGB32.Data1, width, &bih_stride)) && bih_stride != 0) {
+      return bih_stride;
+    }
+  }
+  return static_cast<int>(width) * 4;
+}
+
 static HRESULT ConfigureSourceReaderRgb32(IMFSourceReader* reader, UINT32* width, UINT32* height) {
   ComPtr<IMFMediaType> partial;
   HRESULT hr = MFCreateMediaType(&partial);
@@ -726,6 +744,13 @@ extern "C" MMOD_API int32_t mmod_process_video_file(
     return init_error;
   }
 
+  // The reader reports row order via the stride sign: negative stride is
+  // bottom-up (video processor disabled/legacy path), positive is top-down
+  // (video processor path). Only bottom-up input needs a vertical flip to
+  // reach the accumulator's top-down orientation; flipping top-down input
+  // turns the synthesized video upside down.
+  const bool bottom_up = GetSourceReaderRgb32Stride(reader.Get(), width) < 0;
+
   // Estimate total output frames from duration if available.
   PROPVARIANT var{};
   PropVariantInit(&var);
@@ -777,9 +802,10 @@ extern "C" MMOD_API int32_t mmod_process_video_file(
     const int stride = static_cast<int>(width) * 4;
     const DWORD expected = static_cast<DWORD>(stride * height);
     if (cur_len >= expected) {
-      // Source may be bottom-up; convert to top-down BGRA for accumulator.
+      // Convert to top-down BGRA for the accumulator; flip only bottom-up rows.
       for (UINT32 y = 0; y < height; ++y) {
-        const BYTE* src = data + static_cast<size_t>(height - 1 - y) * static_cast<size_t>(stride);
+        const BYTE* src = data +
+            static_cast<size_t>(bottom_up ? (height - 1 - y) : y) * static_cast<size_t>(stride);
         uint8_t* dst = frame_bgra.data() + static_cast<size_t>(y) * static_cast<size_t>(stride);
         std::memcpy(dst, src, static_cast<size_t>(stride));
       }
