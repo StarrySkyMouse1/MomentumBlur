@@ -3,3 +3,4 @@ src/**/obj/
 src/Mmod.Native/build/
 **/.vs/
 *.user
+.workbuddy/
