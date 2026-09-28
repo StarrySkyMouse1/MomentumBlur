@@ -85,6 +85,53 @@
                 </Grid>
             </ui:Card>
         </DataTemplate>
+
+        <!--
+            影片列表项：阶段 1 / 阶段 2 共用。只保留两行：可读命名 + 一行关键信息
+            （参数与生成时间）；完整文件名和阶段 2 的来源放在悬浮提示里。
+        -->
+        <DataTemplate x:Key="PreviewArtifactTemplate" DataType="{x:Type vm:QualityPreviewArtifactItem}">
+            <Grid Margin="4,6" ToolTip="{Binding ToolTipText}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <TextBlock FontWeight="SemiBold" Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Grid.Row="1" Margin="0,2,0,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Text="{Binding InfoText}" TextTrimming="CharacterEllipsis"/>
+            </Grid>
+        </DataTemplate>
+
+        <!--
+            影片列表右键菜单：ContextMenu 不在页面的逻辑树内，不自动继承 DataContext，
+            因此显式指向 PlacementTarget（ListView）的 DataContext，命令参数取 VM 当前选中项。
+            x:Shared="False" 让每处引用拿到独立实例，避免多个列表共享同一个 PlacementTarget。
+        -->
+        <ContextMenu x:Key="PreviewArtifactStageOneMenu"
+                     x:Shared="False"
+                     DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+            <MenuItem Header="播放影片"
+                      Command="{Binding PlayQualityPreviewCommand}"
+                      CommandParameter="{Binding SelectedQualityPreviewStageOneArtifact}"/>
+            <MenuItem Header="在资源管理器中显示"
+                      Command="{Binding OpenQualityPreviewCommand}"
+                      CommandParameter="{Binding SelectedQualityPreviewStageOneArtifact}"/>
+            <MenuItem Header="删除影片"
+                      Command="{Binding DeleteQualityPreviewCommand}"
+                      CommandParameter="{Binding SelectedQualityPreviewStageOneArtifact}"/>
+        </ContextMenu>
+
+        <ContextMenu x:Key="PreviewArtifactStageTwoMenu"
+                     x:Shared="False"
+                     DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+            <MenuItem Header="播放影片"
+                      Command="{Binding PlayQualityPreviewCommand}"
+                      CommandParameter="{Binding SelectedQualityPreviewStageTwoArtifact}"/>
+            <MenuItem Header="在资源管理器中显示"
+                      Command="{Binding OpenQualityPreviewCommand}"
+                      CommandParameter="{Binding SelectedQualityPreviewStageTwoArtifact}"/>
+            <MenuItem Header="删除影片"
+                      Command="{Binding DeleteQualityPreviewCommand}"
+                      CommandParameter="{Binding SelectedQualityPreviewStageTwoArtifact}"/>
+        </ContextMenu>
     </Page.Resources>
 
     <Grid Margin="{StaticResource AppPagePadding}">
@@ -122,30 +169,18 @@
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
 
-                    <StackPanel Grid.Row="0" Margin="0,0,0,12">
+                    <StackPanel Grid.Row="0" Margin="0,0,0,10">
                         <ui:TextBlock Style="{StaticResource AppCardTitle}" Text="预览影片"/>
                         <ui:TextBlock Margin="0,5,0,0"
                                       Style="{StaticResource AppCaptionMuted}"
                                       TextWrapping="Wrap"
-                                      Text="阶段 1 与阶段 2 分目录保存；阶段 2 始终基于列表中选中的阶段 1 影片生成。"/>
+                                      Text="阶段 1 与阶段 2 分目录保存。流程：在阶段 1 选一条回放生成底片，再到阶段 2 选一部底片合成示例片；列表项右键可播放或在资源管理器中显示。"/>
                     </StackPanel>
 
-                    <WrapPanel Grid.Row="1" Margin="0,0,0,10">
-                        <ui:Button Content="生成阶段 1 影片"
-                                   Appearance="Primary" Icon="{ui:SymbolIcon Play24}"
-                                   Command="{Binding CreateQualityPreviewCommand}" Margin="0,0,8,8"/>
-                        <ui:Button Content="生成阶段 2 影片"
-                                   Appearance="Primary" Icon="{ui:SymbolIcon ArrowSync24}"
-                                   Command="{Binding UpdateQualityPreviewCommand}" Margin="0,0,8,8"/>
-                        <ui:Button Content="打开影片" Command="{Binding PlayQualityPreviewCommand}" Margin="0,0,8,8"/>
-                        <ui:Button Content="在资源管理器中显示" Command="{Binding OpenQualityPreviewCommand}" Margin="0,0,8,8"/>
-                    </WrapPanel>
-
-                    <ui:TabView Grid.Row="2"
+                    <ui:TabView Grid.Row="1"
                                 Background="Transparent"
                                 BorderThickness="0"
                                 Padding="0"
@@ -191,61 +226,24 @@
                                 </TreeView.Resources>
                             </TreeView>
                         </Border>
+                        <ui:Button Content="生成阶段 1 影片"
+                                   Appearance="Primary"
+                                   Icon="{ui:SymbolIcon Play24}"
+                                   HorizontalAlignment="Stretch"
+                                   Command="{Binding CreateQualityPreviewCommand}"
+                                   Margin="0,0,0,12"/>
                         <ui:TextBlock Margin="0,2,0,6" Style="{StaticResource AppMetricLabel}" Text="已生成的阶段 1 影片"/>
                         <ListView MinHeight="220"
                                   ItemsSource="{Binding QualityPreviewStageOneArtifacts}"
                                   SelectedItem="{Binding SelectedQualityPreviewStageOneArtifact, Mode=TwoWay}"
-                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-                            <ListView.ItemTemplate>
-                                <DataTemplate DataType="{x:Type vm:QualityPreviewArtifactItem}">
-                                    <Grid Margin="4,6">
-                                        <Grid.RowDefinitions>
-                                            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
-                                        </Grid.RowDefinitions>
-                                        <TextBlock FontWeight="SemiBold" Text="{Binding FileName}" TextTrimming="CharacterEllipsis"/>
-                                        <TextBlock Grid.Row="1" Margin="0,3,0,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Text="{Binding ParametersText}" TextWrapping="Wrap"/>
-                                        <TextBlock Grid.Row="2" Margin="0,3,0,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Text="{Binding SourceText}" TextTrimming="CharacterEllipsis"/>
-                                        <TextBlock Grid.Row="3" Margin="0,3,0,0" Foreground="{DynamicResource TextFillColorTertiaryBrush}" Text="{Binding CreatedText}"/>
-                                    </Grid>
-                                </DataTemplate>
-                            </ListView.ItemTemplate>
-                        </ListView>
+                                  ItemTemplate="{StaticResource PreviewArtifactTemplate}"
+                                  ContextMenu="{StaticResource PreviewArtifactStageOneMenu}"
+                                  PreviewMouseRightButtonDown="OnQualityPreviewArtifactRightClick"
+                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
                         <ui:TextBlock Margin="0,2,0,0"
                                       Style="{StaticResource AppCaptionMuted}"
                                       TextWrapping="Wrap"
                                       Text="{Binding QualityPreviewStatus}"/>
-
-                            </StackPanel>
-                            </ScrollViewer>
-                        </ui:TabViewItem>
-
-                        <ui:TabViewItem Header="阶段 2 · 参数合成">
-                            <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                          HorizontalScrollBarVisibility="Disabled">
-                            <StackPanel Margin="0,8,0,0">
-                                <ui:TextBlock Margin="0,2,0,6" Style="{StaticResource AppMetricLabel}" Text="已生成的阶段 2 影片"/>
-                                <ListView MinHeight="260"
-                                          ItemsSource="{Binding QualityPreviewStageTwoArtifacts}"
-                                          SelectedItem="{Binding SelectedQualityPreviewStageTwoArtifact, Mode=TwoWay}"
-                                          ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-                                    <ListView.ItemTemplate>
-                                        <DataTemplate DataType="{x:Type vm:QualityPreviewArtifactItem}">
-                                            <Grid Margin="4,6">
-                                                <Grid.RowDefinitions>
-                                                    <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
-                                                </Grid.RowDefinitions>
-                                                <TextBlock FontWeight="SemiBold" Text="{Binding FileName}" TextTrimming="CharacterEllipsis"/>
-                                                <TextBlock Grid.Row="1" Margin="0,3,0,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Text="{Binding ParametersText}" TextWrapping="Wrap"/>
-                                                <TextBlock Grid.Row="2" Margin="0,3,0,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Text="{Binding SourceText}" TextTrimming="CharacterEllipsis"/>
-                                                <TextBlock Grid.Row="3" Margin="0,3,0,0" Foreground="{DynamicResource TextFillColorTertiaryBrush}" Text="{Binding CreatedText}"/>
-                                            </Grid>
-                                        </DataTemplate>
-                                    </ListView.ItemTemplate>
-                                </ListView>
-                                <ui:TextBlock Margin="0,2,0,0"
-                                              Style="{StaticResource AppCaptionMuted}"
-                                              TextWrapping="Wrap"
-                                              Text="{Binding QualityPreviewStatus}"/>
 
                         <ui:Card Margin="0,10,0,0" Padding="10,8,10,8"
                                  Background="{DynamicResource ControlFillColorSecondaryBrush}">
@@ -281,6 +279,54 @@
                                 <StackPanel><ui:TextBlock Style="{StaticResource AppMetricLabel}" Text="预计剩余"/><ui:TextBlock Style="{StaticResource AppMetricNumber}" Text="{Binding PreviewEtaValueText}"/><ui:TextBlock Style="{StaticResource AppMetricSub}" Text="{Binding PreviewEtaSubText}"/></StackPanel>
                             </ui:Card>
                         </UniformGrid>
+
+                            </StackPanel>
+                            </ScrollViewer>
+                        </ui:TabViewItem>
+
+                        <ui:TabViewItem Header="阶段 2 · 参数合成">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Margin="0,8,0,0">
+                                <ui:TextBlock Margin="0,2,0,6" Style="{StaticResource AppMetricLabel}" Text="选择阶段 1 底片（来源）"/>
+                                <ListView MinHeight="132"
+                                          ItemsSource="{Binding QualityPreviewStageOneArtifacts}"
+                                          SelectedItem="{Binding SelectedQualityPreviewStageOneArtifact, Mode=TwoWay}"
+                                          ItemTemplate="{StaticResource PreviewArtifactTemplate}"
+                                          ContextMenu="{StaticResource PreviewArtifactStageOneMenu}"
+                                          PreviewMouseRightButtonDown="OnQualityPreviewArtifactRightClick"
+                                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                                <ui:Button Content="生成阶段 2 影片"
+                                           Appearance="Primary"
+                                           Icon="{ui:SymbolIcon ArrowSync24}"
+                                           HorizontalAlignment="Stretch"
+                                           Command="{Binding UpdateQualityPreviewCommand}"
+                                           Margin="0,10,0,12"/>
+                                <StackPanel Margin="0,0,0,12"
+                                            Visibility="{Binding IsStageTwoProgressVisible, Converter={StaticResource BoolToVis}}">
+                                    <ProgressBar Height="4"
+                                                 Minimum="0"
+                                                 Maximum="100"
+                                                 Value="{Binding StageTwoProgressPercent, Mode=OneWay}"/>
+                                    <ui:TextBlock Margin="0,5,0,0"
+                                                  Style="{StaticResource AppMetricNumber}"
+                                                  Text="{Binding StageTwoProgressText}"/>
+                                    <ui:TextBlock Margin="0,2,0,0"
+                                                  Style="{StaticResource AppCaptionMuted}"
+                                                  Text="{Binding StageTwoProgressDetailText}"/>
+                                </StackPanel>
+                                <ui:TextBlock Margin="0,2,0,6" Style="{StaticResource AppMetricLabel}" Text="已生成的阶段 2 影片"/>
+                                <ListView MinHeight="220"
+                                          ItemsSource="{Binding QualityPreviewStageTwoArtifacts}"
+                                          SelectedItem="{Binding SelectedQualityPreviewStageTwoArtifact, Mode=TwoWay}"
+                                          ItemTemplate="{StaticResource PreviewArtifactTemplate}"
+                                          ContextMenu="{StaticResource PreviewArtifactStageTwoMenu}"
+                                          PreviewMouseRightButtonDown="OnQualityPreviewArtifactRightClick"
+                                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                                <ui:TextBlock Margin="0,2,0,0"
+                                              Style="{StaticResource AppCaptionMuted}"
+                                              TextWrapping="Wrap"
+                                              Text="{Binding QualityPreviewStatus}"/>
                             </StackPanel>
                             </ScrollViewer>
                         </ui:TabViewItem>

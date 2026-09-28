@@ -71,7 +71,7 @@ public sealed class ReplayQualityPreviewCaptureService
                 pipeline,
                 captureSettings,
                 relativeReplay,
-                runTimeSeconds: Math.Min(6, Math.Max(0.5, replay.RunTimeSeconds)),
+                runTimeSeconds: Math.Max(0.5, replay.RunTimeSeconds),
                 health,
                 phase: text => progress?.Report(new QualityPreviewService.PreviewProgress(text)),
                 structuredLog: null,

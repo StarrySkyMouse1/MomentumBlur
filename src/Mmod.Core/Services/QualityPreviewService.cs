@@ -12,7 +12,11 @@ public sealed class QualityPreviewService
         int Done = 0,
         int Total = 0,
         DiskHealthSnapshot? Disk = null,
-        PerformanceSnapshot? Performance = null);
+        PerformanceSnapshot? Performance = null,
+        double MachineCpuPercent = -1,
+        int ExtractingChunks = 0,
+        int SynthesizingChunks = 0,
+        int ParallelismChunks = 0);
 
     public async Task<string> CreateAsync(
         string sourcePath,
@@ -93,8 +97,14 @@ public sealed class QualityPreviewService
             var ffmpeg = FindFfmpeg()
                 ?? throw new FileNotFoundException("未找到 ffmpeg，无法切分预览。请将 ffmpeg.exe 加入 PATH。");
             var blend = Math.Clamp(previewSettings.SupersamplingMultiplier, 1, 60);
-            const int outputSeconds = 6;
-            var parallelism = Math.Clamp(settings.MaxParallelJobs, 1, outputSeconds);
+            // 预览覆盖阶段 1 慢放底片的全部时长（即选中回放的完整阶段），
+            // 不再固定截取 6 秒。向下取整保证每段都是完整的 N 秒窗口，
+            // 不会因末尾碎片段导致合成失败。
+            var (outputSeconds, sourceDurationSeconds) = ResolveOutputSeconds(sourcePath, blend);
+            // 预览合成与任务录制（磁盘背压）无关：按 CPU 逻辑核心数满载并行。
+            // 每条分块串行经历 ffmpeg 切片（多线程吃 CPU）→ 原生解码 + GPU 混合 +
+            // 系统软件编码（CPU），单块吃不满多核，靠块间并行占满 CPU。
+            var parallelism = Math.Clamp(Environment.ProcessorCount, 1, outputSeconds);
             var chunkDirectory = Path.Combine(previewDirectory, $"chunks-{id}");
             Directory.CreateDirectory(chunkDirectory);
             var completed = 0;
@@ -102,6 +112,9 @@ public sealed class QualityPreviewService
                 .Select(index => Path.Combine(chunkDirectory, $"out-{index:D2}.mp4"))
                 .ToArray();
             using var gate = new SemaphoreSlim(parallelism);
+            using var cpuLog = new StageTwoCpuLog(
+                previewDirectory, id, sourcePath, sourceDurationSeconds,
+                blend, parallelism, outputSeconds, progress, token);
             var tasks = Enumerable.Range(0, outputSeconds).Select(async index =>
             {
                 await gate.WaitAsync(token);
@@ -109,9 +122,21 @@ public sealed class QualityPreviewService
                 {
                     var inputChunk = Path.Combine(chunkDirectory, $"in-{index:D2}.mp4");
                     // Each chunk contains exactly one second of output: N whole
-                    // 60 fps input windows. No blur window crosses a chunk edge.
-                    var sourceStartSeconds = (2 + index) * blend;
-                    await ExtractChunkAsync(ffmpeg, sourcePath, inputChunk, sourceStartSeconds, blend, token);
+                    // 60 fps input windows. Chunks tile the stage-1 master from
+                    // its start, so the preview covers the complete replay stage.
+                    var sourceStartSeconds = index * blend;
+                    cpuLog.BeginExtract();
+                    var extractClock = Stopwatch.StartNew();
+                    try
+                    {
+                        await ExtractChunkAsync(ffmpeg, sourcePath, inputChunk, sourceStartSeconds, blend, token);
+                    }
+                    finally
+                    {
+                        cpuLog.EndExtract();
+                    }
+                    cpuLog.BeginSynthesize();
+                    var synthClock = Stopwatch.StartNew();
                     var chunkProgress = new Progress<ObsSynthesisService.Progress>(_ => { });
                     await new ObsSynthesisService().RunAsync(
                         inputChunk,
@@ -119,6 +144,7 @@ public sealed class QualityPreviewService
                         previewSettings,
                         chunkProgress,
                         token);
+                    cpuLog.ChunkFinished(index, extractClock.ElapsedMilliseconds, synthClock.ElapsedMilliseconds);
                     var done = Interlocked.Increment(ref completed);
                     progress?.Report(new PreviewProgress(
                         $"阶段 2 并行合成（{parallelism} 路）…", done, outputSeconds));
@@ -129,7 +155,16 @@ public sealed class QualityPreviewService
                 }
             }).ToArray();
 
-            await Task.WhenAll(tasks);
+            try
+            {
+                await Task.WhenAll(tasks);
+                cpuLog.Complete("ok");
+            }
+            catch (Exception ex)
+            {
+                cpuLog.Complete($"failed error={ex.Message}");
+                throw;
+            }
             token.ThrowIfCancellationRequested();
             progress?.Report(new PreviewProgress("正在无损拼接阶段 2 片段…", outputSeconds, outputSeconds));
             NativeMp4Concatenator.Concatenate(outputs, finalOutput);
@@ -140,6 +175,139 @@ public sealed class QualityPreviewService
         {
             foreach (var directory in Directory.EnumerateDirectories(previewDirectory, $"chunks-{id}"))
                 TryDeleteDirectory(directory);
+        }
+    }
+
+    /// <summary>
+    /// 阶段 1 底片时长 ÷ N = 预览覆盖的输出秒数；探测失败时退回 6 秒样例。
+    /// </summary>
+    private static (int OutputSeconds, double SourceDurationSeconds) ResolveOutputSeconds(
+        string sourcePath, int blend)
+    {
+        try
+        {
+            var probe = new MediaProbe().Probe(sourcePath);
+            if (probe.IsValid && probe.DurationSeconds > 0)
+            {
+                var seconds = Math.Clamp((int)Math.Floor(probe.DurationSeconds / blend), 1, 600);
+                return (seconds, probe.DurationSeconds);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // 底片读取失败时退回固定样例时长，让阶段 2 继续可用。
+        }
+        return (6, 0);
+    }
+
+    /// <summary>
+    /// 阶段2合成的 CPU 利用率日志：1 Hz 整机采样行 + 每分块耗时行，写在
+    /// stage2/logs/ 下，供后续 AI 分析并行度与瓶颈。所有行即时落盘，
+    /// 即使合成中途失败也保留已采集的数据。
+    /// </summary>
+    private sealed class StageTwoCpuLog : IDisposable
+    {
+        private readonly object _writeGate = new();
+        private readonly StreamWriter _writer;
+        private readonly MachineCpuSampler _sampler = new();
+        private readonly IProgress<PreviewProgress>? _progress;
+        private readonly CancellationTokenSource _cancellation;
+        private readonly Task _loop;
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private readonly int _parallelism;
+        private int _total;
+        private int _extracting;
+        private int _synthesizing;
+        private int _done;
+        private double _cpuPercent = -1;
+
+        public StageTwoCpuLog(
+            string stageTwoDirectory,
+            string id,
+            string sourcePath,
+            double sourceDurationSeconds,
+            int blend,
+            int parallelism,
+            int total,
+            IProgress<PreviewProgress>? progress,
+            CancellationToken token)
+        {
+            _parallelism = parallelism;
+            _total = total;
+            _progress = progress;
+            var logDirectory = Path.Combine(stageTwoDirectory, "logs");
+            Directory.CreateDirectory(logDirectory);
+            var path = Path.Combine(logDirectory, $"stage2-{DateTime.Now:yyyyMMdd-HHmmss}-{id[..6]}.csv");
+            _writer = new StreamWriter(path, append: false) { AutoFlush = true };
+            WriteLine($"# Momentum 阶段2合成 CPU 日志 {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            WriteLine("# s,elapsed_seconds,cpu_percent,extracting,synthesizing,done,total");
+            WriteLine("# c,chunk_index,extract_ms,synth_ms");
+            WriteLine(FormattableString.Invariant(
+                $"# source={Path.GetFileName(sourcePath)} sourceDurationSeconds={sourceDurationSeconds:F1} blend={blend} parallelism={parallelism} total={total} logicalCores={Environment.ProcessorCount}"));
+            _cancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+            _loop = Task.Run(SampleLoopAsync);
+        }
+
+        public void BeginExtract() => Interlocked.Increment(ref _extracting);
+
+        public void EndExtract() => Interlocked.Decrement(ref _extracting);
+
+        public void BeginSynthesize() => Interlocked.Increment(ref _synthesizing);
+
+        public void ChunkFinished(int index, long extractMilliseconds, long synthMilliseconds)
+        {
+            Interlocked.Decrement(ref _synthesizing);
+            var done = Interlocked.Increment(ref _done);
+            WriteLine(FormattableString.Invariant($"c,{index},{extractMilliseconds},{synthMilliseconds}"));
+            ReportProgress(done);
+        }
+
+        public void Complete(string result) =>
+            WriteLine(FormattableString.Invariant($"# result={result} elapsed_seconds={_clock.Elapsed.TotalSeconds:F1}"));
+
+        public void Dispose()
+        {
+            _cancellation.Cancel();
+            try { _loop.Wait(TimeSpan.FromSeconds(3)); } catch { }
+            _cancellation.Dispose();
+            _writer.Dispose();
+        }
+
+        private async Task SampleLoopAsync()
+        {
+            while (!_cancellation.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(1000, _cancellation.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                var cpu = _sampler.NextSamplePercent();
+                if (cpu >= 0)
+                    Volatile.Write(ref _cpuPercent, cpu);
+                WriteLine(FormattableString.Invariant(
+                    $"s,{_clock.Elapsed.TotalSeconds:F1},{Volatile.Read(ref _cpuPercent):F0},{Volatile.Read(ref _extracting)},{Volatile.Read(ref _synthesizing)},{Volatile.Read(ref _done)},{Volatile.Read(ref _total)}"));
+                ReportProgress(Volatile.Read(ref _done));
+            }
+        }
+
+        private void ReportProgress(int done) =>
+            _progress?.Report(new PreviewProgress(
+                string.Empty,
+                done,
+                _total,
+                MachineCpuPercent: Volatile.Read(ref _cpuPercent),
+                ExtractingChunks: Volatile.Read(ref _extracting),
+                SynthesizingChunks: Volatile.Read(ref _synthesizing),
+                ParallelismChunks: _parallelism));
+
+        private void WriteLine(string line)
+        {
+            lock (_writeGate)
+                _writer.WriteLine(line);
         }
     }
 

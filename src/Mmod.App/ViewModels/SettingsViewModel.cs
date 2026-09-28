@@ -72,6 +72,10 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string processingSummary = string.Empty;
     [ObservableProperty] private bool isQualityPreviewRunning;
     [ObservableProperty] private int selectedQualityPreviewStageIndex;
+    [ObservableProperty] private bool isStageTwoProgressVisible;
+    [ObservableProperty] private double stageTwoProgressPercent;
+    [ObservableProperty] private string stageTwoProgressText = string.Empty;
+    [ObservableProperty] private string stageTwoProgressDetailText = string.Empty;
     [ObservableProperty] private string qualityPreviewSearchText = string.Empty;
     [ObservableProperty] private ReplayPreviewItem? selectedQualityPreviewReplay;
     [ObservableProperty] private string qualityPreviewSlowMotionSourcePath = string.Empty;
@@ -136,7 +140,7 @@ public partial class SettingsViewModel : ObservableObject
     public string PreviewCaptureSettingsText =>
         $"生成上限 {(ForegroundCaptureFpsLimit == 0 ? "不覆盖" : $"{ForegroundCaptureFpsLimit} fps")} · " +
         $"编码码率 {(IntermediateTargetBitrateMbps > 0 ? $"{IntermediateTargetBitrateMbps:0.#} Mbps" : "自动")} · " +
-        $"阶段2并行 {Math.Clamp(MaxParallelJobs, 1, 6)} 路 · 时间采样 3600 fps";
+        $"阶段2预览按 CPU 核心 {Environment.ProcessorCount} 线程并行 · 时间采样 3600 fps";
 
     /// <summary>「成片目录 …—— 可从合成页直接打开」。</summary>
     public string OutputDirectoryText => string.IsNullOrWhiteSpace(VideoOutputDirectory)
@@ -545,6 +549,7 @@ public partial class SettingsViewModel : ObservableObject
     {
         CreateQualityPreviewCommand.NotifyCanExecuteChanged();
         UpdateQualityPreviewCommand.NotifyCanExecuteChanged();
+        DeleteQualityPreviewCommand.NotifyCanExecuteChanged();
     }
 
     partial void OnSelectedQualityPreviewReplayChanged(ReplayPreviewItem? value) =>
@@ -562,8 +567,6 @@ public partial class SettingsViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(HasQualityPreview));
         OnPropertyChanged(nameof(HasNoQualityPreview));
-        OpenQualityPreviewCommand.NotifyCanExecuteChanged();
-        PlayQualityPreviewCommand.NotifyCanExecuteChanged();
     }
 
     partial void OnSelectedQualityPreviewStageOneArtifactChanged(QualityPreviewArtifactItem? value)
@@ -574,8 +577,6 @@ public partial class SettingsViewModel : ObservableObject
         QualityPreviewSlowMotionSourcePath = value.FilePath;
         QualityPreviewPath = value.FilePath;
         Persist();
-        OpenQualityPreviewCommand.NotifyCanExecuteChanged();
-        PlayQualityPreviewCommand.NotifyCanExecuteChanged();
     }
 
     partial void OnSelectedQualityPreviewStageTwoArtifactChanged(QualityPreviewArtifactItem? value)
@@ -585,8 +586,6 @@ public partial class SettingsViewModel : ObservableObject
         QualityPreviewProcessedPath = value.FilePath;
         QualityPreviewPath = value.FilePath;
         Persist();
-        OpenQualityPreviewCommand.NotifyCanExecuteChanged();
-        PlayQualityPreviewCommand.NotifyCanExecuteChanged();
     }
 
     [RelayCommand]
@@ -664,7 +663,6 @@ public partial class SettingsViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanCreateQualityPreview))]
     private async Task CreateQualityPreviewAsync()
     {
-        SelectedQualityPreviewStageIndex = 0;
         var blocker = CaptureModeSwitchBlocker?.Invoke();
         if (!string.IsNullOrWhiteSpace(blocker))
         {
@@ -698,11 +696,11 @@ public partial class SettingsViewModel : ObservableObject
             RefreshQualityPreviewArtifacts(rawSource, null);
             Persist();
             QualityPreviewStatus =
-                $"阶段 1 完成：底片已加入列表，可选中后生成阶段 2 影片。";
+                $"阶段 1 完成：底片已加入列表，切到「阶段 2 · 参数合成」选中它即可合成示例片。";
         }
         catch (Exception ex)
         {
-            QualityPreviewStatus = $"预览失败：{ex.Message}";
+            QualityPreviewStatus = $"阶段 1 生成失败：{ex.Message}";
         }
         finally
         {
@@ -747,7 +745,7 @@ public partial class SettingsViewModel : ObservableObject
         }
 
         var targetFrames = CaptureEnvelopeRecorder.ComputeEnvelopeFrameCount(
-            Math.Min(6, Math.Max(0.5, replayDurationSeconds)),
+            Math.Max(0.5, replayDurationSeconds),
             ReplayQualityPreviewCaptureService.PreviewSupersamplingMultiplier);
         var remainingFrames = Math.Max(0, targetFrames - performance.ConsumedFrames);
         if (performance.ConsumedFramesPerSecond >= 1)
@@ -773,34 +771,69 @@ public partial class SettingsViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanUpdateQualityPreview))]
     private async Task UpdateQualityPreviewAsync()
     {
-        SelectedQualityPreviewStageIndex = 1;
         IsQualityPreviewRunning = true;
+        IsStageTwoProgressVisible = true;
+        StageTwoProgressPercent = 0;
+        StageTwoProgressText = "正在准备合成…";
+        StageTwoProgressDetailText = string.Empty;
+        var clock = Stopwatch.StartNew();
         try
         {
             var progress = new Progress<QualityPreviewService.PreviewProgress>(p =>
             {
-                QualityPreviewStatus = p.Total > 0
-                    ? $"{p.Stage} {p.Done}/{p.Total}"
-                    : p.Stage;
+                if (p.Stage.Length > 0)
+                    QualityPreviewStatus = p.Stage;
+                if (p.Total <= 0)
+                    return;
+                StageTwoProgressPercent = p.Done * 100.0 / p.Total;
+                // 各段耗时接近，用平均段耗时线性外推剩余时间（分段并行合成）。
+                StageTwoProgressText = p.Done >= p.Total
+                    ? $"已完成 {p.Done}/{p.Total} 段 · 正在无损拼接"
+                    : $"已完成 {p.Done}/{p.Total} 段 · 剩余 {EstimateStageTwoRemaining(clock.Elapsed.TotalSeconds, p.Done, p.Total)}";
+                // 详情行只随 1 Hz 采样报告更新（分块完成报告不带并行字段）。
+                if (p.ParallelismChunks > 0)
+                    StageTwoProgressDetailText = BuildStageTwoDetailText(p, clock.Elapsed);
             });
-            await SynthesizeQualityPreviewAsync(progress, SelectedQualityPreviewReplay?.Record.MapName ?? "缓存素材");
+            await SynthesizeQualityPreviewAsync(progress);
         }
         catch (Exception ex)
         {
-            QualityPreviewStatus = $"更新预览失败：{ex.Message}";
+            QualityPreviewStatus = $"阶段 2 合成失败：{ex.Message}";
         }
         finally
         {
             IsQualityPreviewRunning = false;
+            IsStageTwoProgressVisible = false;
         }
     }
 
+    private static string BuildStageTwoDetailText(QualityPreviewService.PreviewProgress p, TimeSpan elapsed)
+    {
+        if (p.ParallelismChunks <= 0)
+            return string.Empty;
+        var cpu = p.MachineCpuPercent >= 0 ? $"{p.MachineCpuPercent:0}%" : "—";
+        var rate = p.Done > 0 && elapsed.TotalMinutes > 0.5
+            ? $" · {p.Done / elapsed.TotalMinutes:0.0} 段/分"
+            : string.Empty;
+        return $"并行 {p.ParallelismChunks} 路 · 切片中 {p.ExtractingChunks} · 合成中 {p.SynthesizingChunks}" +
+               $" · CPU {cpu}{rate} · 已用 {elapsed:hh\\:mm\\:ss}";
+    }
+
+    private static string EstimateStageTwoRemaining(double elapsedSeconds, int done, int total)
+    {
+        if (done <= 0)
+            return "估算中…";
+        var remaining = TimeSpan.FromSeconds(elapsedSeconds / done * (total - done));
+        return remaining.TotalMinutes >= 1
+            ? $"约 {(int)remaining.TotalMinutes}分 {remaining.Seconds:D2}秒"
+            : $"约 {Math.Max(1, (int)Math.Ceiling(remaining.TotalSeconds))}秒";
+    }
+
     private async Task SynthesizeQualityPreviewAsync(
-        IProgress<QualityPreviewService.PreviewProgress> progress,
-        string sourceLabel)
+        IProgress<QualityPreviewService.PreviewProgress> progress)
     {
         var selectedStageOne = SelectedQualityPreviewStageOneArtifact
-            ?? throw new InvalidOperationException("请先在阶段 1 列表中选择一部影片。");
+            ?? throw new InvalidOperationException("请先在「选择阶段 1 底片」列表中选中一部影片。");
         if (!File.Exists(selectedStageOne.FilePath))
             throw new FileNotFoundException("选中的阶段 1 影片已不存在。", selectedStageOne.FilePath);
 
@@ -812,6 +845,13 @@ public partial class SettingsViewModel : ObservableObject
             settings,
             progress,
             CancellationToken.None);
+
+        // 阶段 2 的来源标签取自阶段 1 底片自身的元数据：底片记录的是原始回放名，
+        // 比从当前回放选择推导更可靠，也不要求用户回到阶段 1 页签重新选中。
+        var sourceLabel = ReadQualityPreviewMetadata(selectedStageOne.FilePath)?.SourceLabel;
+        if (string.IsNullOrWhiteSpace(sourceLabel))
+            sourceLabel = selectedStageOne.FileName;
+
         QualityPreviewProcessedPath = output;
         QualityPreviewPath = output;
         var parameterText = BuildQualityPreviewParameterText(settings);
@@ -819,30 +859,82 @@ public partial class SettingsViewModel : ObservableObject
         RefreshQualityPreviewArtifacts(selectedStageOne.FilePath, output);
         Persist();
         QualityPreviewStatus =
-            $"预览已更新：{sourceLabel} · 60×慢放底片 · 当前 N={settings.SupersamplingMultiplier} · " +
+            $"阶段 2 完成：已由底片 {selectedStageOne.FileName} 合成 {Path.GetFileName(output)} · " +
+            $"N={settings.SupersamplingMultiplier} · " +
             (settings.MotionBlurWeightMode == MotionBlurWeightMode.ShutterAngle
                 ? $"快门 {settings.ShutterAngle:0}°"
                 : $"Exposure {settings.Exposure:0.##}");
     }
 
-    private bool CanOpenQualityPreview() => HasQualityPreview;
+    // 列表项右键菜单直接作用于被点的影片，不再依赖 “当前预览路径” 这层间接状态。
+    private static bool CanOpenQualityPreviewArtifact(QualityPreviewArtifactItem? item) =>
+        item is not null && !string.IsNullOrWhiteSpace(item.FilePath) && File.Exists(item.FilePath);
 
-    [RelayCommand(CanExecute = nameof(CanOpenQualityPreview))]
-    private void PlayQualityPreview()
+    [RelayCommand(CanExecute = nameof(CanOpenQualityPreviewArtifact))]
+    private void PlayQualityPreview(QualityPreviewArtifactItem? item)
     {
-        Process.Start(new ProcessStartInfo(Path.GetFullPath(QualityPreviewPath)) { UseShellExecute = true });
+        if (item is null)
+            return;
+        Process.Start(new ProcessStartInfo(Path.GetFullPath(item.FilePath)) { UseShellExecute = true });
     }
 
-    [RelayCommand(CanExecute = nameof(CanOpenQualityPreview))]
-    private void OpenQualityPreview()
+    [RelayCommand(CanExecute = nameof(CanOpenQualityPreviewArtifact))]
+    private void OpenQualityPreview(QualityPreviewArtifactItem? item)
     {
-        var path = Path.GetFullPath(QualityPreviewPath);
+        if (item is null)
+            return;
         Process.Start(new ProcessStartInfo
         {
             FileName = "explorer.exe",
             UseShellExecute = true,
-            ArgumentList = { "/select,", path },
+            ArgumentList = { "/select,", Path.GetFullPath(item.FilePath) },
         });
+    }
+
+    private bool CanDeleteQualityPreview(QualityPreviewArtifactItem? item) =>
+        !IsQualityPreviewRunning && CanOpenQualityPreviewArtifact(item);
+
+    [RelayCommand(CanExecute = nameof(CanDeleteQualityPreview))]
+    private async Task DeleteQualityPreviewAsync(QualityPreviewArtifactItem? item)
+    {
+        if (item is null)
+            return;
+        if (!await Services.DialogServiceLocator.Current.ConfirmAsync(
+                "删除预览影片",
+                $"将从磁盘删除：\n{item.FileName}\n\n此操作不可恢复。",
+                "删除",
+                "取消",
+                danger: true))
+            return;
+
+        try
+        {
+            if (File.Exists(item.FilePath))
+                File.Delete(item.FilePath);
+            if (File.Exists(item.FilePath + ".json"))
+                File.Delete(item.FilePath + ".json");
+
+            if (string.Equals(QualityPreviewSlowMotionSourcePath, item.FilePath, StringComparison.OrdinalIgnoreCase))
+                QualityPreviewSlowMotionSourcePath = string.Empty;
+            if (string.Equals(QualityPreviewProcessedPath, item.FilePath, StringComparison.OrdinalIgnoreCase))
+                QualityPreviewProcessedPath = string.Empty;
+            if (string.Equals(QualityPreviewPath, item.FilePath, StringComparison.OrdinalIgnoreCase))
+                QualityPreviewPath = QualityPreviewSlowMotionSourcePath.Length > 0
+                    ? QualityPreviewSlowMotionSourcePath
+                    : QualityPreviewProcessedPath;
+
+            RefreshQualityPreviewArtifacts();
+            Persist();
+            QualityPreviewStatus = $"已删除影片：{item.FileName}";
+        }
+        catch (Exception ex)
+        {
+            QualityPreviewStatus = $"删除失败：{ex.Message}";
+        }
+        finally
+        {
+            DeleteQualityPreviewCommand.NotifyCanExecuteChanged();
+        }
     }
 
     private void RefreshQualityPreviewArtifacts(string? selectStageOnePath = null, string? selectStageTwoPath = null)
@@ -870,15 +962,21 @@ public partial class SettingsViewModel : ObservableObject
                      .OrderByDescending(file => file.LastWriteTimeUtc))
         {
             var metadata = ReadQualityPreviewMetadata(path.FullName);
+            var created = metadata?.CreatedAt ?? path.LastWriteTime;
+            var parameters = metadata?.Parameters ?? (stage == 1 ? "60× 高时间采样 · 60 fps" : "未记录参数");
+            var displayName = string.IsNullOrWhiteSpace(metadata?.SourceLabel)
+                ? Path.GetFileNameWithoutExtension(path.Name)
+                : metadata!.SourceLabel;
+            var tooltip = stage == 2 && !string.IsNullOrWhiteSpace(metadata?.SourcePath)
+                ? $"{path.Name}\n来源：{Path.GetFileName(metadata!.SourcePath)}"
+                : path.Name;
             target.Add(new QualityPreviewArtifactItem
             {
                 FilePath = path.FullName,
                 FileName = path.Name,
-                CreatedText = (metadata?.CreatedAt ?? path.LastWriteTime).ToString("yyyy-MM-dd HH:mm:ss"),
-                ParametersText = metadata?.Parameters ?? (stage == 1 ? "60× 高时间采样 · 60 fps" : "旧影片：未记录参数"),
-                SourceText = metadata is null ? string.Empty :
-                    string.IsNullOrWhiteSpace(metadata.SourcePath) ? $"回放：{metadata.SourceLabel}" :
-                    $"来源：{Path.GetFileName(metadata.SourcePath)}",
+                DisplayName = displayName,
+                InfoText = $"{parameters} · {created:MM-dd HH:mm}",
+                ToolTipText = tooltip,
             });
         }
     }
