@@ -12,6 +12,7 @@ void GpuBlendDestroy(GpuBlendContext* ctx);
 bool GpuBlendResetWindow(GpuBlendContext* ctx);
 bool GpuBlendAccumulate(GpuBlendContext* ctx, const uint8_t* bgra, int stride, float weight);
 bool GpuBlendPack(GpuBlendContext* ctx, std::vector<uint8_t>& out_bgra);
+const char* GpuBlendGetLastError(GpuBlendContext* ctx);
 
 /*
  * Quality processing (GPU path). Called once per output frame after the blend

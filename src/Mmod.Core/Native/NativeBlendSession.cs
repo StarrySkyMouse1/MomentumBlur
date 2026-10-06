@@ -168,7 +168,7 @@ public sealed class NativeBlendSession : IDisposable
         if (code != 0)
         {
             throw new InvalidOperationException(
-                $"提交帧失败: {MmodNativeInterop.GetErrorString(code)}");
+                $"提交帧失败: {DescribeFailure(code)}");
         }
     }
 
@@ -179,7 +179,7 @@ public sealed class NativeBlendSession : IDisposable
         if (code != 0)
         {
             throw new InvalidOperationException(
-                $"结束 Session 失败: {MmodNativeInterop.GetErrorString(code)}");
+                $"结束 Session 失败: {DescribeFailure(code)}");
         }
     }
 
@@ -224,6 +224,22 @@ public sealed class NativeBlendSession : IDisposable
 
         _disposed = true;
         GC.SuppressFinalize(this);
+    }
+
+    private string DescribeFailure(int code)
+    {
+        var message = MmodNativeInterop.GetErrorString(code);
+        try
+        {
+            var detail = Marshal.PtrToStringUTF8(MmodNativeInterop.mmod_session_get_last_error(_handle));
+            return string.IsNullOrWhiteSpace(detail) ? message : $"{message}; {detail}";
+        }
+        catch (EntryPointNotFoundException)
+        {
+            // Preserve the original fault when an old DLL is deployed; do not
+            // replace it with a diagnostic-API failure or report success.
+            return $"{message}; Native DLL 过旧，缺少逐帧故障诊断，请重新构建 Native";
+        }
     }
 
     private void EnsureNotDisposed()

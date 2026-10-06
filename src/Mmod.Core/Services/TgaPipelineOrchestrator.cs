@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using Mmod.Core.Models;
 using Mmod.Core.Native;
@@ -27,6 +28,14 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
     private long _fed;
     private long _submittedInputFrames;
     private long _outputFrames;
+    private long _decodeTicks, _decodedCount, _submitTicks, _submitCount, _deletedCount;
+    public string DiagnosticSummary => $"PipelineDiagnostics State={_state} NextFrame={_nextFrame} " +
+        $"Submitted={_submittedInputFrames} Output={_outputFrames} Deleted={Interlocked.Read(ref _deletedCount)} " +
+        $"DecodeAvgMs={AverageMs(_decodeTicks, _decodedCount):0.###} SubmitAvgMs={AverageMs(_submitTicks, _submitCount):0.###} " +
+        $"Width={_firstFrameWidth} Height={_firstFrameHeight} FinishSucceeded={_finishSucceeded} Fault={_fault?.Message ?? "-"} " +
+        $"Session={_sessionDiagnostics ?? "-"}";
+
+    private static double AverageMs(long ticks, long count) => count > 0 ? ticks * 1000d / Stopwatch.Frequency / count : 0;
     private int _lastVisualChangeFrame = -1;
     private ProcessingBackend _processingBackend = ProcessingBackend.Unknown;
     private EncoderBackend _encoderBackend = EncoderBackend.Unknown;
@@ -149,6 +158,7 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
         _fed = 0;
         _submittedInputFrames = 0;
         _outputFrames = 0;
+        _decodeTicks = _decodedCount = _submitTicks = _submitCount = _deletedCount = 0;
         _processingBackend = ProcessingBackend.Unknown;
         _encoderBackend = EncoderBackend.Unknown;
         _finishSucceeded = false;
@@ -376,7 +386,7 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
                 // Source deletion is the commit marker. Never delete a frame
                 // merely because decoding finished; Native submit must first
                 // have succeeded.
-                try { File.Delete(committedPath); } catch { /* cleanup barrier owns leftovers */ }
+                DeleteConsumedFrame(committedPath);
             }
         }
         catch (Exception ex)
@@ -404,12 +414,13 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
             _completion.TrySetResult();
     }
 
-    private static async Task<PreparedFrame> DecodeFrameAsync(
+    private async Task<PreparedFrame> DecodeFrameAsync(
         int frameIndex,
         string path,
         SemaphoreSlim decodeSlots)
     {
         await decodeSlots.WaitAsync().ConfigureAwait(false);
+        var decodeStarted = Stopwatch.GetTimestamp();
         try
         {
             return await Task.Run(() =>
@@ -425,6 +436,8 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
         }
         finally
         {
+            Interlocked.Add(ref _decodeTicks, Stopwatch.GetTimestamp() - decodeStarted);
+            Interlocked.Increment(ref _decodedCount);
             decodeSlots.Release();
         }
     }
@@ -432,6 +445,13 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
     private void SubmitPreparedFrame(PreparedFrame frame, UserSettings settings, int blend)
     {
         _session ??= CreateSession(settings, frame.Width, frame.Height, blend);
+        SubmitDecodedFrame(frame);
+    }
+
+    // Live and final-drain paths must use identical validation and diagnostics.
+    private void SubmitDecodedFrame(PreparedFrame frame)
+    {
+        var session = _session ?? throw new InvalidOperationException("缺少 Native Session。");
         if (_firstFrameWidth == 0)
         {
             _firstFrameWidth = frame.Width;
@@ -444,12 +464,25 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
                 $"帧 {frame.FrameIndex} 为 {frame.Width}x{frame.Height}。");
         }
 
-        _session.SubmitBgra(frame.Bgra, frame.Width * 4);
+        var submitStarted = Stopwatch.GetTimestamp();
+        try
+        {
+            session.SubmitBgra(frame.Bgra, frame.Width * 4);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"TGA提交失败：sourceFrame={frame.FrameIndex} submitted={_submittedInputFrames} " +
+                $"output={_outputFrames} blend={session.BlendFrames}; {ex.Message}", ex);
+        }
+        Interlocked.Add(ref _submitTicks, Stopwatch.GetTimestamp() - submitStarted);
+        Interlocked.Increment(ref _submitCount);
         _submittedInputFrames++;
         _fed++;
-        _outputFrames = _session.GetProgress().Done;
-        if (_submittedInputFrames % Math.Max(1, blend) == 0)
-            _motionDiagnostics.Sample(frame.Bgra, frame.Width, frame.Height);
+        _outputFrames = session.GetProgress().Done;
+        if (_submittedInputFrames % session.BlendFrames == 0)
+            _motionDiagnostics.Sample(frame.Bgra, frame.Width, frame.Height,
+                frame.FrameIndex, ProjectConstants.FinalOutputFramerate);
         TrackPlaybackEvidence(frame.Bgra, frame.Width, frame.Height);
         SamplePerformance();
 
@@ -485,11 +518,21 @@ public sealed class TgaPipelineOrchestrator : ICapturePipeline, IAsyncDisposable
             throw new InvalidDataException($"drain 阶段无法读取 TGA：{path}");
         }
 
-        _session.SubmitBgra(bgra, width * 4);
-        _submittedInputFrames++;
-        _fed++;
-        _outputFrames = _session.GetProgress().Done;
-        try { File.Delete(path); } catch { /* ignore */ }
+        SubmitDecodedFrame(new PreparedFrame(_nextFrame, width, height, bgra));
+        DeleteConsumedFrame(path);
+    }
+
+    private void DeleteConsumedFrame(string path)
+    {
+        try
+        {
+            File.Delete(path);
+            Interlocked.Increment(ref _deletedCount);
+        }
+        catch (Exception ex)
+        {
+            throw new IOException($"已合成 TGA 无法释放磁盘空间：{path}；{ex.Message}", ex);
+        }
     }
 
     private sealed record PreparedFrameWork(int FrameIndex, string Path, Task<PreparedFrame> DecodeTask);

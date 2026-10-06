@@ -42,6 +42,7 @@ public sealed class ReplayQualityPreviewCaptureService
         await using var game = new MomentumProcessController();
         var cleanup = new CaptureCleanupCoordinator();
         TgaPipelineOrchestrator? pipeline = null;
+        var completed = false;
         var environment = new CaptureConVarScope(game.NetCon, (_, message) =>
             progress?.Report(new QualityPreviewService.PreviewProgress(message ?? string.Empty)));
 
@@ -82,22 +83,29 @@ public sealed class ReplayQualityPreviewCaptureService
                         "正在抓取 60× 慢放底片…",
                         Disk: disk,
                         Performance: performance)));
-            pipeline = null;
+            completed = true;
             return output;
-        }
-        catch
-        {
-            TryDelete(output);
-            throw;
         }
         finally
         {
-            try { await environment.RestoreAsync(); } catch { }
-            try { await game.NetCon.ExecuteAsync("cl_drawhud 1", TimeSpan.FromSeconds(5), CancellationToken.None); } catch { }
-            if (pipeline is not null)
+            try
             {
-                using var cleanupCts = new CancellationTokenSource(_timeouts.CleanupHardLimit);
-                try { await cleanup.CleanupAsync(pipeline, game, CleanupReason.Failed, cleanupCts.Token); } catch { }
+                if (pipeline is not null && !completed)
+                {
+                    using var cleanupCts = new CancellationTokenSource(_timeouts.CleanupHardLimit);
+                    var result = await cleanup.CleanupAsync(pipeline, game, CleanupReason.Failed, cleanupCts.Token);
+                    foreach (var error in result.SecondaryErrors)
+                        progress?.Report(new QualityPreviewService.PreviewProgress($"清理次级错误：{error}"));
+                }
+            }
+            finally
+            {
+                if (pipeline is not null)
+                    await pipeline.DisposeAsync();
+                try { await environment.RestoreAsync(); } catch { }
+                try { await game.NetCon.ExecuteAsync("cl_drawhud 1", TimeSpan.FromSeconds(5), CancellationToken.None); } catch { }
+                if (!completed)
+                    TryDelete(output);
             }
         }
     }

@@ -95,6 +95,8 @@ MMOD_API int32_t mmod_session_submit_bgra(MmodSession* session, const uint8_t* b
 MMOD_API int32_t mmod_session_finish(MmodSession* session);
 MMOD_API void mmod_session_destroy(MmodSession* session);
 MMOD_API int32_t mmod_session_get_progress(MmodSession* session, int32_t* out_done, int32_t* out_total);
+/* Session-owned UTF-8 diagnostic, valid until the next operation or destroy. */
+MMOD_API const char* mmod_session_get_last_error(MmodSession* session);
 
 /* Diagnostics: whether quality effects are enabled and whether the session fell back to CPU processing. */
 MMOD_API int32_t mmod_session_get_processing_status(MmodSession* session, int32_t* out_effects_enabled, int32_t* out_using_cpu_fallback);

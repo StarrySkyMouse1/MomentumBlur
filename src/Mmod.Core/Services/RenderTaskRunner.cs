@@ -21,7 +21,9 @@ public sealed class RenderTaskRunner : IAsyncDisposable
     private CancellationTokenSource? _cts;
     private bool _pauseAfterNode;
     public bool IsRunning { get; private set; }
-    public string Status { get; private set; } = "空闲";
+    private string _status = "空闲";
+    private string? _failureStatus;
+    public string Status { get => _failureStatus ?? _status; private set => _status = value; }
     public CaptureRuntimeSnapshot RuntimeSnapshot { get; private set; } = CaptureRuntimeSnapshot.Empty;
     public event Action? Changed;
 
@@ -30,6 +32,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
     public Task StartAsync()
     {
         if (IsRunning) return Task.CompletedTask;
+        _failureStatus = null;
         _pauseAfterNode = false;
         _cts = new CancellationTokenSource();
         IsRunning = true;
@@ -93,7 +96,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
                 var timer = Stopwatch.StartNew();
                 foreach (var node in _repository.GetNodes(task.Id).Where(x => x.Status != RenderNodeStatus.Completed))
                 {
-                    await ExecuteNodeWithRetryAsync(game, task, node, settings, token);
+                    await ExecuteNodeAsync(game, task, node, settings, token);
                     _repository.UpdateTaskElapsed(task.Id, task.ElapsedSeconds + timer.Elapsed.TotalSeconds);
                     if (_pauseAfterNode)
                     {
@@ -141,8 +144,9 @@ public sealed class RenderTaskRunner : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            _failureStatus = "执行失败并暂停（不会自动重试）：" + ex.Message;
+            Changed?.Invoke();
             await HandleQueueInterruptionAsync(game, RenderTaskStatus.FailedNeedsAttention, ex.Message);
-            Status = "执行失败并暂停：" + ex.Message;
         }
         finally
         {
@@ -198,7 +202,7 @@ public sealed class RenderTaskRunner : IAsyncDisposable
         _repository.ClearRunnerSession();
     }
 
-    private async Task ExecuteNodeWithRetryAsync(
+    private async Task ExecuteNodeAsync(
         MomentumProcessController game,
         RenderTaskRecord task,
         RenderNodeRecord node,
@@ -256,6 +260,8 @@ public sealed class RenderTaskRunner : IAsyncDisposable
             Log: (level, msg) =>
             {
                 _repository.AddLog(task.Id, node.Id, level, msg ?? string.Empty);
+                if (string.Equals(level, "Error", StringComparison.OrdinalIgnoreCase))
+                    _failureStatus ??= $"{task.MapName}：节点 {node.Sequence + 1} · {msg}";
                 Status = $"{task.MapName}：节点 {node.Sequence + 1} · {msg}";
                 Changed?.Invoke();
             },

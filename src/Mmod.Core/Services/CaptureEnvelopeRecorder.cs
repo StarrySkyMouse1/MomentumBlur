@@ -48,6 +48,33 @@ public static class CaptureEnvelopeRecorder
     {
         timeouts ??= RecordingTimeoutPolicy.Default;
         var startedAt = DateTime.UtcNow;
+        int? diagnosticSafeEnd = null;
+        var lastDiagnosticAt = DateTime.MinValue;
+
+        void Snapshot(string reason, DiskHealthSnapshot? disk = null)
+        {
+            lastDiagnosticAt = DateTime.UtcNow;
+            var watcher = pipeline.Watcher;
+            var perf = pipeline.Performance;
+            var fed = pipeline.FedCount;
+            phase?.Invoke($"CaptureDiagnostics Reason={reason} ElapsedSec={(DateTime.UtcNow - startedAt).TotalSeconds:0.###} " +
+                $"Session={pipeline.CaptureSessionId} Prefix={watcher.SequencePrefix} Fed={fed} SafeEnd={diagnosticSafeEnd?.ToString() ?? "-"} " +
+                $"RemainingFrames={(diagnosticSafeEnd is { } end ? Math.Max(0, end - fed).ToString() : "-")} " +
+                $"Anchor={pipeline.ActivityAnchorFrame} LastVisual={pipeline.LastVisualChangeFrame} " +
+                $"MaxObservedIndex={watcher.MaxObservedFrameIndex} LastAcceptedIndex={watcher.LastAcceptedFrameIndex} " +
+                $"SessionFiles={watcher.SessionFileCount} Candidate={watcher.CandidateCount} Pending={watcher.PendingCount} " +
+                $"LastWriteUtc={watcher.LastPhysicalFileWriteUtc:O} LastStableUtc={watcher.LastStableFrameUtc:O} " +
+                $"Produced={perf.ProducedFrames} Consumed={perf.ConsumedFrames} Output={perf.OutputFrames} " +
+                $"ProducedFps={perf.ProducedFramesPerSecond:0.###} ConsumedFps={perf.ConsumedFramesPerSecond:0.###} " +
+                $"BacklogBytes={perf.Backlog.PendingBytes} Trend={perf.BacklogTrend} PendingReadFailure={watcher.GetBacklogSnapshot().HasReadFailure} " +
+                $"QualityBackend={perf.QualityBackend} EncoderBackend={perf.EncoderBackend} " +
+                $"DiskState={disk?.State} TotalBytes={disk?.TotalBytes} FreeBytes={disk?.FreeBytes} SafetyBytes={disk?.SafetyBytes}");
+            if (watcher is TgaDirectoryWatcher tgaWatcher)
+                phase?.Invoke($"CaptureCandidateDiagnostics Reason={reason} {tgaWatcher.DescribeCandidates((int)Math.Min(fed, int.MaxValue))}");
+            if (pipeline is TgaPipelineOrchestrator tgaPipeline)
+                phase?.Invoke(tgaPipeline.DiagnosticSummary);
+        }
+
 
         void Stage(NodeExecutionStage stage, string ev, string message, RecordingFailureKind? kind = null)
         {
@@ -68,6 +95,7 @@ public static class CaptureEnvelopeRecorder
                 GamePid: null,
                 FailureKind: kind,
                 Message: message));
+            Snapshot(ev);
         }
 
         try
@@ -95,6 +123,7 @@ public static class CaptureEnvelopeRecorder
             if (health is not null)
             {
                 var preflightDisk = health.GetWatchDiskHealth(user.DiskSafetyFreePercent);
+                Snapshot("PreflightDisk", preflightDisk);
                 if (preflightDisk.State is not DiskSafetyState.Disabled and not DiskSafetyState.Unavailable &&
                     preflightDisk.FreeBytes < CaptureStartMinimumFreeBytes)
                 {
@@ -177,19 +206,16 @@ public static class CaptureEnvelopeRecorder
             phase?.Invoke($"PlaybackEvidenceConfirmed @ Anchor={anchor}");
 
             var safeEnd = ComputeSafeEndFrame(anchor, runTimeSeconds, user.SupersamplingMultiplier);
+            diagnosticSafeEnd = safeEnd;
             var captureFps = Math.Max(1, user.SupersamplingMultiplier) * ProjectConstants.FinalOutputFramerate;
             var tailFrames = Math.Max(1, (int)Math.Ceiling(TailSafetySeconds * captureFps));
             var tailStart = Math.Max(anchor, safeEnd - tailFrames);
-            var staticEndFrames = Math.Max(
-                1,
-                (int)Math.Ceiling(timeouts.ReplayEndStaticWindow.TotalSeconds * captureFps));
-            phase?.Invoke($"Recording：SafeEndFrame={safeEnd}（Anchor={anchor} + RunTime/Pre/Tail）");
+            phase?.Invoke($"Recording：SafeEndFrame={safeEnd}（Anchor={anchor} + RunTime/Pre/Tail；不以画面静止提前结束）");
             Stage(NodeExecutionStage.Capturing, "Capturing", $"目标 SafeEnd={safeEnd}");
 
             // 6. Capturing loop: race user cancellation / pipeline fault / game exit /
-            //    visual replay-end evidence / expected-progress fallback / stage timeout.
-            //    Static end detection is armed only after PlaybackEvidence, and
-            //    requires a bounded consecutive window rather than a single frame. Disk health
+            //    full capture envelope / stage timeout. Visual stillness can occur
+            //    during playback and must never shorten the capture envelope. Disk health
             //    is sampled once immediately, then at most once per
             //    DiskHealthSampleInterval (time-throttled, never per frame).
             var lastFed = pipeline.FedCount;
@@ -234,13 +260,14 @@ public static class CaptureEnvelopeRecorder
                                 // for SafeEnd, and run the controlled stop
                                 // (endmovie → quiescence → drain → Finish).
                                 pressureSnapshot = snapshot;
+                                Snapshot("DiskCriticalBeforeStop", snapshot);
                                 phase?.Invoke(
                                     $"磁盘压力 Critical：监视盘 {FormatDriveRoot(snapshot.DriveRoot)} " +
                                     $"剩余 {snapshot.FreePercent:0.0}% / {ToGiB(snapshot.FreeBytes):0.00} GiB，" +
                                     $"Fed={pipeline.FedCount} Candidate={pipeline.Watcher.CandidateCount} " +
                                     $"Pending={pipeline.Watcher.PendingCount} Anchor={pipeline.ActivityAnchorFrame?.ToString() ?? "-"} " +
                                     $"LastVisual={pipeline.LastVisualChangeFrame?.ToString() ?? "-"} " +
-                                    $"StaticGap={GetStaticGap(pipeline)} RequiredStatic={staticEndFrames} SafeEnd={safeEnd}，进入受控收尾。");
+                                    $"StaticGap={GetStaticGap(pipeline)} SafeEnd={safeEnd}，进入受控收尾。");
                                 break;
                             case DiskSafetyState.Unavailable:
                                 consecutiveUnavailableSamples++;
@@ -259,16 +286,6 @@ public static class CaptureEnvelopeRecorder
                 if (pressureSnapshot is not null)
                     break; // controlled stop; do not keep waiting for SafeEnd
 
-                if (pipeline.HasVisualChange &&
-                    pipeline.LastVisualChangeFrame is { } lastVisualChange &&
-                    pipeline.FedCount - lastVisualChange >= staticEndFrames)
-                {
-                    phase?.Invoke(
-                        $"ReplayEndEvidence：画面连续静止 {timeouts.ReplayEndStaticWindow.TotalSeconds:0.##}s，" +
-                        $"结束于帧 {pipeline.FedCount}");
-                    break;
-                }
-
                 if (pipeline.FedCount != lastFed)
                 {
                     lastFed = pipeline.FedCount;
@@ -285,6 +302,8 @@ public static class CaptureEnvelopeRecorder
                     ? $"Recording：尾帧收集 {pipeline.FedCount}/{safeEnd}"
                     : $"Recording：{pipeline.FedCount}/{safeEnd}");
                 telemetry?.Invoke(latestDiskSnapshot, pipeline.Performance);
+                if (DateTime.UtcNow - lastDiagnosticAt >= TimeSpan.FromSeconds(5))
+                    Snapshot(pipeline.FedCount >= tailStart ? "TailHeartbeat" : "Heartbeat", latestDiskSnapshot);
                 await Task.WhenAny(
                     Task.Delay(timeouts.ProgressSampleInterval, token),
                     pipeline.Completion,
@@ -321,50 +340,24 @@ public static class CaptureEnvelopeRecorder
                 Stage(NodeExecutionStage.DrainingFrames, "DiskPressureDrain", "排空已稳定帧");
                 Stage(NodeExecutionStage.FinalizingEncoder, "DiskPressureFinalize", "Native Finish");
                 var finalize = await pipeline.FinalizeAsync(timeouts, token);
+                Snapshot("DiskPressureFinalized", health?.GetWatchDiskHealth(user.DiskSafetyFreePercent));
 
                 if (pipeline.ActivityAnchorFrame is null || !pipeline.HasVisualChange)
                     throw new InvalidOperationException("成片校验失败：DiskPressure 收尾前未建立 PlaybackEvidence。");
 
-                // Disk pressure can win the sampling race while the final
-                // static tail is still sitting in the watcher. FinalizeAsync
-                // drains those already-written frames, so re-evaluate the same
-                // positive completion evidence used by the normal capture
-                // loop before classifying the attempt as an interrupted
-                // partial. This keeps the safety stop intact without turning a
-                // fully captured replay into a permanent DiskPressure failure.
-                var reachedStaticEnd =
-                    pipeline.LastVisualChangeFrame is { } drainedLastVisualChange &&
-                    finalize.SubmittedFrames - drainedLastVisualChange >= staticEndFrames;
+                // Critical interrupted the capture envelope. Preserve the media
+                // as a partial even if draining adds more frames. Total MP4
+                // duration includes pre-roll, and visual stillness is not proof
+                // that the replay reached its end. Neither can promote a stop
+                // caused by disk pressure to a successful full recording.
                 var outputDurationSeconds = finalize.ProducedFrames / (double)ProjectConstants.FinalOutputFramerate;
-                var minimumCompleteDurationSeconds = Math.Max(0.5, runTimeSeconds);
-                var maximumEnvelopeDurationSeconds =
-                    Math.Max(0.1, runTimeSeconds) + PreSafetySeconds + TailSafetySeconds;
-                var reachedDurationEnvelope =
-                    outputDurationSeconds >= minimumCompleteDurationSeconds &&
-                    outputDurationSeconds <= maximumEnvelopeDurationSeconds;
-
                 phase?.Invoke(
-                    $"DiskPressureCompletionEvidence：Submitted={finalize.SubmittedFrames} " +
+                    $"DiskPressureIncomplete：Submitted={finalize.SubmittedFrames} SafeEnd={safeEnd} " +
                     $"Output={finalize.ProducedFrames} OutputDuration={outputDurationSeconds:0.###}s " +
-                    $"ReplayDuration={runTimeSeconds:0.###}s Envelope=[{minimumCompleteDurationSeconds:0.###},{maximumEnvelopeDurationSeconds:0.###}]s " +
+                    $"ReplayDuration={runTimeSeconds:0.###}s " +
                     $"Anchor={pipeline.ActivityAnchorFrame?.ToString() ?? "-"} " +
                     $"LastVisual={pipeline.LastVisualChangeFrame?.ToString() ?? "-"} " +
-                    $"StaticGap={GetStaticGap(pipeline)} RequiredStatic={staticEndFrames} " +
-                    $"StaticComplete={reachedStaticEnd} DurationComplete={reachedDurationEnvelope}.");
-
-                if (reachedStaticEnd || reachedDurationEnvelope)
-                {
-                    var completionEvidence = reachedStaticEnd && reachedDurationEnvelope
-                        ? "连续静止与输出时长包络"
-                        : reachedStaticEnd
-                            ? "连续静止"
-                            : "输出时长包络";
-                    phase?.Invoke(
-                        $"DiskPressureRecoveredAsComplete：受控排空后已确认回放完整（" +
-                        $"证据={completionEvidence}，" +
-                        $"帧 {finalize.SubmittedFrames}，输出 {finalize.ProducedFrames}），继续正常媒体校验。");
-                    return finalize;
-                }
+                    $"StaticGap={GetStaticGap(pipeline)}；磁盘保护中断，保留 partial，不作为完整阶段合并。");
 
                 var stopResult = new ControlledStopResult(
                     Finalize: finalize,
@@ -379,10 +372,12 @@ public static class CaptureEnvelopeRecorder
                     $"已达到安全下限 {pressureSnapshot.SafetyPercent}% / {ToGiB(pressureSnapshot.SafetyBytes):0.0} GiB。" +
                     $"已受控收尾但完整性证据不足（帧 {finalize.SubmittedFrames}，输出 {finalize.ProducedFrames}，" +
                     $"输出时长 {outputDurationSeconds:0.###}s，回放 {runTimeSeconds:0.###}s，" +
-                    $"静止差 {GetStaticGap(pipeline)}/{staticEndFrames}）。",
+                    $"完整目标帧 {safeEnd}）。请降低前台 TGA 生成速率上限或增加监视盘容量后重录此节点。",
                     pressureSnapshot,
                     stopResult);
             }
+
+            phase?.Invoke($"CaptureEnvelopeReached：Fed={pipeline.FedCount} SafeEnd={safeEnd}；完整包络与安全尾帧已收集。");
 
             // 7. Strict endmovie: only CommandAcked / KnownAlreadyStopped proceed.
             Stage(NodeExecutionStage.RequestingMovieStop, "EndMovie", "请求停止录制");
@@ -406,6 +401,7 @@ public static class CaptureEnvelopeRecorder
             Stage(NodeExecutionStage.DrainingFrames, "Drain", "排空已稳定帧");
             Stage(NodeExecutionStage.FinalizingEncoder, "Finalize", "Native Finish");
             var result = await pipeline.FinalizeAsync(timeouts, token);
+            Snapshot("Finalized", health?.GetWatchDiskHealth(user.DiskSafetyFreePercent));
 
             // 10. Playback evidence must have survived end-to-end.
             if (pipeline.ActivityAnchorFrame is null || !pipeline.HasVisualChange)
@@ -416,6 +412,11 @@ public static class CaptureEnvelopeRecorder
             // FinalizingEncoder → ValidatingClip → CommittingClip → Completed.
             phase?.Invoke($"FinalizeCompleted：Fed={result.SubmittedFrames} Out={result.ProducedFrames} 输出={result.OutputPath}");
             return result;
+        }
+        catch (OperationCanceledException)
+        {
+            Snapshot(token.IsCancellationRequested ? "UserCancellation" : "UnexpectedCancellation");
+            throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

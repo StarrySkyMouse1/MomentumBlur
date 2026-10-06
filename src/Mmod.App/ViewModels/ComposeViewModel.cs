@@ -43,7 +43,10 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
         _settings.PropertyChanged += OnSettingsPropertyChanged;
         _tga.Changed += () =>
         {
-            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+            // The pipeline raises Changed from its feed thread; a synchronous
+            // Invoke would make the UI dispatcher a serialization point on the
+            // capture hot path. BeginInvoke keeps UI updates asynchronous.
+            System.Windows.Application.Current.Dispatcher.BeginInvoke(() =>
             {
                 RefreshTgaUi();
             });
@@ -525,7 +528,7 @@ public partial class ComposeViewModel : ObservableObject, IAsyncDisposable
                     var progress = new Progress<ObsSynthesisService.Progress>(p =>
                     {
                         var total = Math.Max(1, p.Total);
-                        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                        System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
                         {
                             item.ProgressPercent = Math.Clamp(100.0 * p.Done / total, 0, 100);
                             item.Status = $"合成中 {p.Done}/{total}";

@@ -14,13 +14,27 @@ public sealed class CaptureMotionDiagnostics
     private int _sampleCount;
     private double _deltaSum;
     private double _maximumDelta;
+    private long _lastSourceFrameIndex = -1;
+    private int _outputFps = 60;
+    private readonly List<string> _holdThenJumpLocations = [];
+    private readonly object _gate = new();
 
-    public void Sample(ReadOnlySpan<byte> bgra, int width, int height)
+    public void Sample(ReadOnlySpan<byte> bgra, int width, int height,
+        long sourceFrameIndex = -1, int outputFps = 60)
+    {
+        lock (_gate)
+            SampleCore(bgra, width, height, sourceFrameIndex, outputFps);
+    }
+
+    private void SampleCore(ReadOnlySpan<byte> bgra, int width, int height,
+        long sourceFrameIndex, int outputFps)
     {
         if (width <= 0 || height <= 0 || bgra.Length < width * height * 4)
             return;
 
         var current = ComputeGrid(bgra, width, height);
+        _lastSourceFrameIndex = sourceFrameIndex;
+        _outputFps = Math.Max(1, outputFps);
         if (_previous is not null)
         {
             double sum = 0;
@@ -39,7 +53,17 @@ public sealed class CaptureMotionDiagnostics
             else
             {
                 if (_nearStaticRun >= 2 && delta >= JumpThreshold)
+                {
                     _holdThenJumpCount++;
+                    // Bounded diagnostics: no per-input-frame database writes.
+                    // Indices are zero-based output-boundary samples, not proof
+                    // of dropped frames (intro/outro stillness is expected too).
+                    if (_holdThenJumpLocations.Count < 16)
+                        _holdThenJumpLocations.Add(
+                            $"output={_sampleCount - _nearStaticRun - 1}..{_sampleCount}" +
+                            $" time={(_sampleCount - _nearStaticRun - 1) / (double)_outputFps:0.###}..{_sampleCount / (double)_outputFps:0.###}s" +
+                            $" source={sourceFrameIndex} delta={delta:0.###}");
+                }
                 _nearStaticRun = 0;
             }
         }
@@ -47,11 +71,18 @@ public sealed class CaptureMotionDiagnostics
         _previous = current;
     }
 
-    public string BuildSummary() =>
-        $"TGA运动节奏：输出边界样本={_sampleCount + (_previous is null ? 0 : 1)} " +
-        $"平均块亮度差={(_sampleCount == 0 ? 0 : _deltaSum / _sampleCount):0.###} " +
-        $"最大差={_maximumDelta:0.###} 近静止最长={_longestNearStaticRun}帧 " +
-        $"停后突跳={_holdThenJumpCount}次（诊断项，不影响任务结果）";
+    public string BuildSummary()
+    {
+        lock (_gate)
+        {
+            return $"TGA运动节奏：输出边界样本={_sampleCount + (_previous is null ? 0 : 1)} " +
+                $"平均块亮度差={(_sampleCount == 0 ? 0 : _deltaSum / _sampleCount):0.###} " +
+                $"最大差={_maximumDelta:0.###} 近静止最长={_longestNearStaticRun}帧 " +
+                $"停后突跳={_holdThenJumpCount}次 尾部近静止={_nearStaticRun}帧 " +
+                $"末次源帧={_lastSourceFrameIndex} 区间=[{string.Join("; ", _holdThenJumpLocations)}] " +
+                "（0基输出采样位置；含片头/片尾，仅源TGA诊断，不等同编码掉帧）";
+        }
+    }
 
     private static float[] ComputeGrid(ReadOnlySpan<byte> bgra, int width, int height)
     {

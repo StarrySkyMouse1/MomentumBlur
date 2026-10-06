@@ -57,6 +57,8 @@ struct MmodSession {
   DWORD writer_stream = 0;
   bool writer_ready = false;
   bool finished = false;
+  int32_t fault = MmodError_Ok;
+  std::string last_error;
   LONGLONG sample_time = 0;
   LONGLONG sample_duration = 0;
 };
@@ -100,12 +102,12 @@ static std::vector<float> BuildShutterWeights(int blend_frames, float shutter_an
   return weights;
 }
 
-static void ClearAccumulator(MmodSession* session) {
+static bool ClearAccumulator(MmodSession* session) {
   if (session->use_gpu && session->gpu) {
-    GpuBlendResetWindow(session->gpu);
-    return;
+    return GpuBlendResetWindow(session->gpu);
   }
   std::fill(session->accumulator.begin(), session->accumulator.end(), 0.0f);
+  return true;
 }
 
 static bool AccumulateFrame(MmodSession* session, const uint8_t* bgra, int32_t stride, float weight) {
@@ -127,10 +129,11 @@ static bool AccumulateFrame(MmodSession* session, const uint8_t* bgra, int32_t s
   return true;
 }
 
-static void PackOutputBgra(MmodSession* session) {
+static bool PackOutputBgra(MmodSession* session) {
   if (session->use_gpu && session->gpu) {
-    GpuBlendPack(session->gpu, session->output_bgra);
-    return;
+    // A failed readback leaves output_bgra holding the PREVIOUS frame. It must
+    // not reach WriteSample, which would disguise a GPU fault as a valid CFR duplicate.
+    return GpuBlendPack(session->gpu, session->output_bgra);
   }
   const size_t pixels = static_cast<size_t>(session->width) * static_cast<size_t>(session->height);
   session->output_bgra.resize(pixels * 4u);
@@ -143,6 +146,7 @@ static void PackOutputBgra(MmodSession* session) {
     session->output_bgra[i * 4u + 2] = static_cast<uint8_t>(r);
     session->output_bgra[i * 4u + 3] = 255;
   }
+  return true;
 }
 
 /* Runs the quality pipeline on the accumulated window before packing.
@@ -268,7 +272,7 @@ static HRESULT WriteOutputFrame(MmodSession* session) {
     return MF_E_UNEXPECTED;
   }
 
-  PackOutputBgra(session);
+  if (!PackOutputBgra(session)) return MF_E_UNEXPECTED;
 
   const DWORD buffer_size = static_cast<DWORD>(session->output_bgra.size());
   ComPtr<IMFMediaBuffer> buffer;
@@ -416,21 +420,32 @@ extern "C" MMOD_API MmodSession* mmod_session_create(const MmodSessionDesc* desc
 
 extern "C" MMOD_API int32_t mmod_session_submit_bgra(MmodSession* session, const uint8_t* bgra, int32_t stride) {
   if (!session || !bgra || session->finished) return MmodError_InvalidArg;
+  if (session->fault != MmodError_Ok) return session->fault;
   if (stride < session->width * 4) return MmodError_InvalidArg;
 
   const int index_in_window = session->frames_submitted % session->blend_frames;
   if (index_in_window == 0) {
-    ClearAccumulator(session);
+    if (!ClearAccumulator(session)) {
+      session->last_error = GpuBlendGetLastError(session->gpu);
+      return session->fault = MmodError_SubmitFailed;
+    }
   }
 
   if (!AccumulateFrame(session, bgra, stride, session->weights[static_cast<size_t>(index_in_window)])) {
-    return MmodError_SubmitFailed;
+    session->last_error = "inputFrame=" + std::to_string(session->frames_submitted) +
+        " blendOffset=" + std::to_string(index_in_window) + " " + GpuBlendGetLastError(session->gpu);
+    return session->fault = MmodError_SubmitFailed;
   }
   session->frames_submitted += 1;
 
   if ((session->frames_submitted % session->blend_frames) == 0) {
-    if (FAILED(WriteOutputFrame(session))) {
-      return session->processing_effects_enabled ? MmodError_ProcessingFailed : MmodError_EncodeFailed;
+    const HRESULT hr = WriteOutputFrame(session);
+    if (FAILED(hr)) {
+      session->last_error = "WriteOutputFrame outputFrame=" + std::to_string(session->frames_output) +
+          " submitted=" + std::to_string(session->frames_submitted) +
+          " HRESULT=" + std::to_string(static_cast<uint32_t>(hr));
+      if (session->gpu) session->last_error += std::string(" ") + GpuBlendGetLastError(session->gpu);
+      return session->fault = session->processing_effects_enabled ? MmodError_ProcessingFailed : MmodError_EncodeFailed;
     }
   }
 
@@ -439,6 +454,8 @@ extern "C" MMOD_API int32_t mmod_session_submit_bgra(MmodSession* session, const
 
 extern "C" MMOD_API int32_t mmod_session_finish(MmodSession* session) {
   if (!session) return MmodError_InvalidArg;
+  // A partially applied window cannot be resumed or finalized as a success.
+  if (session->fault != MmodError_Ok) return session->fault;
   session->finished = true;
 
   // Flush partial window by re-using last weights proportionally if needed: drop remainder.
@@ -446,12 +463,19 @@ extern "C" MMOD_API int32_t mmod_session_finish(MmodSession* session) {
     const HRESULT hr = session->writer->Finalize();
     session->writer.Reset();
     session->writer_ready = false;
-    if (FAILED(hr)) return MmodError_EncodeFailed;
+    if (FAILED(hr)) {
+      session->last_error = "Finalize HRESULT=" + std::to_string(static_cast<uint32_t>(hr));
+      return session->fault = MmodError_EncodeFailed;
+    }
   } else if (session->frames_output == 0) {
     return MmodError_EncodeFailed;
   }
 
   return MmodError_Ok;
+}
+
+extern "C" MMOD_API const char* mmod_session_get_last_error(MmodSession* session) {
+  return session ? session->last_error.c_str() : "Session missing";
 }
 
 extern "C" MMOD_API void mmod_session_destroy(MmodSession* session) {
@@ -791,13 +815,23 @@ extern "C" MMOD_API int32_t mmod_process_video_file(
 
     ComPtr<IMFMediaBuffer> buffer;
     hr = sample->ConvertToContiguousBuffer(&buffer);
-    if (FAILED(hr)) continue;
+    if (FAILED(hr)) {
+      // Skipping one decoded sample shifts every later N-frame blend window.
+      // Corrupt input is a failure, never a shorter "successful" output.
+      mmod_session_destroy(session.release());
+      if (out_error) *out_error = MmodError_DecodeFailed;
+      return MmodError_DecodeFailed;
+    }
 
     BYTE* data = nullptr;
     DWORD max_len = 0;
     DWORD cur_len = 0;
     hr = buffer->Lock(&data, &max_len, &cur_len);
-    if (FAILED(hr)) continue;
+    if (FAILED(hr)) {
+      mmod_session_destroy(session.release());
+      if (out_error) *out_error = MmodError_DecodeFailed;
+      return MmodError_DecodeFailed;
+    }
 
     const int stride = static_cast<int>(width) * 4;
     const DWORD expected = static_cast<DWORD>(stride * height);
@@ -822,6 +856,9 @@ extern "C" MMOD_API int32_t mmod_process_video_file(
       }
     } else {
       buffer->Unlock();
+      mmod_session_destroy(session.release());
+      if (out_error) *out_error = MmodError_DecodeFailed;
+      return MmodError_DecodeFailed;
     }
   }
 

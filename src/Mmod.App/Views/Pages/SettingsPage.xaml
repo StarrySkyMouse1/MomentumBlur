@@ -476,7 +476,7 @@
                                 <Slider Minimum="180" Maximum="360"
                                         SmallChange="5" LargeChange="30"
                                         TickFrequency="30"
-                                        Value="{Binding ShutterAngle, Mode=TwoWay}"
+                                        Value="{Binding ShutterAngle, Mode=TwoWay, Delay=300}"
                                         Margin="0,2,0,0"/>
                                 <Grid Margin="0,2,0,0">
                                     <ui:TextBlock HorizontalAlignment="Left"
@@ -866,7 +866,7 @@
                                               Style="{StaticResource AppKeyText}"
                                               Text="目标码率（Mbps）"/>
                                 <ui:NumberBox Grid.Column="1"
-                                              Value="{Binding IntermediateTargetBitrateMbps, Mode=TwoWay}"
+                                              Value="{Binding IntermediateTargetBitrateMbps, Mode=TwoWay, Delay=300}"
                                               ValueChanged="OnNumberBoxValueChanged"
                                               Minimum="0"
                                               Maximum="120"

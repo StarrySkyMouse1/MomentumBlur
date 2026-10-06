@@ -108,12 +108,39 @@ public sealed class RenderTaskRepository
         return result;
     }
 
-    public IReadOnlyList<TaskLogRecord> GetLogs(string taskId)
+    /// <summary>Batch query used by the task-list UI to avoid one database round-trip per task.</summary>
+    public ILookup<string, RenderNodeRecord> GetNodesForTasks(IEnumerable<string> taskIds)
+    {
+        var ids = taskIds.Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToArray();
+        var result = new List<RenderNodeRecord>();
+        using var connection = Open();
+        foreach (var chunk in ids.Chunk(500))
+        {
+            using var command = connection.CreateCommand();
+            var names = new string[chunk.Length];
+            for (var i = 0; i < chunk.Length; i++)
+            {
+                names[i] = $"$task{i}";
+                command.Parameters.AddWithValue(names[i], chunk[i]);
+            }
+            command.CommandText = $"SELECT * FROM render_nodes WHERE task_id IN ({string.Join(',', names)}) ORDER BY task_id, sequence;";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                result.Add(ReadNode(reader));
+        }
+        return result.ToLookup(x => x.TaskId);
+    }
+
+    public IReadOnlyList<TaskLogRecord> GetLogs(string taskId, int limit = 0)
     {
         using var connection = Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT * FROM task_logs WHERE task_id = $task ORDER BY id;";
+        command.CommandText = limit > 0
+            ? "SELECT * FROM (SELECT * FROM task_logs WHERE task_id = $task ORDER BY id DESC LIMIT $limit) ORDER BY id;"
+            : "SELECT * FROM task_logs WHERE task_id = $task ORDER BY id;";
         command.Parameters.AddWithValue("$task", taskId);
+        if (limit > 0)
+            command.Parameters.AddWithValue("$limit", limit);
         using var reader = command.ExecuteReader();
         var result = new List<TaskLogRecord>();
         while (reader.Read())

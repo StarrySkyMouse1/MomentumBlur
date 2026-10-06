@@ -15,8 +15,6 @@ namespace Mmod.Core.Services;
 public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
 {
     private const int MinTgaHeaderSize = 18;
-    private const int ActiveFileStableIdleMs = 120;
-    private const int BacklogFileStableIdleMs = 40;
     private const int BaseFullScanIntervalMs = 750;
     private const int BackloggedFullScanIntervalMs = 2000;
 
@@ -50,6 +48,8 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
     private long _peakPendingFrames;
     private long _peakPendingBytes;
     private bool _hasReadFailure;
+    private long _scanFailures, _eventErrors;
+    private string? _lastScanError;
 
     public TgaDirectoryWatcher(string directory, string sequencePrefix, int pollIntervalMs = 50)
     {
@@ -154,32 +154,43 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
         }
     }
 
-    private static bool LooksLikeCompleteTga(FileInfo info)
+    private static bool LooksLikeCompleteTga(FileInfo info) => InspectTga(info, out _, includeDetails: false) == "Ready";
+
+    private static string InspectTga(FileInfo info, out string detail, bool includeDetails = true)
     {
+        detail = "";
         try
         {
-            using var stream = info.Open(FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var stream = info.Open(FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (includeDetails) detail = $"Bytes={stream.Length}";
             if (stream.Length < MinTgaHeaderSize)
-                return false;
+                return "ShortHeader";
             Span<byte> header = stackalloc byte[MinTgaHeaderSize];
             if (stream.Read(header) < MinTgaHeaderSize)
-                return false;
-            if (header[2] != 2)
-                return false;
+                return "ShortHeader";
             var width = header[12] | (header[13] << 8);
             var height = header[14] | (header[15] << 8);
             var bpp = header[16];
-            if (width is <= 0 or > 7680 || height is <= 0 or > 4320)
-                return false;
-            if (bpp is not (24 or 32))
-                return false;
             var expected = (long)width * height * (bpp / 8) + MinTgaHeaderSize;
-            // 允许极小尾部差异，拒绝明显半截文件
-            return stream.Length >= expected && stream.Length <= expected + 64;
+            if (includeDetails) detail += $" Expected={expected} Type={header[2]} Width={width} Height={height} Bpp={bpp} IdBytes={header[0]}";
+            if (header[2] != 2 || width is <= 0 or > 7680 || height is <= 0 or > 4320 || bpp is not (24 or 32))
+                return "UnsupportedHeader";
+            if (stream.Length < expected)
+                return "IncompletePayload";
+            if (stream.Length > expected + 64)
+                return "UnexpectedLength";
+            return "Ready";
         }
-        catch
+        catch (FileNotFoundException) { return "Missing"; }
+        catch (IOException ex)
         {
-            return false;
+            if (includeDetails) detail += $" HResult=0x{ex.HResult:X8} Error={ex.Message}";
+            return (ex.HResult & 0xffff) is 32 or 33 ? "WriterOrLockOpen" : "ReadError";
+        }
+        catch (Exception ex)
+        {
+            if (includeDetails) detail += $" HResult=0x{ex.HResult:X8} Error={ex.Message}";
+            return "ReadError";
         }
     }
 
@@ -193,6 +204,11 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.Size | NotifyFilters.LastWrite,
             IncludeSubdirectories = false,
             EnableRaisingEvents = true,
+        };
+        _watcher.Error += (_, e) =>
+        {
+            Interlocked.Increment(ref _eventErrors);
+            _lastScanError = e.GetException().Message;
         };
         _watcher.Created += OnFsEvent;
         _watcher.Changed += OnFsEvent;
@@ -329,11 +345,36 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
                 }
                 _sessionFileCount = sessionFiles;
             }
-            catch
+            catch (Exception ex)
             {
-                // ignored; retried next tick
+                Interlocked.Increment(ref _scanFailures);
+                _lastScanError = ex.Message;
             }
         }
+    }
+
+    /// <summary>Read-only periodic/boundary diagnosis; never alters candidate ownership.</summary>
+    public string DescribeCandidates(int? nextExpectedFrame = null)
+    {
+        var reasons = new Dictionary<string, int>();
+        var samples = new List<string>();
+        long bytes = 0;
+        var candidates = _candidates.ToArray().OrderBy(static pair => pair.Key);
+        foreach (var (index, candidate) in candidates)
+        {
+            var info = new FileInfo(candidate.Path);
+            var reason = InspectTga(info, out var detail);
+            reasons[reason] = reasons.GetValueOrDefault(reason) + 1;
+            double? age = null;
+            try { bytes += info.Length; age = (DateTime.UtcNow - info.LastWriteTimeUtc).TotalSeconds; } catch { }
+            if (samples.Count < 4 || index == nextExpectedFrame)
+                samples.Add($"Index={index} Name={info.Name} Reason={reason} AgeSec={age:0.###} {detail}");
+        }
+        var next = nextExpectedFrame is { } expected
+            ? $"NextExpected={expected} Candidate={_candidates.ContainsKey(expected)} Pending={_pending.ContainsKey(expected)}"
+            : "NextExpected=unknown";
+        return $"ScanAtUtc={_lastFullScanUtc:O} ScanFailures={Interlocked.Read(ref _scanFailures)} EventErrors={Interlocked.Read(ref _eventErrors)} LastScanError={_lastScanError ?? "-"} CandidateBytes={bytes} Reasons=[{string.Join(",", reasons.Select(static pair => $"{pair.Key}:{pair.Value}"))}] " +
+            $"{next} Samples=[{string.Join(" | ", samples)}]";
     }
 
     public void CleanupSessionFiles()
@@ -406,7 +447,7 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
             if ((now - _lastFullScanUtc).TotalMilliseconds >= fullScanInterval)
                 ScanDirectory();
             PruneMissingPending();
-            ProcessCandidates(now);
+            ProcessCandidates();
         }
         finally
         {
@@ -414,7 +455,7 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
         }
     }
 
-    private void ProcessCandidates(DateTime nowUtc)
+    private void ProcessCandidates()
     {
         foreach (var (index, candidate) in _candidates)
         {
@@ -446,25 +487,15 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
 
                 if (info.Length < MinTgaHeaderSize)
                 {
-                    candidate.Update(info.Length, info.LastWriteTimeUtc);
                     continue;
                 }
 
                 // 已收尾的完整帧：文件大小应接近声明分辨率，避免误收半截写入
                 if (!LooksLikeCompleteTga(info))
                 {
-                    candidate.Update(info.Length, info.LastWriteTimeUtc);
                     continue;
                 }
 
-                var stable = candidate.IsSameObservation(info.Length, info.LastWriteTimeUtc);
-                candidate.Update(info.Length, info.LastWriteTimeUtc);
-                var idleMs = (nowUtc - info.LastWriteTimeUtc).TotalMilliseconds;
-                var requiredIdleMs = PendingCount > 500 ? BacklogFileStableIdleMs : ActiveFileStableIdleMs;
-                if (!stable || idleMs < requiredIdleMs)
-                    continue;
-                if (!IsValidTgaFile(candidate.Path))
-                    continue;
                 // Permanent session-level dedup: an index accepted once as a
                 // stable frame can never be re-accepted or re-counted, even if
                 // its file was taken, still exists briefly, or a Created /
@@ -631,16 +662,5 @@ public sealed partial class TgaDirectoryWatcher : ITgaCaptureWatcher
     private sealed class CandidateFile(string path)
     {
         public string Path { get; set; } = path;
-        public long LastLength { get; private set; } = -1;
-        public DateTime LastWriteUtc { get; private set; } = DateTime.MinValue;
-
-        public bool IsSameObservation(long length, DateTime lastWriteUtc) =>
-            length > 0 && length == LastLength && lastWriteUtc == LastWriteUtc;
-
-        public void Update(long length, DateTime lastWriteUtc)
-        {
-            LastLength = length;
-            LastWriteUtc = lastWriteUtc;
-        }
     }
 }

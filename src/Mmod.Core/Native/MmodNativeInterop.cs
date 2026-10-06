@@ -65,6 +65,9 @@ internal static class MmodNativeInterop
     internal static extern int mmod_session_get_progress(IntPtr session, out int outDone, out int outTotal);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr mmod_session_get_last_error(IntPtr session);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int mmod_session_get_processing_status(
         IntPtr session, out int outEffectsEnabled, out int outUsingCpuFallback);
 

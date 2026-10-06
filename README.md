@@ -26,9 +26,9 @@ dotnet run --project src\Mmod.App\Mmod.App.csproj -c Release
 | TGA 流式 | 每个节点先确认旧录制停止并清理监视目录遗留 TGA；消费线程就绪后再 startmovie，落盘即进入 Native GPU 混合 → 画质处理（可选）→ MP4 |
 | 回放兼容 | 本地与在线 MMTV v1/v2 均可扫描和执行；未知版本由解析器明确拒绝，不再把游戏可播放的在线 v1 阶段回放误判为旧版不兼容 |
 | 有序消费加速 | TGA 读取/24→32 位展开使用有限并行预解码，按连续帧号单序提交；Native 使用三槽 D3D11 上传环减少 staging 重用等待，缺帧或所有权异常直接失败，不跳帧、不乱序 |
-| 前台录制背压 | TGA 设置可配置现实生成速率上限（默认 90 fps，0 表示不覆盖）；自动录制期间按任务冻结值临时设置 `fps_max`，`host_framerate` 的超采样时间步保持不变，结束后恢复用户原值 |
+| 前台录制速率 | TGA 设置可配置现实生成速率上限（默认 90 fps，0 表示不覆盖）；每次录制开始前设置一次任务工作速率，录制过程中不动态改速或查询速率；`host_framerate` 的超采样时间步保持不变，结束后恢复用户原值 |
 | 稳定录制环境 | 自动录制按 Attempt 保存并临时设置 Source 渲染/插值相关 ConVar（`mat_queue_mode`、前后台节流、预测、插值与更新率），结束、失败或取消时逆序恢复；无法读取原值的可选变量不覆盖 |
-| 失败任务续跑 | 待执行、已暂停或失败待处理的任务可单独修正前台 TGA 生成速率上限；已完成阶段片段保持不变，点击“开始 / 继续”后从失败及后续节点继续，其他画面与编码快照仍保持冻结 |
+| 失败任务续跑 | 每次点击开始只执行一次，失败后收尾并暂停，不自动重试或重启游戏重录；首个错误保留在状态栏，清理次级错误仅记日志。 待执行、已暂停或失败待处理的任务可单独修正前台 TGA 生成速率上限；已完成阶段片段保持不变，点击“开始 / 继续”后从失败及后续节点继续，其他画面与编码快照仍保持冻结 |
 | 私人单人录制 | 每个新游戏会话先离开原大厅并创建仅邀请的 Steam 私人大厅，保留登录身份与头像，同时隔离公屏聊天和其他玩家；工具自启游戏时使用简体中文，复用已打开的游戏时保留该实例的语言 |
 | 录制 HUD | 设置可冻结到任务；隐藏时在自动回放前执行 `cl_drawhud 0`，同时隐藏顶部回放控制条和游戏 HUD，录制结束后恢复显示 |
 | OBS 批量 | 拖放/多选，可并行，慢放指令可复制 |
@@ -91,6 +91,14 @@ Bilibili 会对上传源再次转码。每一帧随机噪点 / 胶片颗粒会�
 - **Shutter Angle**（180°~360°）是新推荐模式：有效样本 ≈ N × angle / 360，居中 Box 窗口，权重归一化。
   兼顾 4K60 上传与 1080p30 观看：建议先 AB 测试 300°~360°，不硬编码唯一最佳值。
 
+### 画面连续性与故障定位
+
+- GPU 上传、权重更新、输出回读失败必须使本次合成失败；不得复用上一帧或旧权重继续编码。故障日志包含源帧号、混合位置、输出帧号、HRESULT 与设备移除原因。故障 Session 不允许继续提交或作为成功输出收尾。
+- 离线解码的缓冲区转换、锁定或帧长度错误直接失败，不静默跳过输入帧（否则后续混合窗口整体错位）。
+- TGA 正常消费和结束排空使用同一套分辨率检查、提交及运动诊断。日志报告停后突跳的前 16 个具体输出采样区间、总次数和尾部静止长度；它是稀疏源画面诊断，不是编码掉帧证明。
+- Session 日志明确记录实际曝光模式。Legacy 模式下保存的 ShutterAngle **不生效**；Exposure 0.3 不等于 360° 全曝光，也不等于 SVR 的矩形曝光比例。日志中的 effectiveSamples 是 `1 / sum(weight²)` 的等效均匀样本数，不是丢弃帧数。
+- 验收须同时检查成片时间戳、运动内容和实际观看；构建、Smoke、CFR 或有限片段无重复帧均不能证明所有回放绝不卡顿。旧任务冻结参数不随全局设置变动。
+
 ## AB 测试（可选）
 
 `scripts/quality-ab-test.ps1` 需要系统存在 ffmpeg；没有时只提示未安装，不影响主程序。
@@ -113,8 +121,8 @@ AB 对比重点：高速 ramp 边缘、高频贴图 / 远处细线 shimmer、HUD
     “仅引擎响应”并显式标记 `Degraded`，绝不用 echo + 固定 sleep 冒充 MapReady。
   - Replay 开始：`VisualPlaybackEvidenceProbe` 用低分辨率 block-grid 计算 changed-block ratio +
     mean luma delta，要求连续 N 帧显著才建立 anchor（HUD 微变、单帧噪点不会触发）。
-  - 回放结束：已经建立 PlaybackEvidence 后，连续 1 秒画面没有 block 级变化即建立 ReplayEndEvidence；预计时长仅作为最大上限兜底。
-  - 停止：建立 ReplayEndEvidence 或达到预计时长上限后，`endmovie` 走 strict 命令（ACK + 失败 pattern），随后用 watcher 的**物理静默**
+  - 回放结束：建立 PlaybackEvidence 后，完整录制 `RunTime + 2 秒前置余量 + 2.5 秒尾帧余量` 对应的源帧数；画面静止不再触发提前结束，宁可多录尾帧也不截断回放。
+  - 停止：达到完整录制包络后，`endmovie` 走 strict 命令（ACK + 失败 pattern），随后用 watcher 的**物理静默**
     （无新写入 + 候选清空 + 最终全量扫描后保持安静）证明写盘真的停止。
 - **Fault 必须传播**：pipeline 后台异常、Native Finish 失败、encoder flush 失败一律 throw，
   禁止 `catch {}` 后仅凭 `File.Exists && Length > 0` 判定成功。
@@ -123,20 +131,22 @@ AB 对比重点：高速 ramp 边缘、高频贴图 / 远处细线 shimmer、HUD
 - **统一 Cleanup Barrier**：所有失败/取消路径走 `CaptureCleanupCoordinator`，使用**独立 bounded
   cleanup token**（用户取消令牌不会取消清理）；cleanup 无法证明干净时游戏会话判 Dirty，禁止
   same-session retry，必须重建游戏会话。
-- **Retry 分类**：`RecordingFailureKind` 决定重试策略（SameSession / ReloadMap / RestartGame）；
-  永久性输入错误不浪费重试；`CaptureStopUnconfirmed / TgaQuiescenceTimeout / NetConLost / GameExited`
-  强制重启游戏。
+- **失败停止**：所有节点故障均停止本次执行并暂停队列，不调用自动重试或重启重录策略。首个错误保持可见；只有用户点击“开始 / 继续”才创建新 Attempt。
 - **原子输出**：每个 Attempt 写独立临时文件 → MediaProbe 校验（容器、分辨率、fps、时长 vs 实际
   输出帧数交叉验证）→ fsync → 原子移动到正式 ClipPath → 数据库 Completed。
 - **崩溃恢复**：`runner_session` 持久化 owned 进程身份（PID + exe + start time + session prefix）；
   应用启动时先身份校验（防 PID reuse）再停止遗留进程、按前缀清理 TGA、丢弃 partial clip、节点回 Pending。
 - **健康监控**：录制循环竞争 用户取消 / pipeline fault / 游戏进程退出 / 进度超时；游戏退出秒级失败；
   磁盘空间低于安全下限进入受控停止（DiskPressure）。
+- **固定生成速率与停止边界**：每次录制开始前设置一次 `fps_max`，不启用动态减速、排空档或运行时回读确认。正常结束、失败与立即停止均先停止 TGA 生成，等待物理静默，再排空已有帧、结束编码并释放消费管线，最后恢复录制环境。磁盘 Critical 仍受控停止，保留经过验证的 partial。详见 [TGA 速率与停止边界](docs/design/TGA_CAPTURE_BACKPRESSURE.md)。
+- **中断片段不等于完整回放**：DiskPressure 受控停止后保留经过媒体校验的 partial，并将节点报告为未完成，不自动合并。视频总时长包含前导画面，画面静止也不能证明到达回放终点；两者均不再用于把中断片段或历史 partial 自动提升为完整阶段。降低前台 TGA 生成速率上限或增加监视盘容量后可重录失败节点，已有 partial 保留。
 - **运行诊断**：任务页以最高 4 Hz 显示监视盘百分比/GiB、安全线/预警线、吞吐、积压趋势
   和真实处理/编码后端；常驻显示当前任务冻结的容器/编码、源分辨率策略、帧率、目标码率、超采样、
   模糊方式、画质处理与输出路径；预计剩余时间按所有未完成节点的剩余输入帧与当前 10 秒滚动消费速度实时计算，
   UI 最多 4 Hz 只做内存运算，任务/节点数据库仍最多每秒读取一次。每个输出窗口还会低成本抽样源 TGA，
   在任务日志记录近静止后突跳次数；该指标只用于定位源运动节奏，不改变任务成功判定。
+
+- **可追踪录制日志**：每个 Attempt 在 `task-work/<taskId>/node_<序号>/attempt_<次数>_<session>.capture.log` 写入即时刷新的文本日志。关键事件同时保留在任务数据库；每 5 秒保存生成/消费/输出、源帧号、候选拒收原因、磁盘空间和解码/Native 提交耗时，停止、排空与清理边界另行记录。文本日志保存命令读取期间的 NetCon 输出、源回放 SHA256、冻结配置及实际加载的 Core 构建身份，便于确认重试运行的是新版程序。日志不发送额外游戏查询，不改变录制速率或停止条件。
 
 自动化测试（无需真实游戏）：`dotnet run --project src\Mmod.SmokeTest\Mmod.SmokeTest.csproj -c Release recording`
 覆盖 happy path、HUD-only 不触发、场景运动连续触发、单帧噪点不触发、pipeline fault、finish fault、

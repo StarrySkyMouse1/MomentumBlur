@@ -143,10 +143,6 @@ public sealed class DialogService : IDialogService
             {
                 panel.Children.Add(host);
             }
-            else if (owner.Content is Grid grid)
-            {
-                grid.Children.Add(host);
-            }
         }
 
         _dialogHost = host;

@@ -21,7 +21,7 @@ public sealed record NodeExecutionContext(
     Action<RenderNodeRecord>? OnNodeStatusChanged,
     Action<DiskHealthSnapshot?, PerformanceSnapshot>? Telemetry = null);
 
-/// <summary>Node execution failed after retry policy exhaustion.</summary>
+/// <summary>Node execution failed; another attempt requires explicit user action.</summary>
 public sealed class NodeExecutionFailedException : Exception
 {
     public NodeExecutionFailedException(RecordingFailureKind kind, Exception inner)
@@ -37,12 +37,13 @@ public sealed class NodeExecutionFailedException : Exception
 /// Per-node attempt state machine: creates a unique CaptureSessionId + TGA
 /// prefix per attempt, drives ChangeMap → pipeline → envelope → media probe →
 /// atomic commit, classifies failures, runs the unified cleanup barrier, and
-/// applies the retry/recovery policy. No irreversible boundary is crossed
+/// stops on failure without automatic retry. No irreversible boundary is crossed
 /// without positive proof.
 /// </summary>
 public sealed class NodeExecutionCoordinator
 {
     private ICapturePipeline? _activePipeline;
+    private CaptureCleanupResult? _attemptCleanup;
     private string? _privateLobbyGameSessionId;
     private string? _readyGameSessionId;
     private string? _readyMap;
@@ -51,169 +52,161 @@ public sealed class NodeExecutionCoordinator
 
     public async Task<string> ExecuteNodeAsync(NodeExecutionContext ctx, CancellationToken token)
     {
+        _attemptCleanup = null;
         var taskId = ctx.Task.Id;
         var nodeId = ctx.Node.Id;
         var nodeDir = Path.Combine(ctx.WorkDirectory, $"node_{ctx.Node.Sequence + 1:D3}");
         Directory.CreateDirectory(nodeDir);
 
-        // A DiskPressure controlled stop may have produced a fully complete,
-        // media-validated clip before the older completion classifier rejected
-        // it. Re-check retained Validated partials before spending another full
-        // replay pass. The source partial remains untouched as recovery evidence;
-        // only a verified copy is atomically promoted to the node clip.
-        var recoveredClip = TryRecoverCompleteValidatedPartial(ctx, nodeDir);
-        if (recoveredClip is not null)
-            return recoveredClip;
+        // Validated partials prove media integrity, not replay completeness.
+        // Keep them for recovery/manual inspection, but record the failed node
+        // again instead of promoting a clip based on its total duration.
 
-        // attempt_number is an audit sequence across the lifetime of the node,
-        // while MaxAttempts is the budget for this explicit execution/resume.
-        // Using the lifetime count as the loop bound made a failed node with
-        // three historical attempts impossible to retry from “开始 / 继续”.
+        // Each explicit Start/Continue executes exactly one attempt. Historical
+        // attempt numbers remain an audit sequence, not an automatic retry budget.
         var attemptNumber = ctx.Repository.GetAttemptsForNode(taskId, nodeId).Count + 1;
-        var attemptIndex = 1;
         string? lastError = null;
         RecordingFailureKind? lastKind = null;
 
-        while (attemptIndex <= ctx.Timeouts.MaxAttempts)
+        var captureSession = CaptureSessionInfo.Create(taskId, ctx.Node.Sequence, attemptNumber);
+        var attemptId = Guid.NewGuid().ToString("N");
+        var tempClip = Path.Combine(nodeDir, $"attempt_{attemptNumber}_{captureSession.CaptureSessionId[..6]}.encoding.mp4");
+        // M4: deterministic partial path inside the node work directory;
+        // independent from the formal ClipPath and never overwrites it.
+        var partialClip = Path.Combine(nodeDir, $"attempt_{attemptNumber}_{captureSession.CaptureSessionId[..6]}.partial.mp4");
+
+        var attempt = new RenderAttemptRecord(
+            Id: attemptId,
+            SessionId: captureSession.CaptureSessionId,
+            TaskId: taskId,
+            NodeId: nodeId,
+            AttemptNumber: attemptNumber,
+            Stage: NodeExecutionStage.Created,
+            SequencePrefix: captureSession.SequencePrefix,
+            TempClipPath: tempClip,
+            CreatedAt: DateTimeOffset.UtcNow,
+            UpdatedAt: DateTimeOffset.UtcNow,
+            FinishedAt: null,
+            LastError: null,
+            FailureKind: null,
+            CleanupState: CaptureCleanupState.NotRequired,
+            GameProcessId: ctx.Game.ProcessId,
+            GameProcessStartedUtc: ctx.Game.ProcessStartTimeUtc,
+            NetConPort: null,
+            ExpectedMap: ctx.Task.MapName,
+            FedCount: 0,
+            SubmittedFrameCount: 0,
+            LastTgaIndex: null);
+        var transcriptPath = Path.Combine(nodeDir, $"attempt_{attemptNumber}_{captureSession.CaptureSessionId[..6]}.capture.log");
+        var originalLog = ctx.Log;
+        var originalPhase = ctx.Phase;
+        using var transcript = new CaptureAttemptLog(transcriptPath, ctx.Game.NetCon, message => originalLog("Warning", message));
+        ctx = ctx with
         {
-            var captureSession = CaptureSessionInfo.Create(taskId, ctx.Node.Sequence, attemptNumber);
-            var attemptId = Guid.NewGuid().ToString("N");
-            var tempClip = Path.Combine(nodeDir, $"attempt_{attemptNumber}_{captureSession.CaptureSessionId[..6]}.encoding.mp4");
-            // M4: deterministic partial path inside the node work directory;
-            // independent from the formal ClipPath and never overwrites it.
-            var partialClip = Path.Combine(nodeDir, $"attempt_{attemptNumber}_{captureSession.CaptureSessionId[..6]}.partial.mp4");
-
-            var attempt = new RenderAttemptRecord(
-                Id: attemptId,
-                SessionId: captureSession.CaptureSessionId,
-                TaskId: taskId,
-                NodeId: nodeId,
-                AttemptNumber: attemptNumber,
-                Stage: NodeExecutionStage.Created,
-                SequencePrefix: captureSession.SequencePrefix,
-                TempClipPath: tempClip,
-                CreatedAt: DateTimeOffset.UtcNow,
-                UpdatedAt: DateTimeOffset.UtcNow,
-                FinishedAt: null,
-                LastError: null,
-                FailureKind: null,
-                CleanupState: CaptureCleanupState.NotRequired,
-                GameProcessId: ctx.Game.ProcessId,
-                GameProcessStartedUtc: ctx.Game.ProcessStartTimeUtc,
-                NetConPort: null,
-                ExpectedMap: ctx.Task.MapName,
-                FedCount: 0,
-                SubmittedFrameCount: 0,
-                LastTgaIndex: null);
-            ctx.Repository.CreateAttempt(attempt);
-
-            ctx.Repository.SaveRunnerSession(new RunnerSessionRecord(
-                ProcessId: ctx.Game.ProcessId,
-                NetConPort: null,
-                NetConPassword: null,
-                TaskId: taskId,
-                NodeId: nodeId,
-                ExePath: ctx.Game.ExePath,
-                ProcessStartedAt: ctx.Game.ProcessStartTimeUtc,
-                GameSessionId: ctx.Game.GameSessionId,
-                CaptureSessionId: captureSession.CaptureSessionId,
-                SequencePrefix: captureSession.SequencePrefix,
-                OwnershipToken: attemptId,
-                WatchDirectory: ctx.Settings.WatchDirectory));
-
-            void SetStage(NodeExecutionStage stage)
+            Log = (level, message) => { transcript.Write(level, message); originalLog(level, message); },
+            Phase = message =>
             {
-                if (stage != attempt.Stage)
-                {
-                    RecordingStateMachine.AssertTransition(attempt.Stage, stage);
-                    if (!ctx.Repository.TryTransitionAttemptStage(attemptId, attempt.Stage, stage, attempt.FedCount, attempt.SubmittedFrameCount, attempt.LastTgaIndex))
-                        throw new InvalidOperationException($"数据库 stage 转换被拒：{attempt.Stage} → {stage}");
-                    attempt = attempt with { Stage = stage, UpdatedAt = DateTimeOffset.UtcNow };
-                }
-            }
+                if (!message.StartsWith("Recording：", StringComparison.Ordinal))
+                    transcript.Write("Phase", message);
+                originalPhase?.Invoke(message);
+            },
+        };
+        ctx.Log("Info", $"AttemptDiagnosticsBegin Task={taskId} Node={nodeId} Attempt={attemptId} " +
+            $"Session={captureSession.CaptureSessionId} Prefix={captureSession.SequencePrefix} " +
+            $"Log={transcriptPath} Temp={tempClip} Stable={ctx.StableClipPath} " +
+            $"CoreBuild={typeof(NodeExecutionCoordinator).Assembly.ManifestModule.ModuleVersionId} " +
+            $"CorePath={typeof(NodeExecutionCoordinator).Assembly.Location}");
+        var sourceInfo = new FileInfo(ctx.Replay.FilePath);
+        using (var replayStream = File.Open(ctx.Replay.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            ctx.Log("Info", $"ReplaySource Path={ctx.Replay.FilePath} Bytes={sourceInfo.Length} " +
+                $"LastWriteUtc={sourceInfo.LastWriteTimeUtc:O} SHA256={Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(replayStream))} " +
+                $"Version={ctx.Replay.FormatVersion} RunTime={ctx.Replay.RunTimeSeconds:R} Ticks={ctx.Replay.TickCount} " +
+                $"Stage={ctx.Replay.StageNumber} Map={ctx.Replay.MapName}");
+        ctx.Log("Info", $"CaptureFrozenSettings {System.Text.Json.JsonSerializer.Serialize(ctx.Settings)}");
+        ctx.Repository.CreateAttempt(attempt);
 
-            try
+        ctx.Repository.SaveRunnerSession(new RunnerSessionRecord(
+            ProcessId: ctx.Game.ProcessId,
+            NetConPort: null,
+            NetConPassword: null,
+            TaskId: taskId,
+            NodeId: nodeId,
+            ExePath: ctx.Game.ExePath,
+            ProcessStartedAt: ctx.Game.ProcessStartTimeUtc,
+            GameSessionId: ctx.Game.GameSessionId,
+            CaptureSessionId: captureSession.CaptureSessionId,
+            SequencePrefix: captureSession.SequencePrefix,
+            OwnershipToken: attemptId,
+            WatchDirectory: ctx.Settings.WatchDirectory));
+
+        void SetStage(NodeExecutionStage stage)
+        {
+            if (stage != attempt.Stage)
             {
-                SetStage(NodeExecutionStage.Preflight);
-                var clip = await ExecuteAttemptAsync(ctx, attempt, captureSession, tempClip, SetStage, token);
-                SetStage(NodeExecutionStage.Completed);
-                ctx.Repository.CompleteAttempt(attemptId, attempt.FedCount, attempt.SubmittedFrameCount, attempt.LastTgaIndex);
-                return clip;
-            }
-            catch (OperationCanceledException)
-            {
-                lastKind = RecordingFailureKind.UserCanceled;
-                lastError = "用户取消。";
-                await CleanupAndRecordFailureAsync(ctx, attempt, CleanupReason.UserCanceled, lastKind.Value, lastError, token);
-                throw;
-            }
-            catch (Exception ex)
-            {
-                lastKind = RecordingFailureClassifier.Classify(ex);
-                lastError = ex.Message;
-                ctx.Log(
-                    "Error",
-                    BuildAttemptFailureDiagnostics(
-                        attempt,
-                        lastKind.Value,
-                        tempClip,
-                        partialClip,
-                        ex));
-
-                // M4: DiskPressure with a proven controlled stop → validate the
-                // partial, commit it atomically to the independent partial path,
-                // and persist it as Validated. Any failure in this chain leaves
-                // the attempt with no validated partial (conservative cleanup).
-                if (ex is DiskPressureException { ControlledStop: { } controlled } && !string.IsNullOrWhiteSpace(partialClip))
-                {
-                    try
-                    {
-                        PersistValidatedPartial(ctx, attempt, tempClip, partialClip, controlled);
-                    }
-                    catch (Exception partialEx)
-                    {
-                        ctx.Log("Warning", $"DiskPressure partial 保存失败（不产生 Validated）：{partialEx.Message}");
-                        TryDelete(partialClip);
-                    }
-                }
-
-                using var cleanupCts = new CancellationTokenSource(ctx.Timeouts.CleanupHardLimit);
-                var cleanup = await ctx.CleanupCoordinator.CleanupAsync(
-                    _activePipeline,
-                    ctx.Game as MomentumProcessController,
-                    CleanupReason.Failed,
-                    cleanupCts.Token);
-                _activePipeline = null;
-
-                ctx.Repository.UpdateAttemptFailure(attemptId, lastKind, lastError, cleanup.CleanupState);
-                foreach (var secondary in cleanup.SecondaryErrors)
-                    ctx.Log("Warning", $"清理次级错误：{secondary}");
-
-                var decision = RecordingRetryPolicy.Decide(
-                    lastKind.Value, attemptIndex, ctx.Timeouts.MaxAttempts,
-                    cleanup.CleanupState == CaptureCleanupState.Clean);
-
-                ctx.Log("Warning",
-                    $"Attempt {attemptNumber} 失败：kind={lastKind} cleanup={cleanup.CleanupState} retry={decision.Action} reason={decision.Reason}\n{lastError}");
-
-                if (decision.Action == RetryAction.NoRetryNeedsUser)
-                {
-                    MarkNodeFailed(ctx, lastKind.Value, lastError);
-                    TryDelete(tempClip);
-                    throw new NodeExecutionFailedException(lastKind.Value, ex);
-                }
-
-                // Recovery before the next attempt.
-                await RecoverAsync(ctx, decision, token);
-                TryDelete(tempClip);
-                attemptNumber++;
-                attemptIndex++;
+                RecordingStateMachine.AssertTransition(attempt.Stage, stage);
+                if (!ctx.Repository.TryTransitionAttemptStage(attemptId, attempt.Stage, stage, attempt.FedCount, attempt.SubmittedFrameCount, attempt.LastTgaIndex))
+                    throw new InvalidOperationException($"数据库 stage 转换被拒：{attempt.Stage} → {stage}");
+                attempt = attempt with { Stage = stage, UpdatedAt = DateTimeOffset.UtcNow };
             }
         }
 
-        MarkNodeFailed(ctx, lastKind ?? RecordingFailureKind.Unknown, lastError ?? "超出最大尝试次数");
-        throw new NodeExecutionFailedException(lastKind ?? RecordingFailureKind.Unknown,
-            new Exception(lastError ?? "超出最大尝试次数"));
+        try
+        {
+            SetStage(NodeExecutionStage.Preflight);
+            var clip = await ExecuteAttemptAsync(ctx, attempt, captureSession, tempClip, SetStage, token);
+            SetStage(NodeExecutionStage.Completed);
+            ctx.Repository.CompleteAttempt(attemptId, attempt.FedCount, attempt.SubmittedFrameCount, attempt.LastTgaIndex);
+            return clip;
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            lastKind = RecordingFailureKind.UserCanceled;
+            lastError = "用户取消。";
+            await CleanupAndRecordFailureAsync(ctx, attempt, CleanupReason.UserCanceled, lastKind.Value, lastError, token);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            lastKind = RecordingFailureClassifier.Classify(ex);
+            lastError = ex.Message;
+            ctx.Log("Error", $"录制失败（{lastKind}）：{lastError}；自动重试已关闭，正在收尾。");
+            ctx.Log(
+                "Error",
+                BuildAttemptFailureDiagnostics(
+                    attempt,
+                    lastKind.Value,
+                    tempClip,
+                    partialClip,
+                    ex));
+
+            // M4: DiskPressure with a proven controlled stop → validate the
+            // partial, commit it atomically to the independent partial path,
+            // and persist it as Validated. Any failure in this chain leaves
+            // the attempt with no validated partial (conservative cleanup).
+            if (ex is DiskPressureException { ControlledStop: { } controlled } && !string.IsNullOrWhiteSpace(partialClip))
+            {
+                try
+                {
+                    PersistValidatedPartial(ctx, attempt, tempClip, partialClip, controlled);
+                }
+                catch (Exception partialEx)
+                {
+                    ctx.Log("Warning", $"DiskPressure partial 保存失败（不产生 Validated）：{partialEx.Message}");
+                    TryDelete(partialClip);
+                }
+            }
+
+            var cleanup = await CleanupAttemptAsync(ctx, CleanupReason.Failed);
+
+            ctx.Repository.UpdateAttemptFailure(attemptId, lastKind, lastError, cleanup.CleanupState);
+            foreach (var secondary in cleanup.SecondaryErrors)
+                ctx.Log("Warning", $"清理次级错误：{secondary}");
+
+            ctx.Log("Warning", $"Attempt {attemptNumber} 失败：kind={lastKind} cleanup={cleanup.CleanupState}；自动重试已关闭。{lastError}");
+            MarkNodeFailed(ctx, lastKind.Value, lastError);
+            TryDelete(tempClip);
+            throw new NodeExecutionFailedException(lastKind.Value, ex);
+        }
     }
 
     private async Task<string> ExecuteAttemptAsync(
@@ -337,6 +330,7 @@ public sealed class NodeExecutionCoordinator
         pipeline.Changed += () => ctx.OnNodeStatusChanged?.Invoke(ctx.Node);
         var health = new GameSessionHealthMonitor(ctx.Game as MomentumProcessController ?? throw new InvalidOperationException("需要 MomentumProcessController 健康监控"), ctx.Settings.WatchDirectory);
         var captureEnvironment = new CaptureConVarScope(ctx.Game.NetCon, ctx.Log);
+        Exception? primaryFailure = null;
 
         try
         {
@@ -356,8 +350,8 @@ public sealed class NodeExecutionCoordinator
                 token);
 
             setStage(NodeExecutionStage.PreparingCaptureBaseline);
-            await pipeline.StartAsync(user, tempClip, captureSession, acceptPreSessionFiles: false);
             _activePipeline = pipeline;
+            await pipeline.StartAsync(user, tempClip, captureSession, acceptPreSessionFiles: false);
 
             var result = await CaptureEnvelopeRecorder.RecordAsync(
                 ctx.Game.NetCon,
@@ -422,13 +416,30 @@ public sealed class NodeExecutionCoordinator
 
             return ctx.StableClipPath;
         }
+        catch (Exception ex)
+        {
+            primaryFailure = ex;
+            if (ex is not OperationCanceledException || !token.IsCancellationRequested)
+                ctx.Log("Error", $"录制失败（{RecordingFailureClassifier.Classify(ex)}）：{ex.Message}；自动重试已关闭，正在收尾。");
+            throw;
+        }
         finally
         {
+            // Keep the consumer and watcher alive until endmovie and physical
+            // quiescence are confirmed. Cleanup drains before disposal/restore.
+            if (primaryFailure is not null)
+                await CleanupAttemptAsync(ctx, token.IsCancellationRequested
+                    ? CleanupReason.UserCanceled : CleanupReason.Failed);
             _activePipeline = null;
+            ctx.Log("Info", pipeline.DiagnosticSummary);
             ctx.Log("Info", pipeline.MotionDiagnosticsSummary);
             try
             {
                 await pipeline.DisposeAsync();
+            }
+            catch (Exception cleanupError) when (primaryFailure is not null)
+            {
+                ctx.Log("Warning", $"管线清理次级错误：{cleanupError.Message}");
             }
             finally
             {
@@ -543,92 +554,6 @@ public sealed class NodeExecutionCoordinator
         }
     }
 
-    private static string? TryRecoverCompleteValidatedPartial(
-        NodeExecutionContext ctx,
-        string nodeDirectory)
-    {
-        var attempts = ctx.Repository
-            .GetAttemptsForNode(ctx.Task.Id, ctx.Node.Id)
-            .Where(static attempt => attempt.PartialState == PartialState.Validated)
-            .OrderByDescending(static attempt => attempt.AttemptNumber)
-            .ToArray();
-        if (attempts.Length == 0)
-            return null;
-
-        var minimumDuration = Math.Max(0.5, ctx.Replay.RunTimeSeconds);
-        var maximumDuration =
-            Math.Max(0.1, ctx.Replay.RunTimeSeconds) +
-            CaptureEnvelopeRecorder.PreSafetySeconds +
-            CaptureEnvelopeRecorder.TailSafetySeconds;
-
-        foreach (var attempt in attempts)
-        {
-            var partialPath = attempt.PartialPath;
-            if (string.IsNullOrWhiteSpace(partialPath) || !File.Exists(partialPath))
-            {
-                ctx.Log(
-                    "Warning",
-                    $"PartialRecoveryRejected：Attempt={attempt.AttemptNumber} 原因=文件不存在 " +
-                    $"Path={partialPath ?? "-"} PersistedFrames={attempt.PartialOutputFrames?.ToString() ?? "-"}。");
-                continue;
-            }
-
-            var probe = ctx.MediaProbe.Probe(partialPath, expectedFps: ProjectConstants.FinalOutputFramerate);
-            var persistedFramesMatch =
-                attempt.PartialOutputFrames is null ||
-                attempt.PartialOutputFrames.Value == probe.FrameCount;
-            var durationComplete =
-                probe.DurationSeconds >= minimumDuration &&
-                probe.DurationSeconds <= maximumDuration;
-
-            ctx.Log(
-                "Info",
-                $"PartialRecoveryEvidence：Attempt={attempt.AttemptNumber} State={attempt.PartialState} " +
-                $"Path={partialPath} Valid={probe.IsValid} Size={probe.Width}x{probe.Height} " +
-                $"Fps={probe.Fps:0.###} Frames={probe.FrameCount} " +
-                $"PersistedFrames={attempt.PartialOutputFrames?.ToString() ?? "-"} " +
-                $"Duration={probe.DurationSeconds:0.###}s " +
-                $"Envelope=[{minimumDuration:0.###},{maximumDuration:0.###}]s " +
-                $"FramesMatch={persistedFramesMatch} DurationComplete={durationComplete} " +
-                $"ProbeError={probe.Error ?? "-"}.");
-
-            if (!probe.IsValid || !persistedFramesMatch || !durationComplete)
-            {
-                ctx.Log(
-                    "Warning",
-                    $"PartialRecoveryRejected：Attempt={attempt.AttemptNumber} " +
-                    $"原因={(probe.IsValid ? "完整性证据不足" : "媒体校验失败")}。");
-                continue;
-            }
-
-            var recoveryTemp = Path.Combine(
-                nodeDirectory,
-                $"recovery_{attempt.AttemptNumber}_{Guid.NewGuid():N}.encoding.mp4");
-            try
-            {
-                File.Copy(partialPath, recoveryTemp, overwrite: false);
-                AtomicFileCommitter.Commit(recoveryTemp, ctx.StableClipPath);
-                ctx.Log(
-                    "Warning",
-                    $"PartialRecoveryCommitted：Attempt={attempt.AttemptNumber} 已验证完整并恢复为正式阶段文件；" +
-                    $"Source={partialPath} Destination={ctx.StableClipPath} Frames={probe.FrameCount} " +
-                    $"Duration={probe.DurationSeconds:0.###}s。原 partial 保留用于审计。");
-                return ctx.StableClipPath;
-            }
-            catch (Exception ex)
-            {
-                TryDelete(recoveryTemp);
-                ctx.Log(
-                    "Error",
-                    $"PartialRecoveryCommitFailed：Attempt={attempt.AttemptNumber} " +
-                    $"Source={partialPath} Destination={ctx.StableClipPath} " +
-                    $"Exception={ex.GetType().FullName}: {ex.Message}\n{ex.StackTrace}");
-            }
-        }
-
-        return null;
-    }
-
     private static string BuildAttemptFailureDiagnostics(
         RenderAttemptRecord attempt,
         RecordingFailureKind failureKind,
@@ -648,6 +573,24 @@ public sealed class NodeExecutionCoordinator
             $"StackTrace={exception.StackTrace ?? "-"}";
     }
 
+    private async Task<CaptureCleanupResult> CleanupAttemptAsync(NodeExecutionContext ctx, CleanupReason reason)
+    {
+        if (_attemptCleanup is not null)
+            return _attemptCleanup;
+
+        using var cleanupCts = new CancellationTokenSource(ctx.Timeouts.CleanupHardLimit);
+        _attemptCleanup = await ctx.CleanupCoordinator.CleanupAsync(
+            _activePipeline,
+            ctx.Game as MomentumProcessController,
+            reason,
+            cleanupCts.Token);
+        ctx.Log("Info", $"CleanupBoundary Reason={reason} MovieStopped={_attemptCleanup.MovieStopConfirmed} " +
+            $"Quiescent={_attemptCleanup.TgaQuiescent} Drained={_attemptCleanup.WatcherDrained} " +
+            $"Finalized={_attemptCleanup.PipelineFinalized} State={_attemptCleanup.CleanupState}");
+        _activePipeline = null;
+        return _attemptCleanup;
+    }
+
     private async Task CleanupAndRecordFailureAsync(
         NodeExecutionContext ctx,
         RenderAttemptRecord attempt,
@@ -656,43 +599,10 @@ public sealed class NodeExecutionCoordinator
         string error,
         CancellationToken token)
     {
-        using var cleanupCts = new CancellationTokenSource(ctx.Timeouts.CleanupHardLimit);
-        var cleanup = await ctx.CleanupCoordinator.CleanupAsync(
-            _activePipeline,
-            ctx.Game as MomentumProcessController,
-            reason,
-            cleanupCts.Token);
-        _activePipeline = null;
+        var cleanup = await CleanupAttemptAsync(ctx, reason);
         ctx.Repository.UpdateAttemptFailure(attempt.Id, kind, error, cleanup.CleanupState);
         foreach (var secondary in cleanup.SecondaryErrors)
             ctx.Log("Warning", $"清理次级错误：{secondary}");
-    }
-
-    private async Task RecoverAsync(NodeExecutionContext ctx, RetryDecision decision, CancellationToken token)
-    {
-        ctx.Log("Info", $"Recovery：{decision.Action}（{decision.Reason}）");
-        switch (decision.Action)
-        {
-            case RetryAction.SameSessionRetry:
-                // Cleanup already proved clean; nothing else to rebuild.
-                break;
-
-            case RetryAction.ReloadMapRetry:
-                _forceMapReload = true;
-                break;
-
-            case RetryAction.RestartGameRetry:
-                using (var cleanupCts = new CancellationTokenSource(ctx.Timeouts.CleanupHardLimit))
-                {
-                    if (ctx.Game.OwnsProcess)
-                        await ctx.Game.ShutdownOwnedProcessAsync(ctx.Timeouts, cleanupCts.Token);
-                }
-                _readyGameSessionId = null;
-                _readyMap = null;
-                _forceMapReload = false;
-                ctx.Log("Info", "游戏会话已销毁，下一 Attempt 将启动全新会话。");
-                break;
-        }
     }
 
     private void MarkNodeFailed(NodeExecutionContext ctx, RecordingFailureKind kind, string error)

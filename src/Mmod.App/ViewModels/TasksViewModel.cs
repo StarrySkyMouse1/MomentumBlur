@@ -374,9 +374,13 @@ public partial class TasksViewModel : ObservableObject
     {
         var selectedId = SelectedTask?.Record.Id;
         Queue.Clear(); History.Clear();
-        foreach (var task in _repository.GetTasks())
+        var tasks = _repository.GetTasks();
+        // One batched query for all node rows: the per-second projection reload
+        // used to open one connection + query per task (N+1) on the UI thread.
+        var nodesByTask = _repository.GetNodesForTasks(tasks.Select(x => x.Id));
+        foreach (var task in tasks)
         {
-            var item = new TaskListItem(task, _repository.GetNodes(task.Id));
+            var item = new TaskListItem(task, nodesByTask[task.Id].ToList());
             if (task.Status is RenderTaskStatus.Completed or RenderTaskStatus.Canceled or RenderTaskStatus.ClipsReadyNeedsManualMerge) History.Add(item); else Queue.Add(item);
         }
         QueueCount = Queue.Count;
@@ -542,14 +546,14 @@ public partial class TasksViewModel : ObservableObject
                 RenderNodeStatus.Completed => $"已完成 {TimeSpan.FromSeconds(node.ElapsedSeconds):mm\\:ss\\.f}",
                 RenderNodeStatus.Recording => "录制中",
                 RenderNodeStatus.Synthesizing => "合成中",
-                RenderNodeStatus.Failed => $"失败 重试 {node.RetryCount}/2",
+                RenderNodeStatus.Failed => "失败 · 等待手动继续",
                 RenderNodeStatus.Skipped => "已跳过",
                 _ => "待执行",
             };
             DetailNodes.Add(new TaskNodeItem(state, $"节点 {node.Sequence + 1} · 阶段 {node.StageNumber}", statusText));
         }
 
-        foreach (var log in _repository.GetLogs(value.Record.Id).TakeLast(20))
+        foreach (var log in _repository.GetLogs(value.Record.Id, 20).TakeLast(20))
             DetailLogs.Add(new TaskLogItem($"{log.Timestamp.LocalDateTime:HH:mm:ss}  [{log.Level}] {log.Message}"));
 
         FrozenComposeText = "（快照不可解析）";
@@ -574,8 +578,8 @@ public partial class TasksViewModel : ObservableObject
         CanEditSelectedTaskForegroundCaptureFpsLimit = !_runner.IsRunning &&
             value.Record.Status is RenderTaskStatus.Pending or RenderTaskStatus.Paused or RenderTaskStatus.FailedNeedsAttention;
 
-        var nodeLines = nodes.Select(x => $"节点 {x.Sequence + 1} / 阶段 {x.StageNumber}：{x.Status}，重试 {x.RetryCount}/2\n{x.ReplayPath}");
-        var logLines = _repository.GetLogs(value.Record.Id).TakeLast(30).Select(x => $"{x.Timestamp.LocalDateTime:MM-dd HH:mm:ss} [{x.Level}] {x.Message}");
+        var nodeLines = nodes.Select(x => $"节点 {x.Sequence + 1} / 阶段 {x.StageNumber}：{x.Status}\n{x.LastError}\n{x.ReplayPath}");
+        var logLines = _repository.GetLogs(value.Record.Id, 30).TakeLast(30).Select(x => $"{x.Timestamp.LocalDateTime:MM-dd HH:mm:ss} [{x.Level}] {x.Message}");
         SelectedTaskDetail = string.Join("\n", nodeLines.Concat(["", "最近日志："]).Concat(logLines));
     }
 
@@ -657,15 +661,15 @@ public partial class TasksViewModel : ObservableObject
         UpdateTelemetry(_runner.RuntimeSnapshot);
         // 运行中也要刷新节点投影；录制管线的高频遥测仍只更新指标，
         // 数据库列表固定每秒读取一次，避免 UI 4 Hz 查询影响捕获线程。
-        if (++_runnerUiTicks % 4 == 0)
+        // 停止的那一拍与 %4 命中可能重叠，合并成一次刷新。
+        var dueRefresh = ++_runnerUiTicks % 4 == 0;
+        if (dueRefresh || !_runner.IsRunning)
         {
             ReloadTasks();
             UpdateRemainingEstimate();
         }
         if (!_runner.IsRunning)
         {
-            ReloadTasks();
-            UpdateRemainingEstimate();
             _runnerUiTimer.Stop();
         }
     }
@@ -697,8 +701,9 @@ public partial class TasksViewModel : ObservableObject
         var remainingNodeCount = 0;
         foreach (var task in Queue)
         {
-            if (!TryReadSupersampling(task.Record, out var supersampling))
+            if (!task.IsSupersamplingKnown)
                 continue;
+            var supersampling = task.Supersampling;
             foreach (var node in task.NodeRecords)
             {
                 if (node.Status is RenderNodeStatus.Completed or RenderNodeStatus.Skipped)
@@ -729,21 +734,6 @@ public partial class TasksViewModel : ObservableObject
         RemainingTimeText = $"约 {FormatRemainingTime(remainingSeconds)}";
         RemainingTimeSubText =
             $"剩余 {remainingNodeCount} 节点 / {remainingInputFrames:N0} 帧 · 实时消费 {_lastEtaConsumptionRate:0.0} fps";
-    }
-
-    private static bool TryReadSupersampling(RenderTaskRecord task, out int supersampling)
-    {
-        try
-        {
-            var settings = System.Text.Json.JsonSerializer.Deserialize<RenderSettingsSnapshot>(task.SettingsJson);
-            supersampling = Math.Clamp(settings?.SupersamplingMultiplier ?? 1, 1, 64);
-            return settings is not null;
-        }
-        catch
-        {
-            supersampling = 1;
-            return false;
-        }
     }
 
     private static string FormatRemainingTime(double seconds)
@@ -949,14 +939,34 @@ public sealed class TaskListItem
         Record = record;
         NodeRecords = nodes.OrderBy(x => x.Sequence).ToArray();
         Nodes = NodeRecords.Select(CreateNodeItem).ToArray();
+        // The ETA loop reads supersampling for every queue task on every 4 Hz
+        // tick; parse the frozen snapshot once per list rebuild instead.
+        (IsSupersamplingKnown, Supersampling) = ReadSupersampling(record.SettingsJson);
     }
 
     public RenderTaskRecord Record { get; }
     public IReadOnlyList<RenderNodeRecord> NodeRecords { get; }
     public IReadOnlyList<TaskNodeItem> Nodes { get; }
+    public bool IsSupersamplingKnown { get; }
+    public int Supersampling { get; }
     public int NodeCount => Nodes.Count;
     public string Title => $"{Record.MapName} · {Record.PlayerName}";
     public string Detail => $"{NodeCount} 个节点 · {Record.Status} · 耗时 {TimeSpan.FromSeconds(Record.ElapsedSeconds):hh\\:mm\\:ss}";
+
+    private static (bool Known, int Supersampling) ReadSupersampling(string settingsJson)
+    {
+        try
+        {
+            var settings = System.Text.Json.JsonSerializer.Deserialize<RenderSettingsSnapshot>(settingsJson);
+            return settings is not null
+                ? (true, Math.Clamp(settings.SupersamplingMultiplier, 1, 64))
+                : (false, 1);
+        }
+        catch
+        {
+            return (false, 1);
+        }
+    }
 
     public TaskPresentationState State => Record.Status switch
     {

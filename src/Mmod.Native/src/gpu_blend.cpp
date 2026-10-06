@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -223,6 +224,7 @@ struct GpuBlendContext {
 
   int width = 0;
   int height = 0;
+  std::string last_error;
   ComPtr<ID3D11Device> device;
   ComPtr<ID3D11DeviceContext> context;
   ComPtr<ID3D11Texture2D> input_tex;
@@ -259,6 +261,19 @@ struct GpuBlendContext {
   ComPtr<ID3D11ComputeShader> cs_deband;
   ComPtr<ID3D11ComputeShader> cs_shimmer;
 };
+
+static bool GpuFailure(GpuBlendContext* ctx, const char* operation, HRESULT hr) {
+  char details[256];
+  std::snprintf(details, sizeof(details), "%s HRESULT=0x%08lX DeviceRemovedReason=0x%08lX",
+                operation, static_cast<unsigned long>(hr),
+                static_cast<unsigned long>(ctx->device->GetDeviceRemovedReason()));
+  ctx->last_error = details;
+  return false;
+}
+
+const char* GpuBlendGetLastError(GpuBlendContext* ctx) {
+  return ctx ? ctx->last_error.c_str() : "GPU context missing";
+}
 
 static bool CreateFloatTexture(GpuBlendContext* ctx,
                                ID3D11Texture2D** tex,
@@ -394,8 +409,8 @@ bool GpuBlendAccumulate(GpuBlendContext* ctx, const uint8_t* bgra, int stride, f
   auto& upload = ctx->input_staging[ctx->next_upload_slot];
   ctx->next_upload_slot = (ctx->next_upload_slot + 1) % GpuBlendContext::kUploadSlotCount;
   D3D11_MAPPED_SUBRESOURCE mapped{};
-  if (FAILED(ctx->context->Map(upload.Get(), 0, D3D11_MAP_WRITE, 0, &mapped)))
-    return false;
+  const HRESULT upload_hr = ctx->context->Map(upload.Get(), 0, D3D11_MAP_WRITE, 0, &mapped);
+  if (FAILED(upload_hr)) return GpuFailure(ctx, "Map(input upload)", upload_hr);
 
   for (int y = 0; y < ctx->height; ++y) {
     const uint8_t* src = bgra + static_cast<size_t>(y) * static_cast<size_t>(stride);
@@ -412,12 +427,13 @@ bool GpuBlendAccumulate(GpuBlendContext* ctx, const uint8_t* bgra, int stride, f
   ctx->context->CopyResource(ctx->input_tex.Get(), upload.Get());
 
   D3D11_MAPPED_SUBRESOURCE cbmap{};
-  if (SUCCEEDED(ctx->context->Map(ctx->weight_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &cbmap))) {
-    float* f = static_cast<float*>(cbmap.pData);
-    f[0] = weight;
-    f[1] = f[2] = f[3] = 0.f;
-    ctx->context->Unmap(ctx->weight_cb.Get(), 0);
-  }
+  const HRESULT weight_hr = ctx->context->Map(ctx->weight_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &cbmap);
+  // Never dispatch with a previous sample's weight after a failed update.
+  if (FAILED(weight_hr)) return GpuFailure(ctx, "Map(blend weight)", weight_hr);
+  float* f = static_cast<float*>(cbmap.pData);
+  f[0] = weight;
+  f[1] = f[2] = f[3] = 0.f;
+  ctx->context->Unmap(ctx->weight_cb.Get(), 0);
 
   ctx->context->CSSetShader(ctx->cs_accum.Get(), nullptr, 0);
   ID3D11ShaderResourceView* srvs[] = { ctx->input_srv.Get() };
@@ -446,8 +462,8 @@ bool GpuBlendPack(GpuBlendContext* ctx, std::vector<uint8_t>& out_bgra) {
 
   ctx->context->CopyResource(ctx->out_staging.Get(), ctx->out_tex.Get());
   D3D11_MAPPED_SUBRESOURCE mapped{};
-  if (FAILED(ctx->context->Map(ctx->out_staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
-    return false;
+  const HRESULT readback_hr = ctx->context->Map(ctx->out_staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+  if (FAILED(readback_hr)) return GpuFailure(ctx, "Map(output readback)", readback_hr);
 
   out_bgra.resize(static_cast<size_t>(ctx->width) * ctx->height * 4u);
   for (int y = 0; y < ctx->height; ++y) {
@@ -557,8 +573,8 @@ bool GpuBlendHasEnabledEffects(GpuBlendContext* ctx) {
 
 static bool UpdateEffectParams(GpuBlendContext* ctx, const MmodEffectDescV1& e) {
   D3D11_MAPPED_SUBRESOURCE map{};
-  if (FAILED(ctx->context->Map(ctx->effect_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map)))
-    return false;
+  const HRESULT hr = ctx->context->Map(ctx->effect_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
+  if (FAILED(hr)) return GpuFailure(ctx, "Map(effect parameters)", hr);
   float* f = static_cast<float*>(map.pData);
   f[0] = e.p0;
   f[1] = e.p1;

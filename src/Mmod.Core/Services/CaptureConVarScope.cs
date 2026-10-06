@@ -1,4 +1,5 @@
 using System.Globalization;
+using Mmod.Core.Models;
 
 namespace Mmod.Core.Services;
 
@@ -21,7 +22,7 @@ public sealed class CaptureConVarScope
 
     public async Task ApplyAsync(int hostFramerate, int? foregroundFpsLimit, CancellationToken token)
     {
-        await _netCon.ExecuteAsync("sv_cheats 1", CommandTimeout, token);
+        await CaptureAndSetRequiredAsync("sv_cheats", 1, 0, token);
 
         await TryCaptureAndSetAsync("mat_queue_mode", 0, token);
         await TryCaptureAndSetAsync("engine_no_focus_sleep", 0, token);
@@ -33,7 +34,12 @@ public sealed class CaptureConVarScope
         await TryCaptureAndSetAsync("sv_maxupdaterate", 60, token);
 
         if (foregroundFpsLimit is > 0)
-            await TryCaptureAndSetAsync("fps_max", foregroundFpsLimit.Value, token);
+        {
+            var original = await TryReadAsync("fps_max", token)
+                ?? throw new RecordingStageException(RecordingFailureKind.InvalidInput,
+                    "无法读取 fps_max 原值，不能设置并恢复录制速率。");
+            await SetCapturedAsync("fps_max", original, foregroundFpsLimit.Value, token);
+        }
 
         // This is the required temporal-supersampling contract. Source builds
         // that do not echo the query are restored to the established safe 0.
@@ -103,8 +109,8 @@ public sealed class CaptureConVarScope
 
     private async Task SetCapturedAsync(string name, double originalValue, double value, CancellationToken token)
     {
-        await _netCon.ExecuteAsync($"{name} {Format(value)}", CommandTimeout, token);
         _captured.Add(new CapturedConVar(name, originalValue));
+        await _netCon.ExecuteAsync($"{name} {Format(value)}", CommandTimeout, token);
         _log("Info", $"录制环境：{name} {Format(value)}（原值 {Format(originalValue)}）");
     }
 
