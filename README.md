@@ -2,14 +2,14 @@
 
 统一版 Momentum 运动模糊合成（OBS + TGA）。只处理画面，不做音轨。
 
-本仓库是唯一工具工程（旧 mmod_record / mmod_record_next 已退役）。设计文档与参考源码在上级工作区：`../docs`、`../reference/SourceDemoRender`。
+本仓库是唯一工具工程（旧 mmod_record / mmod_record_next 已退役）。设计文档与路线图计划在仓库内 `docs/`，参考源码在上级工作区：`../SourceDemoRender`。
 
 ## 运行
 
 原生库 `mmod_native` 用 **CMake + VS C++** 构建（不在纯 C# 工程里）。首次或换机后先配置一次：
 
 ```bat
-cd C:\Projects\else\.net\WPF\mmod_record\MomentumBlur
+cd D:\Projects\Surf\MomentumBlur
 cmake -S src\Mmod.Native -B src\Mmod.Native\build -G "Visual Studio 18 2026" -A x64
 cmake --build src\Mmod.Native\build --config Release
 dotnet run --project src\Mmod.App\Mmod.App.csproj -c Release
@@ -37,7 +37,7 @@ dotnet run --project src\Mmod.App\Mmod.App.csproj -c Release
 | ImDisk | 设置页一键打开内置 RamDiskUI |
 | 编码 | D3D11 mosample + MF H.264（硬件 MFT 优先） |
 | 画质处理 | Motion-Adaptive Detail / Micro Detail Low-Pass / Deband (No Dither) / Temporal Shimmer，全部可独立勾选 |
-| 两阶段预览影片 | 阶段 1 与阶段 2 分别保存到成片输出目录的 `quality-preview/stage1` 和 `quality-preview/stage2`；界面按列表展示影片、生成时间、参数及阶段 2 的阶段 1 来源。阶段 2 只能基于列表中选中的阶段 1 影片生成；影片由系统默认播放器打开，或在资源管理器中定位 |
+| 两阶段预览影片 | 阶段 1 与阶段 2 分别保存到成片输出目录的 `quality-preview/stage1` 和 `quality-preview/stage2`；预览覆盖阶段 1 慢放底片的全部时长（选中回放的完整阶段），不固定截取片段。界面按列表展示影片、生成时间、参数、阶段 2 的阶段 1 来源，以及阶段 2 生成的机器 CPU 占用与耗时；阶段 2 另在 `quality-preview/stage2/logs` 写入逐秒 CPU 采样 CSV。阶段 2 只能基于列表中选中的阶段 1 影片生成；影片由系统默认播放器打开，或在资源管理器中定位 |
 | 色彩描述 | H.264 母版明确标记为 Rec.709 SDR；RGB 输入按 Full Range 解释，编码输出按 Limited Range 标记，避免播放器或后期软件误判黑白位与色彩矩阵 |
 | Motion Blur | Legacy Gaussian Exposure（默认，保持旧行为）+ Shutter Angle 180°~360°（推荐） |
 | KSF 风格预设 | TGA 离线录制一键应用 60× 超采样、360° 全快门、60 fps、120 Mbps，并关闭额外滤镜；参考 SVR 高采样/满曝光语义，不声称复刻 KSF 未公开的频道私有参数 |
